@@ -110,6 +110,74 @@ pub struct Store {
     conn: Connection,
 }
 
+/// Which sandboxes a caller wants back.
+///
+/// Exists because the panel used to fetch every row every five seconds
+/// and filter in the browser. That is fine at a hundred sandboxes and
+/// is the whole page at ten thousand, which is the size this is about
+/// to be asked to run at.
+///
+/// Every field is optional and `None` means "do not narrow by this",
+/// so the default filter is the old `list_sandboxes()` exactly.
+#[derive(Debug, Default, Clone)]
+pub struct SandboxFilter {
+    pub node_id: Option<String>,
+    pub pool: Option<String>,
+    pub tier: Option<String>,
+    pub template: Option<String>,
+    /// Some(true): only ones carrying a last_error. Some(false): only
+    /// ones without. None: both.
+    pub failed: Option<bool>,
+    /// Substring of the id or the template, case-insensitively.
+    pub q: Option<String>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+impl SandboxFilter {
+    /// The WHERE body and its bound values. Values are always bound,
+    /// never interpolated: `q` reaches here from a URL.
+    fn clauses(&self) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+        let mut w: Vec<&str> = Vec::new();
+        let mut v: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        macro_rules! eq {
+            ($field:expr, $sql:literal) => {
+                if let Some(x) = $field.clone() {
+                    w.push($sql);
+                    v.push(Box::new(x));
+                }
+            };
+        }
+        eq!(self.node_id, "node_id = ?");
+        eq!(self.pool, "pool = ?");
+        eq!(self.tier, "tier = ?");
+        eq!(self.template, "template = ?");
+        match self.failed {
+            Some(true) => w.push("last_error IS NOT NULL"),
+            Some(false) => w.push("last_error IS NULL"),
+            None => {}
+        }
+        if let Some(q) = self.q.as_ref().filter(|q| !q.is_empty()) {
+            // LIKE with an escape, so a literal % or _ in a search box
+            // does not turn into a wildcard.
+            let pat = format!(
+                "%{}%",
+                q.replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            );
+            w.push("(id LIKE ? ESCAPE '\\' OR template LIKE ? ESCAPE '\\')");
+            v.push(Box::new(pat.clone()));
+            v.push(Box::new(pat));
+        }
+        if w.is_empty() {
+            (String::new(), v)
+        } else {
+            (format!(" WHERE {}", w.join(" AND ")), v)
+        }
+    }
+}
+
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -500,6 +568,84 @@ impl Store {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM sandboxes WHERE node_id=?1",
             params![node_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The filtered, paged form of `list_sandboxes`.
+    ///
+    /// `list_sandboxes()` is this with a default filter, and stays for the
+    /// callers that genuinely want every row (reconciliation, the SDK's
+    /// list call).
+    pub fn find_sandboxes(&self, f: &SandboxFilter) -> Result<Vec<Sandbox>> {
+        let (where_sql, vals) = f.clauses();
+        let mut sql = format!(
+            "SELECT id, node_id, pool, template, tier, token, volume, port,
+                    created_at, last_active_at, last_error, error_attempts,
+                    net_index, ip, from_tag, memory_limit_mib, gateway_port
+             FROM sandboxes{where_sql}
+             ORDER BY created_at DESC, id"
+        );
+        // LIMIT -1 is sqlite's "no limit", which is what makes an offset
+        // without a limit mean anything.
+        if f.limit.is_some() || f.offset.is_some() {
+            sql.push_str(" LIMIT ? OFFSET ?");
+        }
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vals;
+        if f.limit.is_some() || f.offset.is_some() {
+            params.push(Box::new(f.limit.map(i64::from).unwrap_or(-1)));
+            params.push(Box::new(i64::from(f.offset.unwrap_or(0))));
+        }
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(refs.as_slice(), Self::row_to_sandbox)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// How many match, ignoring limit and offset -- the denominator for
+    /// "showing 50 of 1,284".
+    pub fn count_sandboxes(&self, f: &SandboxFilter) -> Result<u32> {
+        let (where_sql, vals) = f.clauses();
+        let refs: Vec<&dyn rusqlite::ToSql> = vals.iter().map(|b| b.as_ref()).collect();
+        Ok(self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM sandboxes{where_sql}"),
+            refs.as_slice(),
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Sandbox counts per node and tier, for the panel's stacked bars.
+    /// One grouped query instead of the whole table and a tally in the
+    /// browser.
+    pub fn count_sandboxes_by_node_and_tier(
+        &self,
+    ) -> Result<std::collections::HashMap<String, std::collections::HashMap<String, u32>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT node_id, tier, COUNT(*) FROM sandboxes GROUP BY node_id, tier")?;
+        let mut out: std::collections::HashMap<String, std::collections::HashMap<String, u32>> =
+            std::collections::HashMap::new();
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, u32>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (node, tier, n) = row?;
+            *out.entry(node).or_default().entry(tier).or_insert(0) += n;
+        }
+        Ok(out)
+    }
+
+    /// Sandboxes that have a host port allocated for the gateway.
+    pub fn count_sandboxes_with_gateway(&self) -> Result<u32> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM sandboxes WHERE gateway_port IS NOT NULL",
+            [],
             |r| r.get(0),
         )?)
     }
@@ -907,6 +1053,194 @@ mod tests {
         // And it follows a delete, which is what makes a freed slot usable.
         s.delete_sandbox("sb1").unwrap();
         assert_eq!(s.count_sandboxes_on_node("node-a").unwrap(), 1);
+    }
+
+    /// The filter is what stands between the panel and pulling every row
+    /// every five seconds, so each clause gets a case.
+    #[test]
+    fn a_filter_narrows_by_every_field_it_offers() {
+        let s = Store::open_in_memory().unwrap();
+        for (id, node, tier, tpl) in [
+            ("sb1", "node-a", Tier::Hot, "python3.12"),
+            ("sb2", "node-a", Tier::Frozen, "node20"),
+            ("sb3", "node-b", Tier::Hot, "python3.12"),
+            ("sb4", "node-b", Tier::Detached, "node20"),
+        ] {
+            let mut b = sb(id, node);
+            b.tier = tier;
+            b.template = tpl.into();
+            s.insert_sandbox(&b).unwrap();
+        }
+        s.set_sandbox_error("sb4", "no space left on device", 3)
+            .unwrap();
+
+        let by = |f: SandboxFilter| {
+            let mut ids: Vec<String> = s
+                .find_sandboxes(&f)
+                .unwrap()
+                .into_iter()
+                .map(|b| b.id)
+                .collect();
+            ids.sort();
+            (ids, s.count_sandboxes(&f).unwrap())
+        };
+        assert_eq!(by(SandboxFilter::default()).1, 4, "no filter is every row");
+        assert_eq!(
+            by(SandboxFilter {
+                node_id: Some("node-a".into()),
+                ..Default::default()
+            })
+            .0,
+            ["sb1", "sb2"]
+        );
+        assert_eq!(
+            by(SandboxFilter {
+                tier: Some("hot".into()),
+                ..Default::default()
+            })
+            .0,
+            ["sb1", "sb3"]
+        );
+        assert_eq!(
+            by(SandboxFilter {
+                template: Some("node20".into()),
+                ..Default::default()
+            })
+            .0,
+            ["sb2", "sb4"]
+        );
+        assert_eq!(
+            by(SandboxFilter {
+                failed: Some(true),
+                ..Default::default()
+            })
+            .0,
+            ["sb4"]
+        );
+        assert_eq!(
+            by(SandboxFilter {
+                failed: Some(false),
+                ..Default::default()
+            })
+            .0,
+            ["sb1", "sb2", "sb3"]
+        );
+        // q matches the id or the template, and the clauses combine.
+        assert_eq!(
+            by(SandboxFilter {
+                q: Some("node20".into()),
+                ..Default::default()
+            })
+            .0,
+            ["sb2", "sb4"]
+        );
+        assert_eq!(
+            by(SandboxFilter {
+                q: Some("sb3".into()),
+                ..Default::default()
+            })
+            .0,
+            ["sb3"]
+        );
+        assert_eq!(
+            by(SandboxFilter {
+                node_id: Some("node-b".into()),
+                tier: Some("hot".into()),
+                ..Default::default()
+            })
+            .0,
+            ["sb3"]
+        );
+    }
+
+    /// `%` and `_` are sqlite wildcards, and a search box is where someone
+    /// types them. Without the ESCAPE they would quietly match everything.
+    #[test]
+    fn a_wildcard_typed_into_the_search_box_is_a_literal() {
+        let s = Store::open_in_memory().unwrap();
+        let mut a = sb("sb-plain", "node-a");
+        a.template = "py".into();
+        s.insert_sandbox(&a).unwrap();
+        let mut b = sb("sb-100%cpu", "node-a");
+        b.template = "py".into();
+        s.insert_sandbox(&b).unwrap();
+
+        let find = |q: &str| {
+            s.find_sandboxes(&SandboxFilter {
+                q: Some(q.into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .into_iter()
+            .map(|x| x.id)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            find("%"),
+            ["sb-100%cpu"],
+            "a bare % is a character, not every row"
+        );
+        assert_eq!(find("100%c"), ["sb-100%cpu"]);
+        assert!(
+            find("sb_plain").is_empty(),
+            "_ is a character, not any-char"
+        );
+    }
+
+    /// Paging has to be stable and the count has to ignore it, or
+    /// "showing 50 of 1,284" is two unrelated numbers.
+    #[test]
+    fn paging_walks_every_row_once_and_the_count_ignores_it() {
+        let s = Store::open_in_memory().unwrap();
+        for i in 0..25 {
+            let mut b = sb(&format!("sb{i:02}"), "node-a");
+            b.created_at = 1_700_000_000 + i as i64;
+            s.insert_sandbox(&b).unwrap();
+        }
+        let page = |offset: u32| SandboxFilter {
+            limit: Some(10),
+            offset: Some(offset),
+            ..Default::default()
+        };
+        let mut seen: Vec<String> = Vec::new();
+        for off in [0, 10, 20] {
+            let f = page(off);
+            let rows = s.find_sandboxes(&f).unwrap();
+            assert_eq!(
+                s.count_sandboxes(&f).unwrap(),
+                25,
+                "the count is of matches, not of the page"
+            );
+            seen.extend(rows.into_iter().map(|b| b.id));
+        }
+        assert_eq!(seen.len(), 25);
+        let mut uniq = seen.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), 25, "no row appeared on two pages");
+    }
+
+    #[test]
+    fn counts_by_node_and_tier_match_the_rows() {
+        let s = Store::open_in_memory().unwrap();
+        for (id, node, tier) in [
+            ("sb1", "node-a", Tier::Hot),
+            ("sb2", "node-a", Tier::Hot),
+            ("sb3", "node-a", Tier::Frozen),
+            ("sb4", "node-b", Tier::Detached),
+        ] {
+            let mut b = sb(id, node);
+            b.tier = tier;
+            s.insert_sandbox(&b).unwrap();
+        }
+        let by = s.count_sandboxes_by_node_and_tier().unwrap();
+        assert_eq!(by["node-a"]["hot"], 2);
+        assert_eq!(by["node-a"]["frozen"], 1);
+        assert_eq!(by["node-b"]["detached"], 1);
+        assert!(
+            !by["node-b"].contains_key("hot"),
+            "a tier with nothing in it is absent"
+        );
     }
 
     /// A registration token is worth exactly one node.

@@ -446,6 +446,62 @@ impl Metrics {
     }
 }
 
+/// The store, and the only way to take it.
+///
+/// A plain `Mutex<Store>` beside the metrics was not enough: making the
+/// field private still left `self.store.lock()` reachable from the same
+/// module, and ten call sites written across two lines survived the edit
+/// that was meant to route them all through the timed path. They compiled,
+/// they were correct, and they were invisible to
+/// `forkd_store_lock_wait_seconds` -- so the number was a sample of
+/// whoever remembered, which is exactly what it was added to stop being.
+///
+/// `inner` is private to this module, so api.rs cannot take the mutex at
+/// all. The only way in is `lock()`, and the only way to hold it is the
+/// guard, which reports on drop.
+pub struct TimedStore {
+    inner: parking_lot::Mutex<Store>,
+}
+
+impl TimedStore {
+    pub fn new(store: Store) -> Self {
+        Self {
+            inner: parking_lot::Mutex::new(store),
+        }
+    }
+
+    pub fn lock<'a>(&'a self, m: &'a Metrics) -> StoreGuard<'a> {
+        let queued = Instant::now();
+        let inner = self.inner.lock();
+        m.store_wait.observe(queued.elapsed());
+        StoreGuard {
+            inner,
+            metrics: m,
+            since: Instant::now(),
+        }
+    }
+}
+
+/// A held store lock that reports how long it was held when it is dropped.
+pub struct StoreGuard<'a> {
+    inner: parking_lot::MutexGuard<'a, Store>,
+    metrics: &'a Metrics,
+    since: Instant,
+}
+
+impl std::ops::Deref for StoreGuard<'_> {
+    type Target = Store;
+    fn deref(&self) -> &Store {
+        &self.inner
+    }
+}
+
+impl Drop for StoreGuard<'_> {
+    fn drop(&mut self) {
+        self.metrics.store_held.observe(self.since.elapsed());
+    }
+}
+
 /// Render against a live master, taking the store lock once for the gauges.
 pub fn render_with(st: &super::api::MasterState) -> anyhow::Result<String> {
     let store = st.store();

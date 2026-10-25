@@ -1084,6 +1084,171 @@ async fn a_loaded_node_stops_being_given_sandboxes() {
     assert_eq!(create().await.status(), 201);
 }
 
+/// The panel used to GET /v1/sandboxes every five seconds and filter the
+/// whole list in the browser. At 20k sandboxes that response measured
+/// 7.0 MB and took 235 ms to build -- all of it while holding the store
+/// lock, every five seconds, per open tab. These are the parameters that
+/// let it ask for what it is going to show.
+#[tokio::test]
+async fn the_sandbox_list_can_be_narrowed_and_paged() {
+    let h = start().await;
+    let c = reqwest::Client::new();
+    register(&h, "bm-1", "default").await;
+    register(&h, "bm-2", "default").await;
+    put_template(&h, "python").await;
+    put_template(&h, "node20").await;
+
+    let mut ids = Vec::new();
+    for i in 0..12 {
+        let body = serde_json::json!({
+            "template": if i % 2 == 0 { "python" } else { "node20" },
+            "node_id": if i < 7 { "bm-1" } else { "bm-2" },
+        });
+        let r: serde_json::Value = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(r["id"].as_str().unwrap().to_string());
+    }
+
+    // (query, how many rows, what the total header says)
+    let cases: &[(&str, usize, &str)] = &[
+        ("", 12, "12"),
+        ("?node_id=bm-1", 7, "7"),
+        ("?node_id=bm-2", 5, "5"),
+        ("?template=node20", 6, "6"),
+        ("?tier=hot", 12, "12"),
+        ("?tier=detached", 0, "0"),
+        ("?failed=true", 0, "0"),
+        ("?q=node20", 6, "6"),
+        ("?limit=5", 5, "12"),
+        ("?limit=5&offset=10", 2, "12"),
+        ("?node_id=bm-1&template=python&limit=2", 2, "4"),
+    ];
+    for (qs, rows, total) in cases {
+        let r = c
+            .get(format!("{}/v1/sandboxes{qs}", h.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            r.headers()
+                .get("x-forkd-total")
+                .map(|v| v.to_str().unwrap().to_string()),
+            Some(total.to_string()),
+            "total for {qs}"
+        );
+        let body: Vec<serde_json::Value> = r.json().await.unwrap();
+        assert_eq!(body.len(), *rows, "rows for {qs}");
+    }
+
+    // Paging covers every row exactly once.
+    let mut seen = std::collections::HashSet::new();
+    for off in [0, 5, 10] {
+        let page: Vec<serde_json::Value> = c
+            .get(format!("{}/v1/sandboxes?limit=5&offset={off}", h.base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        for s in page {
+            assert!(
+                seen.insert(s["id"].as_str().unwrap().to_string()),
+                "a row on two pages"
+            );
+        }
+    }
+    assert_eq!(seen.len(), 12);
+
+    // And a search for a single id finds exactly it, which is the thing
+    // an operator actually does with the box.
+    let one: Vec<serde_json::Value> = c
+        .get(format!("{}/v1/sandboxes?q={}", h.base, ids[3]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(one.len(), 1);
+    assert_eq!(one[0]["id"], ids[3]);
+}
+
+/// The overview's four numbers and its two charts, as counts. Before this
+/// the only way to produce them was to fetch every row.
+#[tokio::test]
+async fn stats_answers_the_overview_without_any_rows() {
+    let h = start().await;
+    let c = reqwest::Client::new();
+    register(&h, "bm-1", "default").await;
+    register(&h, "bm-2", "default").await;
+    put_template(&h, "python").await;
+
+    let mut ids = Vec::new();
+    for i in 0..6 {
+        let r: serde_json::Value = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({
+                "template": "python",
+                "node_id": if i < 4 { "bm-1" } else { "bm-2" },
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(r["id"].as_str().unwrap().to_string());
+    }
+    c.post(format!("{}/v1/sandboxes/{}/tier", h.base, ids[0]))
+        .json(&serde_json::json!({ "tier": "frozen" }))
+        .send()
+        .await
+        .unwrap();
+
+    let s: serde_json::Value = c
+        .get(format!("{}/v1/stats", h.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(s["sandboxes"]["total"], 6);
+    assert_eq!(s["sandboxes"]["by_tier"]["hot"], 5);
+    assert_eq!(s["sandboxes"]["by_tier"]["frozen"], 1);
+    assert_eq!(s["sandboxes"]["by_node"]["bm-1"]["hot"], 3);
+    assert_eq!(s["sandboxes"]["by_node"]["bm-2"]["hot"], 2);
+    assert_eq!(s["nodes"]["total"], 2);
+    assert_eq!(s["sandboxes"]["failed"], 0);
+
+    // The node list carries its own count now, so the Nodes table does
+    // not have to tally the sandbox list either.
+    let nodes: serde_json::Value = c
+        .get(format!("{}/v1/nodes", h.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let by_id: std::collections::HashMap<_, _> = nodes
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| (n["id"].as_str().unwrap(), n["sandboxes"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(by_id["bm-1"], 4);
+    assert_eq!(by_id["bm-2"], 2);
+}
+
 /// `max_sandboxes` is what the node says it will carry. It was reported on
 /// every registration, stored, and shown in the panel as "6 / 64" -- and
 /// nothing read it: admission looked only at memory and pressure, so the

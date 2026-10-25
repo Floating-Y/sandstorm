@@ -1,7 +1,7 @@
 //! The master's HTTP surface: sandboxes for callers, poll and register for
 //! nodes.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -20,13 +20,15 @@ use crate::identity::{random_token, Ca};
 use crate::proto::{
     Command, CommandResult, PollRequest, PollResponse, RegisterRequest, RegisterResponse,
 };
-use crate::state::{now_secs, Node, Sandbox, SnapshotTag, Store};
+use crate::state::{now_secs, Node, Sandbox, SandboxFilter, SnapshotTag, Store};
 use crate::tier::{IdlePolicy, Tier};
 
 pub struct MasterState {
-    /// Private on purpose: `store()` is the only way in, so that no call
-    /// site can take the mutex without being timed. See `StoreGuard`.
-    store: Mutex<Store>,
+    /// Not a `Mutex<Store>`: `TimedStore` keeps the mutex private to
+    /// metrics.rs, so nothing in this file can take it without being
+    /// timed. See the type's own note for why that had to be enforced by
+    /// the compiler rather than by a comment.
+    store: metrics::TimedStore,
     pub ca: Mutex<Ca>,
     pub idle: IdlePolicy,
     /// Range the master allocates sandbox ports from, per node.
@@ -77,26 +79,6 @@ pub struct MasterState {
     /// master over loopback, so an unauthenticated control plane means a
     /// sandbox can mint node tokens and delete other sandboxes.
     api_token: Option<Arc<String>>,
-}
-
-/// A held store lock that reports how long it was held when it is dropped.
-pub struct StoreGuard<'a> {
-    inner: parking_lot::MutexGuard<'a, Store>,
-    metrics: &'a metrics::Metrics,
-    since: Instant,
-}
-
-impl std::ops::Deref for StoreGuard<'_> {
-    type Target = Store;
-    fn deref(&self) -> &Store {
-        &self.inner
-    }
-}
-
-impl Drop for StoreGuard<'_> {
-    fn drop(&mut self) {
-        self.metrics.store_held.observe(self.since.elapsed());
-    }
 }
 
 /// When a node is too loaded to take another sandbox.
@@ -194,7 +176,7 @@ impl MasterState {
 
     pub fn new(store: Store, ca: Ca, opts: MasterOptions) -> Self {
         Self {
-            store: Mutex::new(store),
+            store: metrics::TimedStore::new(store),
             ca: Mutex::new(ca),
             idle: opts.idle,
             port_range: opts.port_range,
@@ -219,15 +201,8 @@ impl MasterState {
     /// One mutex guards one sqlite connection, so this is where the master
     /// serialises; a load test that cannot see this number cannot tell a
     /// slow node from a queue in front of the database.
-    pub fn store(&self) -> StoreGuard<'_> {
-        let queued = Instant::now();
-        let inner = self.store.lock();
-        self.metrics.store_wait.observe(queued.elapsed());
-        StoreGuard {
-            inner,
-            metrics: &self.metrics,
-            since: Instant::now(),
-        }
+    pub fn store(&self) -> metrics::StoreGuard<'_> {
+        self.store.lock(&self.metrics)
     }
 
     /// The token a freshly registered node needs for its later calls.
@@ -326,6 +301,7 @@ pub fn router(st: St) -> Router {
         .route("/v1/node-bootstrap", post(node_bootstrap))
         .route("/v1/node/revoke/:id", post(revoke_node))
         .route("/v1/sandboxes", get(list_sandboxes).post(create_sandbox))
+        .route("/v1/stats", get(stats))
         .route("/v1/sandboxes/:id", get(get_sandbox).delete(delete_sandbox))
         .route("/v1/sandboxes/:id/touch", post(touch_sandbox))
         .route("/v1/sandboxes/:id/retry", post(retry_sandbox))
@@ -597,8 +573,7 @@ async fn revoke_node(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     let gone = st
-        .store
-        .lock()
+        .store()
         .revoke_node(&id)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if !gone {
@@ -628,6 +603,9 @@ struct NodeView {
     last_seen_at: i64,
     free_mib: u64,
     psi_some_avg10: f64,
+    /// How many sandboxes it is carrying. The panel used to work this out
+    /// by tallying the whole sandbox list in the browser.
+    sandboxes: u32,
     /// Present when this node would currently refuse a new sandbox.
     #[serde(skip_serializing_if = "Option::is_none")]
     not_admitting: Option<String>,
@@ -655,6 +633,7 @@ async fn list_nodes(State(st): State<St>) -> Result<Json<Vec<NodeView>>, ApiErr>
             .into_iter()
             .map(|(n, load)| NodeView {
                 not_admitting: st.admit.refuse(&n, load),
+                sandboxes: load,
                 id: n.id,
                 pool: n.pool,
                 fingerprint: n.fingerprint,
@@ -696,8 +675,7 @@ async fn create_node_token(
     Json(req): Json<NewNodeToken>,
 ) -> Result<Json<NodeTokenView>, ApiErr> {
     let secret = random_token();
-    st.store
-        .lock()
+    st.store()
         .create_node_token(&secret, &req.pool, req.ttl_secs)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     // Handed out with the CA fingerprint so the node can verify the master
@@ -755,8 +733,7 @@ async fn node_bootstrap(
     Json(req): Json<BootstrapReq>,
 ) -> Result<Json<BootstrapView>, ApiErr> {
     let secret = random_token();
-    st.store
-        .lock()
+    st.store()
         .create_node_token(&secret, &req.pool, req.ttl_secs)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let token = st
@@ -856,8 +833,7 @@ async fn register(
     let cert_fp = crate::tls::fingerprint_of_pem(&cert)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    st.store
-        .lock()
+    st.store()
         .upsert_node(&Node {
             id: req.node_id.clone(),
             pool: pool.clone(),
@@ -869,8 +845,7 @@ async fn register(
             psi_some_avg10: 0.0,
         })
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    st.store
-        .lock()
+    st.store()
         .set_node_cert(&req.node_id, &cert_fp)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -1450,8 +1425,7 @@ async fn branch_sandbox(
 
 async fn list_snapshots(State(st): State<St>) -> Result<Json<Vec<SnapshotView>>, ApiErr> {
     let all = st
-        .store
-        .lock()
+        .store()
         .list_snapshots()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(all.into_iter().map(Into::into).collect()))
@@ -2043,13 +2017,130 @@ fn pick_node(st: &St, store: &Store, pool: &str) -> Result<String, ApiErr> {
     }
 }
 
-async fn list_sandboxes(State(st): State<St>) -> Result<Json<Vec<SandboxView>>, ApiErr> {
-    let all = st
-        .store
-        .lock()
-        .list_sandboxes()
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(all.into_iter().map(Into::into).collect()))
+/// What `GET /v1/sandboxes` accepts to narrow the list.
+///
+/// Every field is optional and no field means the whole list, exactly as
+/// before -- the v0.5 SDK calls this with no query string and must keep
+/// getting every row.
+#[derive(Debug, Default, Deserialize)]
+struct SandboxQuery {
+    node_id: Option<String>,
+    pool: Option<String>,
+    tier: Option<String>,
+    template: Option<String>,
+    failed: Option<bool>,
+    /// Substring of the id or template.
+    q: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+}
+
+/// Largest page this will serve. A caller asking for more gets this many;
+/// a caller asking for none still gets everything, which is what the SDK
+/// depends on. The cap is here so a typo in a URL cannot ask the master to
+/// serialise a hundred thousand rows into one response.
+const MAX_PAGE: u32 = 2000;
+
+async fn list_sandboxes(
+    State(st): State<St>,
+    Query(q): Query<SandboxQuery>,
+) -> Result<impl IntoResponse, ApiErr> {
+    let filter = SandboxFilter {
+        node_id: q.node_id,
+        pool: q.pool,
+        tier: q.tier,
+        template: q.template,
+        failed: q.failed,
+        q: q.q,
+        limit: q.limit.map(|n| n.min(MAX_PAGE)),
+        offset: q.offset,
+    };
+    let (rows, total) = {
+        let store = st.store();
+        let rows = store
+            .find_sandboxes(&filter)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        // Counted under the same lock as the page, so "showing 50 of 1,284"
+        // cannot be 50 of a number that was true a moment ago.
+        let total = store
+            .count_sandboxes(&filter)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        (rows, total)
+    };
+    // The total goes in a header rather than wrapping the array: the body
+    // stays the list every existing caller already parses.
+    Ok((
+        [("x-forkd-total", total.to_string())],
+        Json(
+            rows.into_iter()
+                .map(SandboxView::from)
+                .collect::<Vec<SandboxView>>(),
+        ),
+    ))
+}
+
+/// Everything the panel's overview needs, as counts rather than rows.
+///
+/// The overview used to derive all of this from the full sandbox list,
+/// which meant pulling every row every five seconds to show four numbers
+/// and a bar chart.
+#[derive(Serialize)]
+struct StatsView {
+    nodes: NodeStats,
+    sandboxes: SandboxStats,
+    snapshots: SnapshotStats,
+}
+
+#[derive(Serialize)]
+struct NodeStats {
+    total: u32,
+    connected: u32,
+    /// Sum of what the connected nodes declared, 0 where none declared a
+    /// cap -- the denominator for "capacity in use".
+    capacity: u32,
+}
+
+#[derive(Serialize)]
+struct SandboxStats {
+    total: u32,
+    failed: u32,
+    with_gateway_port: u32,
+    by_tier: HashMap<String, u32>,
+    by_node: HashMap<String, HashMap<String, u32>>,
+}
+
+#[derive(Serialize)]
+struct SnapshotStats {
+    count: u32,
+    bytes: u64,
+}
+
+async fn stats(State(st): State<St>) -> Result<Json<StatsView>, ApiErr> {
+    let store = st.store();
+    let oops = |e: anyhow::Error| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    let nodes = store.list_nodes().map_err(oops)?;
+    let (count, bytes) = store.snapshot_totals().map_err(oops)?;
+    Ok(Json(StatsView {
+        nodes: NodeStats {
+            total: nodes.len() as u32,
+            connected: nodes.iter().filter(|n| n.connected).count() as u32,
+            capacity: nodes
+                .iter()
+                .filter(|n| n.connected)
+                .map(|n| n.max_sandboxes)
+                .sum(),
+        },
+        sandboxes: SandboxStats {
+            total: store
+                .count_sandboxes(&SandboxFilter::default())
+                .map_err(oops)?,
+            failed: store.count_failed_sandboxes().map_err(oops)?,
+            with_gateway_port: store.count_sandboxes_with_gateway().map_err(oops)?,
+            by_tier: store.count_sandboxes_by_tier().map_err(oops)?,
+            by_node: store.count_sandboxes_by_node_and_tier().map_err(oops)?,
+        },
+        snapshots: SnapshotStats { count, bytes },
+    }))
 }
 
 async fn get_sandbox(
@@ -2057,8 +2148,7 @@ async fn get_sandbox(
     Path(id): Path<String>,
 ) -> Result<Json<SandboxView>, ApiErr> {
     let got = st
-        .store
-        .lock()
+        .store()
         .get_sandbox(&id)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     got.map(|s| Json(s.into()))
@@ -2138,8 +2228,7 @@ async fn put_template(
     State(st): State<St>,
     Json(req): Json<NewTemplate>,
 ) -> Result<StatusCode, ApiErr> {
-    st.store
-        .lock()
+    st.store()
         .put_template(&req.name, &req.rootfs, &req.spec.to_string())
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(StatusCode::CREATED)
@@ -2147,8 +2236,7 @@ async fn put_template(
 
 async fn list_templates(State(st): State<St>) -> Result<Json<Vec<String>>, ApiErr> {
     let names = st
-        .store
-        .lock()
+        .store()
         .list_templates()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(names))

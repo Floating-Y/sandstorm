@@ -26,6 +26,45 @@ load balancers can probe the daemon without a credential.
 { "ok": true }
 ```
 
+### GET /v1/stats
+
+Counts, for a dashboard that wants the shape of the fleet rather than its
+rows.
+
+```json
+{ "nodes":     { "total": 4, "connected": 3, "capacity": 192 },
+  "sandboxes": { "total": 20148, "failed": 3, "with_gateway_port": 17925,
+                 "by_tier": { "hot": 6177, "frozen": 6020, "...": 0 },
+                 "by_node": { "bj-1": { "hot": 1544, "...": 0 } } },
+  "snapshots": { "count": 4, "bytes": 2207543296 } }
+```
+
+Measured against 20,148 sandboxes: this is **499 bytes in 19 ms**, where
+`GET /v1/sandboxes` is **7.0 MB in 235 ms** — and that 235 ms is spent
+holding the store lock, so a dashboard polling the full list was taking
+the master's one lock for a quarter of a second every five seconds, per
+open tab.
+
+### GET /v1/sandboxes — narrowing it
+
+Every parameter is optional, and **no parameters returns every sandbox**,
+which is what the v0.5 SDK depends on.
+
+| | |
+|---|---|
+| `node_id`, `pool`, `tier`, `template` | exact match |
+| `failed` | `true` for only the ones carrying a `last_error`, `false` for only the ones without |
+| `q` | substring of the id or the template. `%` and `_` are literals, not wildcards |
+| `limit`, `offset` | a page; `limit` is capped at 2000 |
+
+The number of matches **before** paging comes back in the
+`x-forkd-total` response header, so the body stays the plain array:
+
+```
+$ curl -sD- -o/dev/null '.../v1/sandboxes?failed=true&limit=20' | grep -i total
+x-forkd-total: 3
+```
+
 ### GET /metrics
 
 Prometheus text exposition (`text/plain; version=0.0.4`). **Behind the
@@ -62,20 +101,6 @@ A capacity refusal is a 503, so it lands in
 `forkd_http_responses_total{class="server_error"}`.
 `forkd_sandbox_creates_total{outcome="refused"}` is what separates "the
 fleet is full" from "the master is broken".
-
-### GET /version
-
-```json
-{ "version": "0.1.0", "api": "v1" }
-```
-
-### GET /metrics
-
-Prometheus text exposition format. Stable metric names:
-
-- `forkd_snapshots_total` (gauge) — registered snapshots
-- `forkd_sandboxes_active` (gauge) — currently-alive child VMs
-- `forkd_build_info{version="X.Y.Z"}` — always 1, label carries the build version
 
 ---
 

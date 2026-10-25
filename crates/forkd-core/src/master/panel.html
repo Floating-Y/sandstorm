@@ -173,7 +173,24 @@
   .metric .v { font-size: 21px; font-weight: 600; letter-spacing: -.02em; margin-top: 5px; font-variant-numeric: tabular-nums; }
   .metric .s { font-size: 11.5px; color: var(--ink-3); margin-top: 2px; }
 
-  .list-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  .list-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; flex-wrap: wrap; }
+  .filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 12px 0 2px; }
+  .filters input[type=search], .filters select {
+    font: inherit; font-size: 13px; padding: 6px 10px; border-radius: 9px;
+    border: 1px solid var(--line); background: var(--card); color: var(--ink); }
+  .filters input[type=search] { min-width: 230px; }
+  .filters input[type=search]:focus, .filters select:focus { outline: 2px solid var(--t-frozen); outline-offset: 1px; }
+  .toggle { display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px; border-radius: 999px;
+    border: 1px solid var(--line); font-size: 13px; cursor: pointer; user-select: none; white-space: nowrap; }
+  .toggle input { accent-color: var(--critical); margin: 0; }
+  .toggle.on { border-color: var(--critical); background: #fdecec; color: #9a2626; }
+  .filters .spacer { flex: 1; }
+  .pager { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-2);
+    font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .pager button { font: inherit; font-size: 12.5px; padding: 5px 11px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+  .pager button:disabled { color: var(--ink-3); cursor: default; }
+  .pager button:not(:disabled):hover { border-color: var(--ink-3); }
   .tbl { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
   .tbl th { text-align: left; font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase;
     color: var(--ink-3); font-weight: 600; padding: 0 14px 9px 0; border-bottom: 1px solid var(--line);
@@ -338,8 +355,29 @@ const tierColor = (t) => "var(" + (TIER_VAR[t] || "--t-detached") + ")";
 
 let token = sessionStorage.getItem("forkd-token") || "";
 let timer = null;
-let state = { nodes: [], boxes: [], snaps: [] };
+// What the panel holds. Note what is NOT here: the full sandbox list.
+// It used to fetch every row every five seconds and tally it in the
+// browser, which is fine at a hundred sandboxes and is the whole page at
+// ten thousand. The counts now come from /v1/stats and the rows only for
+// the view that shows rows.
+let state = {
+  nodes: [],
+  snaps: [],
+  stats: null,      // /v1/stats -- counts, never rows
+  failed: [],       // the sandboxes that cannot start, for the queue
+  page: [],         // the current page of the Sandboxes view
+  pageTotal: 0,     // how many match the filter, before paging
+};
 let hidden = 0;
+
+// Most dots one ring will draw. Beyond this the ring is a texture rather
+// than one dot per sandbox -- the label on it carries the real number, so
+// nothing on screen claims otherwise.
+const ORBIT_CAP = 70;
+
+const PAGE = 50;
+let filter = { q: "", tier: "", node_id: "", failed: false, offset: 0 };
+let searchTimer = null;
 
 // Which pill is selected. In the hash, so a reload and the back button both
 // land where you were, and a link to a view can be pasted to someone else.
@@ -349,18 +387,45 @@ const readHash = () => {
   return VIEWS.includes(v) ? v : "overview";
 };
 let view = readHash();
-window.addEventListener("hashchange", () => { view = readHash(); if (token) render(); });
+window.addEventListener("hashchange", () => {
+  view = readHash();
+  // The list views share one container; let the next render rebuild it
+  // rather than updating a shell that belongs to another view.
+  const list = document.getElementById("v-list");
+  if (list) list.innerHTML = "";
+  if (token) refresh();
+});
 
 function showErr(m) { $("err").textContent = m; $("err").style.display = m ? "block" : "none"; }
 
-async function api(path, opts) {
+async function raw(path, opts) {
   opts = opts || {};
   const headers = Object.assign({}, opts.headers, { authorization: "Bearer " + token });
   if (opts.body) headers["content-type"] = "application/json";
   const r = await fetch(path, Object.assign({}, opts, { headers }));
   if (r.status === 401 || r.status === 403) { gate(); throw new Error("the API refused this token"); }
   if (!r.ok) throw new Error((await r.text()) || path + " -> " + r.status);
+  return r;
+}
+async function api(path, opts) {
+  const r = await raw(path, opts);
   return r.status === 204 ? null : r.json();
+}
+// A page of sandboxes, with the count of everything that matched. The
+// total is a header rather than an envelope so the body stays the plain
+// array every other caller parses.
+async function apiPage(path) {
+  const r = await raw(path);
+  return { rows: await r.json(), total: Number(r.headers.get("x-forkd-total") || 0) };
+}
+function sandboxQuery(extra) {
+  const p = new URLSearchParams();
+  if (filter.q) p.set("q", filter.q);
+  if (filter.tier) p.set("tier", filter.tier);
+  if (filter.node_id) p.set("node_id", filter.node_id);
+  if (filter.failed) p.set("failed", "true");
+  for (const [k, v] of Object.entries(extra || {})) p.set(k, v);
+  return "/v1/sandboxes?" + p.toString();
 }
 
 function gate() {
@@ -402,7 +467,13 @@ function bindTip(el, html) {
   el.addEventListener("mouseleave", () => { tip.style.opacity = "0"; });
 }
 
-function drawOrbit(boxes) {
+// Drawn from the per-tier COUNTS, not from a list of sandboxes.
+//
+// It used to take one row per dot, which meant the overview could not be
+// shown without fetching every sandbox. Past ORBIT_CAP a ring stops being
+// one dot per sandbox and becomes a texture; the label on it carries the
+// real number, so nothing on screen claims otherwise.
+function drawOrbit(byTier, total) {
   const C = 150;
   const radii = { hot: 44, frozen: 74, snapshot: 103, detached: 131 };
   let out = "";
@@ -412,40 +483,36 @@ function drawOrbit(boxes) {
   }
   out += '<circle cx="' + C + '" cy="' + C + '" r="29" fill="var(--dark-2)" stroke="var(--dark-line)"/>';
   for (const t of TIERS) {
-    const list = boxes.filter((b) => b.tier === t);
-    list.forEach((b, i) => {
-      const a = (i / Math.max(1, list.length)) * Math.PI * 2 + hash01(b.id, "a") * 0.55;
-      const r = radii[t] + (hash01(b.id, "r") - 0.5) * 15;
+    const n = byTier[t] || 0;
+    const dots = Math.min(n, ORBIT_CAP);
+    for (let i = 0; i < dots; i++) {
+      // Seeded on tier and index, so a dot keeps its place between
+      // refreshes instead of jumping every five seconds.
+      const seed = t + ":" + i;
+      const a = (i / Math.max(1, dots)) * Math.PI * 2 + hash01(seed, "a") * 0.55;
+      const r = radii[t] + (hash01(seed, "r") - 0.5) * 15;
       const x = (C + Math.cos(a) * r).toFixed(1), y = (C + Math.sin(a) * r).toFixed(1);
-      const ring = b.last_error ? ' stroke="var(--critical)" stroke-width="2"' : "";
-      out += '<circle class="dot" data-id="' + esc(b.id) + '" cx="' + x + '" cy="' + y +
-        '" r="4.5" fill="' + tierColor(t) + '"' + ring + "></circle>";
-    });
-    // The ring is labelled, so the tier is readable without colour.
-    if (list.length) {
+      out += '<circle cx="' + x + '" cy="' + y + '" r="4.5" fill="' + tierColor(t) + '"></circle>';
+    }
+    // The ring is labelled, so the tier is readable without colour -- and
+    // the number is the true one even where the dots are capped.
+    if (n) {
       out += '<text x="' + C + '" y="' + (C - radii[t] - 5) + '" text-anchor="middle" font-size="9" ' +
-        'letter-spacing="1.1" fill="var(--dark-ink-2)">' + t.toUpperCase() + " " + list.length + "</text>";
+        'letter-spacing="1.1" fill="var(--dark-ink-2)">' + t.toUpperCase() + " " + n.toLocaleString() +
+        (n > dots ? " \u2191" : "") + "</text>";
     }
   }
   $("orbit").innerHTML = out;
-  $("orbit").querySelectorAll(".dot").forEach((d) => {
-    const b = boxes.find((x) => x.id === d.dataset.id);
-    if (!b) return;
-    bindTip(d, "<b>" + esc(b.id.slice(0, 20)) + "…</b><br>" + esc(b.tier) + " on " + esc(b.node_id) +
-      "<br>" + esc(b.template) + (b.gateway_port ? " · :" + b.gateway_port : "") +
-      (b.last_error ? '<br><span style="color:#ef8e8e">' + esc(b.last_error.slice(0, 70)) + "</span>" : ""));
-  });
-  $("orbit-n").textContent = boxes.length;
+  $("orbit-n").textContent = total.toLocaleString();
 }
 
-function drawBars(nodes, boxes) {
+function drawBars(nodes, byNode, total) {
   const el = $("bars");
   if (!nodes.length) { el.innerHTML = '<div class="empty">No nodes yet.</div>'; return; }
   const per = nodes.map((n) => {
-    const mine = boxes.filter((b) => b.node_id === n.id);
-    const counts = {};
-    TIERS.forEach((t) => (counts[t] = mine.filter((b) => b.tier === t).length));
-    return { node: n, total: mine.length, counts: counts };
+    const counts = byNode[n.id] || {};
+    TIERS.forEach((t) => (counts[t] = counts[t] || 0));
+    return { node: n, total: TIERS.reduce((a, t) => a + counts[t], 0), counts: counts };
   });
   const max = Math.max(1, ...per.map((p) => p.total));
   el.innerHTML = per.map((p) => {
@@ -461,7 +528,7 @@ function drawBars(nodes, boxes) {
     bindTip(s, "<b>" + esc(p.node.id) + "</b><br>" + p.counts[s.dataset.t] + " " + s.dataset.t +
       "<br>" + p.total + " total · " + p.node.free_mib + " MiB free");
   });
-  $("bars-sub").textContent = boxes.length + " sandboxes across " + nodes.length +
+  $("bars-sub").textContent = total.toLocaleString() + " sandboxes across " + nodes.length +
     (nodes.length === 1 ? " node" : " nodes");
 }
 
@@ -473,7 +540,7 @@ function queueItems() {
     else if (n.not_admitting) out.push({ sev: "warn", icon: "⬡", t: n.id + " is not admitting",
       m: n.not_admitting, pill: n.free_mib + " MiB", where: n.id, act: null });
   }
-  for (const b of state.boxes) {
+  for (const b of state.failed) {
     if (b.last_error) out.push({ sev: "crit", icon: "▣", t: b.id.slice(0, 20) + "… cannot start",
       m: b.node_id + " · " + b.last_error, pill: (b.error_attempts || 1) + " tries", where: b.node_id,
       act: { label: "Retry now", path: "/v1/sandboxes/" + encodeURIComponent(b.id) + "/retry" } });
@@ -501,7 +568,6 @@ function renderNodes() {
       '<div class="empty">No machine has dialled in. Use &ldquo;+ Add a machine&rdquo; for the one line that joins one.</div>');
   }
   const rows = ns.map((n) => {
-    const mine = state.boxes.filter((b) => b.node_id === n.id);
     const st = !n.connected ? '<span class="pill crit">offline</span>'
       : n.not_admitting ? '<span class="pill warn">not admitting</span>'
       : '<span class="pill">admitting</span>';
@@ -513,40 +579,99 @@ function renderNodes() {
       "<td>" + st + (n.connected && n.not_admitting ? '<p class="sub">' + esc(n.not_admitting) + "</p>" : "") + "</td>" +
       '<td class="num">' + n.free_mib + " MiB</td>" +
       '<td class="num">' + Number(n.psi_some_avg10 || 0).toFixed(1) + "</td>" +
-      '<td class="num">' + mine.length + (n.max_sandboxes ? " / " + n.max_sandboxes : "") + "</td>" +
+      '<td class="num">' + (n.sandboxes || 0).toLocaleString() +
+        (n.max_sandboxes ? " / " + n.max_sandboxes : "") + "</td>" +
       '<td class="num">' + esc(ago(n.last_seen_at)) + "</td></tr>";
   });
   return listPanel("Nodes", ns.filter((n) => n.connected).length + " of " + ns.length + " connected",
     tbl(["Node", "Pool", "State", "Free memory", "PSI some/10s", "Sandboxes", "Last seen"], rows));
 }
 
+function filterBar() {
+  const nodeOpts = ['<option value="">every node</option>'].concat(
+    state.nodes.map((n) => '<option value="' + esc(n.id) + '"' +
+      (filter.node_id === n.id ? " selected" : "") + ">" + esc(n.id) + "</option>")).join("");
+  const tierOpts = ['<option value="">every tier</option>'].concat(
+    TIERS.map((t) => '<option value="' + t + '"' + (filter.tier === t ? " selected" : "") +
+      ">" + t + "</option>")).join("");
+  const shown = state.page.length;
+  const from = shown ? filter.offset + 1 : 0;
+  const to = filter.offset + shown;
+  return '<div class="filters" id="sb-filters">' +
+    '<input type="search" id="f-q" placeholder="id or template" value="' + esc(filter.q) + '">' +
+    '<select id="f-tier">' + tierOpts + "</select>" +
+    '<select id="f-node">' + nodeOpts + "</select>" +
+    '<label class="toggle' + (filter.failed ? " on" : "") + '" id="f-failed-l">' +
+      '<input type="checkbox" id="f-failed"' + (filter.failed ? " checked" : "") + '>failed only</label>' +
+    '<span class="spacer"></span>' +
+    '<span class="pager">' +
+      '<button id="f-prev"' + (filter.offset ? "" : " disabled") + ">\u2190</button>" +
+      '<span id="f-range">' + from.toLocaleString() + "\u2013" + to.toLocaleString() +
+        " of " + state.pageTotal.toLocaleString() + "</span>" +
+      '<button id="f-next"' + (to < state.pageTotal ? "" : " disabled") + ">\u2192</button>" +
+    "</span></div>";
+}
+
 function renderSandboxes() {
-  const bs = state.boxes;
+  const bs = state.page;
+  const narrowed = filter.q || filter.tier || filter.node_id || filter.failed;
+  let body;
   if (!bs.length) {
-    return listPanel("Sandboxes", "none yet",
-      '<div class="empty">Nothing is running. Create one against a node with <span class="mono">POST /v1/sandboxes</span>.</div>');
+    body = '<div class="empty">' + (narrowed
+      ? "Nothing matches that filter."
+      : 'Nothing is running. Create one against a node with <span class="mono">POST /v1/sandboxes</span>.')
+      + "</div>";
+  } else {
+    // The server orders by creation, newest first, and pages it. Sorting
+    // the page itself would reorder fifty rows out of thousands, which
+    // reads as a sort and is not one.
+    const rows = bs.map((b) => {
+      const reach = b.gateway_port ? '<span class="mono">:' + b.gateway_port + "</span>"
+        : '<span style="color:var(--ink-3)">node-local</span>';
+      return '<tr><td><div class="id">' + esc(b.id) + "</div>" +
+        (b.snapshot_tag ? '<p class="sub">from ' + esc(b.snapshot_tag) + "</p>" : "") + "</td>" +
+        "<td>" + esc(b.node_id) + "</td>" +
+        "<td>" + esc(b.template) + "</td>" +
+        "<td>" + tierTag(b.tier) +
+          (b.last_error ? '<p class="sub bad">' + esc(b.last_error) + " (" + (b.error_attempts || 1) + " tries)</p>" : "") +
+          "</td>" +
+        '<td class="num">' + reach +
+          (b.guest_addr ? '<p class="sub mono">' + esc(b.guest_addr) + "</p>" : "") + "</td>" +
+        '<td class="num">' + esc(ago(b.created_at)) + "</td>" +
+        '<td class="num">' + esc(ago(b.last_active_at)) + "</td></tr>";
+    });
+    body = tbl(["Sandbox", "Node", "Template", "Tier", "Reachable on", "Created", "Last active"], rows);
   }
-  const order = (b) => TIERS.indexOf(b.tier);
-  const sorted = bs.slice().sort((a, b) =>
-    (a.last_error ? 0 : 1) - (b.last_error ? 0 : 1) || order(a) - order(b) || b.created_at - a.created_at);
-  const rows = sorted.map((b) => {
-    const reach = b.gateway_port ? '<span class="mono">:' + b.gateway_port + "</span>"
-      : '<span style="color:var(--ink-3)">node-local</span>';
-    return '<tr><td><div class="id">' + esc(b.id) + "</div>" +
-      (b.snapshot_tag ? '<p class="sub">from ' + esc(b.snapshot_tag) + "</p>" : "") + "</td>" +
-      "<td>" + esc(b.node_id) + "</td>" +
-      "<td>" + esc(b.template) + "</td>" +
-      "<td>" + tierTag(b.tier) +
-        (b.last_error ? '<p class="sub bad">' + esc(b.last_error) + " (" + (b.error_attempts || 1) + " tries)</p>" : "") +
-        "</td>" +
-      '<td class="num">' + reach +
-        (b.guest_addr ? '<p class="sub mono">' + esc(b.guest_addr) + "</p>" : "") + "</td>" +
-      '<td class="num">' + esc(ago(b.created_at)) + "</td>" +
-      '<td class="num">' + esc(ago(b.last_active_at)) + "</td></tr>";
-  });
-  const hot = bs.filter((b) => b.tier === "hot").length;
-  return listPanel("Sandboxes", bs.length + " total · " + hot + " serving",
-    tbl(["Sandbox", "Node", "Template", "Tier", "Reachable on", "Created", "Last active"], rows));
+  const st = state.stats && state.stats.sandboxes;
+  const sub = st
+    ? st.total.toLocaleString() + " total \u00b7 " + (st.by_tier.hot || 0).toLocaleString() + " serving"
+      + (st.failed ? " \u00b7 " + st.failed + " failed" : "")
+    : "";
+  return '<div class="panel" id="sb-shell"><div class="list-head"><h3>Sandboxes</h3>' +
+    '<p class="sub" id="sb-sub">' + esc(sub) + "</p></div>" + filterBar() +
+    '<div id="sb-body">' + body + "</div></div>";
+}
+
+/// Refresh the parts that change without rebuilding the controls.
+///
+/// The table re-renders every five seconds. Replacing the whole panel
+/// would take the search box with it -- and with it the caret, the
+/// selection and anything half-typed.
+function updateSandboxes() {
+  const built = renderSandboxes();
+  const doc = new DOMParser().parseFromString(built, "text/html");
+  $("sb-sub").textContent = doc.getElementById("sb-sub").textContent;
+  $("sb-body").innerHTML = doc.getElementById("sb-body").innerHTML;
+  $("f-range").textContent = doc.getElementById("f-range").textContent;
+  $("f-prev").disabled = doc.getElementById("f-prev").disabled;
+  $("f-next").disabled = doc.getElementById("f-next").disabled;
+  // The node list grows as nodes join, so the dropdown has to follow --
+  // but only when it is not the thing being used.
+  const nodeSel = $("f-node");
+  if (document.activeElement !== nodeSel) {
+    const want = doc.getElementById("f-node").innerHTML;
+    if (nodeSel.innerHTML !== want) { nodeSel.innerHTML = want; nodeSel.value = filter.node_id; }
+  }
 }
 
 function renderSnapshots() {
@@ -568,18 +693,25 @@ function renderSnapshots() {
 }
 
 function render() {
-  const nodes = state.nodes, boxes = state.boxes, snaps = state.snaps;
+  const nodes = state.nodes, snaps = state.snaps;
+  const st = state.stats || {
+    nodes: { total: nodes.length, connected: 0, capacity: 0 },
+    sandboxes: { total: 0, failed: 0, with_gateway_port: 0, by_tier: {}, by_node: {} },
+    snapshots: { count: snaps.length, bytes: 0 },
+  };
+  const sb = st.sandboxes;
+  const total = sb.total;
+  const serving = sb.by_tier.hot || 0;
   const up = nodes.filter((n) => n.connected);
-  const serving = boxes.filter((b) => b.tier === "hot");
   const q = queueItems();
   const crit = q.filter((x) => x.sev === "crit").length;
   const warn = q.length - crit;
 
   $("nav-n").querySelector(".n").textContent = nodes.length;
-  $("nav-s").querySelector(".n").textContent = boxes.length;
-  $("nav-t").querySelector(".n").textContent = snaps.length;
+  $("nav-s").querySelector(".n").textContent = total.toLocaleString();
+  $("nav-t").querySelector(".n").textContent = st.snapshots.count;
   $("chip-nodes").textContent = up.length + " of " + nodes.length + (nodes.length === 1 ? " node up" : " nodes up");
-  $("chip-boxes").textContent = serving.length + " serving";
+  $("chip-boxes").textContent = serving.toLocaleString() + " serving";
   $("dot-live").style.background = crit ? "var(--critical)" : q.length ? "var(--warning)" : "var(--good)";
 
   const h = new Date().getHours();
@@ -593,29 +725,33 @@ function render() {
   $("v-overview").style.display = view === "overview" ? "" : "none";
   $("v-list").style.display = view === "overview" ? "none" : "";
   if (view !== "overview") {
-    $("v-list").innerHTML = view === "nodes" ? renderNodes()
-      : view === "sandboxes" ? renderSandboxes() : renderSnapshots();
+    if (view === "sandboxes" && $("sb-shell")) {
+      updateSandboxes();
+    } else {
+      $("v-list").innerHTML = view === "nodes" ? renderNodes()
+        : view === "sandboxes" ? renderSandboxes() : renderSnapshots();
+    }
     return;
   }
 
   $("hero-h").textContent = crit ? crit + (crit === 1 ? " thing needs" : " things need") + " you now"
     : warn ? warn + (warn === 1 ? " node is" : " nodes are") + " holding back"
-    : boxes.length ? "Everything is where it should be" : "Nothing is running yet";
+    : total ? "Everything is where it should be" : "Nothing is running yet";
   $("hero-p").textContent = crit ? q.filter((x) => x.sev === "crit")[0].m
     : warn ? q[0].m
-    : boxes.length ? serving.length + " serving, " + (boxes.length - serving.length) +
+    : total ? serving.toLocaleString() + " serving, " + (total - serving).toLocaleString() +
         " parked on a colder tier. Idle sandboxes fall through frozen and snapshot on their own."
     : "Add a machine, then create a sandbox against it.";
-  $("hero-n").textContent = boxes.length;
-  $("hero-lab").textContent = boxes.length ? serving.length + " serving now" : "";
+  $("hero-n").textContent = total.toLocaleString();
+  $("hero-lab").textContent = total ? serving.toLocaleString() + " serving now" : "";
   $("hero-badge").textContent = up.length + "/" + nodes.length + " nodes";
   $("legend").innerHTML = TIERS.map((t) => {
-    const c = boxes.filter((b) => b.tier === t).length;
-    return '<span><i style="background:' + tierColor(t) + '"></i>' + c + " " + t + "</span>";
+    const c = sb.by_tier[t] || 0;
+    return '<span><i style="background:' + tierColor(t) + '"></i>' + c.toLocaleString() + " " + t + "</span>";
   }).join("");
 
-  drawOrbit(boxes);
-  drawBars(nodes, boxes);
+  drawOrbit(sb.by_tier, total);
+  drawBars(nodes, sb.by_node, total);
 
   $("snaps-sub").textContent = snaps.length
     ? snaps.length + " on " + new Set(snaps.map((s) => s.node_id)).size + " node(s)" : "none yet";
@@ -648,26 +784,84 @@ function render() {
     $("queue").innerHTML = "";
   }
 
-  const cap = nodes.reduce((a, n) => a + (n.max_sandboxes || 0), 0);
-  $("m1").textContent = cap ? Math.round((boxes.length / cap) * 100) + "%" : "—";
-  $("m1s").textContent = cap ? boxes.length + " of " + cap + " slots" : "no node reports a cap";
-  const reach = boxes.filter((b) => b.gateway_port).length;
-  $("m2").textContent = boxes.length ? reach + "/" + boxes.length : "—";
-  $("m2s").textContent = !boxes.length ? "" : reach === boxes.length
-    ? "every sandbox has a gateway port" : (boxes.length - reach) + " are node-local";
+  const cap = st.nodes.capacity;
+  $("m1").textContent = cap ? Math.round((total / cap) * 100) + "%" : "\u2014";
+  $("m1s").textContent = cap ? total.toLocaleString() + " of " + cap.toLocaleString() + " slots"
+    : "no connected node reports a cap";
+  const reach = sb.with_gateway_port;
+  $("m2").textContent = total ? reach.toLocaleString() + "/" + total.toLocaleString() : "\u2014";
+  $("m2s").textContent = !total ? "" : reach === total
+    ? "every sandbox has a gateway port" : (total - reach).toLocaleString() + " are node-local";
 }
 
+// Fetch what the current view needs, and nothing else.
+//
+// The overview needs counts and the handful of sandboxes that cannot
+// start -- not the list. The Sandboxes view needs one page of rows. That
+// is the difference between a request whose size follows the fleet and
+// one that does not.
 async function refresh() {
   try {
-    const r = await Promise.all([api("/v1/nodes"), api("/v1/sandboxes"), api("/v1/snapshots")]);
-    state = { nodes: r[0], boxes: r[1], snaps: r[2] };
+    const jobs = [api("/v1/nodes"), api("/v1/stats")];
+    if (view === "overview") {
+      // Only the failed ones: they are what the queue is made of, and
+      // there are usually none.
+      jobs.push(apiPage("/v1/sandboxes?failed=true&limit=20"));
+      jobs.push(api("/v1/snapshots"));
+    } else if (view === "sandboxes") {
+      jobs.push(apiPage(sandboxQuery({ limit: PAGE, offset: filter.offset })));
+    } else if (view === "snapshots") {
+      jobs.push(api("/v1/snapshots"));
+    }
+    const r = await Promise.all(jobs);
+    state.nodes = r[0];
+    state.stats = r[1];
+    if (view === "overview") { state.failed = r[2].rows; state.snaps = r[3]; }
+    else if (view === "sandboxes") {
+      state.page = r[2].rows;
+      state.pageTotal = r[2].total;
+      // A filter that shrank past the current page leaves you looking at
+      // an empty one; step back rather than showing nothing.
+      if (!state.page.length && filter.offset > 0) {
+        filter.offset = Math.max(0, Math.min(filter.offset, state.pageTotal - 1) - (state.pageTotal % PAGE || PAGE) + 1);
+        filter.offset = Math.floor(filter.offset / PAGE) * PAGE;
+        return refresh();
+      }
+    } else if (view === "snapshots") { state.snaps = r[2]; }
     showErr(""); render();
   } catch (e) { showErr(String(e.message || e)); }
 }
 
+// Delegated, because the controls are rebuilt whenever the view is.
+document.addEventListener("input", (ev) => {
+  if (ev.target.id !== "f-q") return;
+  const v = ev.target.value;
+  clearTimeout(searchTimer);
+  // Debounced: a filter per keystroke would be a query per keystroke.
+  searchTimer = setTimeout(() => {
+    filter.q = v.trim(); filter.offset = 0; refresh();
+  }, 300);
+});
+document.addEventListener("change", (ev) => {
+  const id = ev.target.id;
+  if (id === "f-tier") filter.tier = ev.target.value;
+  else if (id === "f-node") filter.node_id = ev.target.value;
+  else if (id === "f-failed") {
+    filter.failed = ev.target.checked;
+    $("f-failed-l").classList.toggle("on", filter.failed);
+  } else return;
+  filter.offset = 0;
+  refresh();
+});
+
 document.addEventListener("click", async (ev) => {
   const t = ev.target.closest ? ev.target.closest("button") : null;
   if (!t) return;
+  if (t.id === "f-prev" || t.id === "f-next") {
+    filter.offset = Math.max(0, filter.offset + (t.id === "f-next" ? PAGE : -PAGE));
+    refresh();
+    return;
+  }
   if (t.id === "dismiss") {
     hidden = Date.now() + 60000;
     $("lead").innerHTML = '<div class="empty">Hidden for a minute.</div>';
