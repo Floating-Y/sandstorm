@@ -77,6 +77,10 @@ impl Default for RuntimeConfig {
     }
 }
 
+/// Holds no state of its own beyond its configuration -- everything it
+/// knows it reads from disk and the cgroup tree -- so a clone is a second
+/// handle on the same node, which is what the gateway's waker uses.
+#[derive(Clone)]
 pub struct Runtime {
     cfg: RuntimeConfig,
 }

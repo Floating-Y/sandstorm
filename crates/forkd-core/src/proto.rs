@@ -101,6 +101,15 @@ pub struct PollRequest {
     /// one node's log.
     #[serde(default)]
     pub failures: Vec<CommandFailure>,
+    /// Sandboxes the gateway forwarded a request to since the last report.
+    ///
+    /// The gateway wakes a cold sandbox itself when a request arrives for
+    /// it (RFC §15.5: a wake never goes through the master), so this is how
+    /// the master learns the sandbox is in use: it moves the idle clock and,
+    /// for one that was woken, makes Hot the desired tier so the next diff
+    /// does not put it straight back to sleep.
+    #[serde(default)]
+    pub traffic: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

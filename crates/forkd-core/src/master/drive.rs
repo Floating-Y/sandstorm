@@ -15,7 +15,7 @@
 use anyhow::{bail, Context, Result};
 use std::time::Duration;
 
-use super::api::{deliver_result, diff, record_failures, take_execs, St};
+use super::api::{apply_traffic, deliver_result, diff, record_failures, take_execs, St};
 use crate::proto::{AgentHello, Command, PollRequest, SyncRequest, SyncResponse};
 use crate::state::AgentNode;
 
@@ -164,6 +164,9 @@ async fn drive(st: St, node: AgentNode) {
         report.node_id = node.id.clone();
         if let Err((_, e)) = record_failures(&st, &report) {
             tracing::warn!(node = %node.id, error = %e.0, "could not record failures");
+        }
+        if let Err((_, e)) = apply_traffic(&st, &report) {
+            tracing::warn!(node = %node.id, error = %e.0, "could not record traffic");
         }
 
         let sent = batch.take();

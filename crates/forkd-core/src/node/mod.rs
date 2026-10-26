@@ -15,16 +15,19 @@ mod bundle;
 mod gateway;
 mod net;
 mod runtime;
+mod wake;
 
 pub use agent::{serve_listen, Identity as AgentIdentity};
 pub use bundle::TemplateSpec;
 pub use gateway::{Exposed, Gateway};
 pub use net::NetConfig;
 pub use runtime::{Runtime, RuntimeConfig};
+pub use wake::Wakeups;
 
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::proto::{
@@ -145,6 +148,23 @@ fn holding_back_at(
     None
 }
 
+/// What the gateway calls to wake a sandbox: the same admission check and
+/// the same tier change a promotion from the master would get.
+fn wakeups(cfg: &NodeConfig, rt: &Runtime) -> Arc<Wakeups> {
+    let rt = rt.clone();
+    let (min_free, max_psi) = (cfg.admit_min_free_mib, cfg.admit_max_psi);
+    Arc::new(Wakeups::new(move |id| {
+        let hot = Command::SetTier {
+            id: id.to_string(),
+            tier: crate::tier::Tier::Hot,
+        };
+        if let Some(why) = holding_back_at(min_free, max_psi, &hot, runtime::host_pressure()) {
+            bail!(why);
+        }
+        rt.set_tier(id, crate::tier::Tier::Hot)
+    }))
+}
+
 pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
     std::fs::create_dir_all(&cfg.pki_dir)?;
     let cert_path = cfg.pki_dir.join("client.pem");
@@ -229,9 +249,20 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
     // for every other sandbox on this node.
     let mut next_hold = cfg.hold;
     // Listeners for the sandboxes exposed off-box. Reconciled on every poll.
-    let mut gateway = Gateway::new();
+    let wake = wakeups(&cfg, &rt);
+    let mut gateway = Gateway::waking(wake.clone());
     loop {
-        match poll_once(&cfg, &client, &rt, &mut failing, next_hold, &mut gateway).await {
+        match poll_once(
+            &cfg,
+            &client,
+            &rt,
+            &mut failing,
+            next_hold,
+            &mut gateway,
+            &wake,
+        )
+        .await
+        {
             Ok(retry_due) => {
                 net_backoff = Duration::from_millis(250);
                 next_hold = retry_due.map_or(cfg.hold, |d| d.min(cfg.hold));
@@ -325,6 +356,7 @@ async fn report(
     rt: &Runtime,
     failing: &HashMap<String, Failing>,
     gw: &mut Gateway,
+    wake: &Wakeups,
     hold: Option<Duration>,
 ) -> Result<PollRequest> {
     let observed: Vec<ObservedSandbox> = rt.observe()?;
@@ -333,13 +365,10 @@ async fn report(
     // the same reason the rest of the node is: a listener that outlived its
     // sandbox would leave a port open on the host, and one that was never
     // started would leave the sandbox unreachable with nothing saying why.
-    // Only serving sandboxes get a listener -- a cold one would answer and
-    // then fail to forward, and #327 already refuses its port outright.
-    let expose: Vec<Exposed> = observed
-        .iter()
-        .filter(|o| o.tier.is_serving())
-        .filter_map(|o| rt.exposed(&o.id))
-        .collect();
+    // Every tier on this node gets one, cold ones included: a request for a
+    // frozen or snapshotted sandbox is what wakes it. Detached has nothing
+    // on this node and is not observed, so its port closes.
+    let expose: Vec<Exposed> = observed.iter().filter_map(|o| rt.exposed(&o.id)).collect();
     gw.reconcile(&expose).await;
     tracing::debug!(
         count = observed.len(),
@@ -363,6 +392,7 @@ async fn report(
         pressure_some_avg10: psi,
         hold_ms: hold.map(|h| h.as_millis() as u64),
         failures,
+        traffic: wake.take_traffic(),
     })
 }
 
@@ -383,6 +413,7 @@ fn run_one(
     cfg: &NodeConfig,
     rt: &Runtime,
     failing: &mut HashMap<String, Failing>,
+    wake: &Wakeups,
     cmd: &Command,
     now: Instant,
 ) -> Step {
@@ -391,6 +422,19 @@ fn run_one(
     if let Some(f) = failing.get(&id) {
         if f.retry_at > now {
             return Step::Later(f.retry_at - now);
+        }
+    }
+
+    // A sandbox that just served a request is not demoted on a view of it
+    // that predates the request. The master issued this before it heard
+    // about the traffic; once it has, it stops asking. Not a failure, so
+    // the failure book is left alone.
+    if let Command::SetTier { tier, .. } = cmd {
+        if !tier.is_serving() {
+            if let Some(left) = wake.in_grace(&id, now) {
+                tracing::debug!(sandbox = %id, %tier, wait_ms = left.as_millis() as u64, "in use; demotion deferred");
+                return Step::Later(left);
+            }
         }
     }
 
@@ -451,6 +495,10 @@ fn run_one(
     // reported like any other command failure: the master records it on the
     // sandbox, the panel shows the reason, and the usual backoff retries it
     // in case the pressure passes.
+    // Held for the tier change, so a wake from the gateway cannot run
+    // runsc on this sandbox at the same time.
+    let lock = wake.lock(&id);
+    let _held = lock.lock();
     let out = if let Some(why) = holding_back(cfg, cmd) {
         tracing::warn!(sandbox = %id, reason = %why, "refusing work");
         Err(anyhow::anyhow!(why))
@@ -487,6 +535,10 @@ fn run_one(
     match out {
         Ok(()) => {
             failing.remove(&id);
+            if matches!(cmd, Command::Destroy { .. }) {
+                drop(_held);
+                wake.forget(&id);
+            }
             Step::Done
         }
         Err(e) => {
@@ -522,8 +574,9 @@ async fn poll_once(
     failing: &mut HashMap<String, Failing>,
     hold: Duration,
     gw: &mut Gateway,
+    wake: &Wakeups,
 ) -> Result<Option<Duration>> {
-    let req = report(cfg, rt, failing, gw, Some(hold)).await?;
+    let req = report(cfg, rt, failing, gw, wake, Some(hold)).await?;
     let url = format!("{}/v1/node/poll", cfg.master_url.trim_end_matches('/'));
     let raw = bearer(client.post(&url), cfg).json(&req).send().await?;
     // Check the status before parsing. Deserialising straight into
@@ -556,7 +609,7 @@ async fn poll_once(
     let mut asked_about: Vec<String> = Vec::new();
     for cmd in &resp.commands {
         asked_about.push(command_id(cmd).to_string());
-        match run_one(cfg, rt, failing, cmd, now) {
+        match run_one(cfg, rt, failing, wake, cmd, now) {
             Step::Done => {}
             Step::Later(wait) => soonest = sooner(soonest, wait),
             // Posted as soon as it exists, not at the end of the batch, so a
@@ -719,5 +772,88 @@ mod tests {
             none.map_or(configured, |d: Duration| d.min(configured)),
             configured
         );
+    }
+}
+
+#[cfg(test)]
+mod wake_tests {
+    use super::*;
+    use crate::tier::Tier;
+
+    fn node(dir: &std::path::Path) -> (NodeConfig, Runtime) {
+        let runtime = RuntimeConfig {
+            work_dir: dir.join("work"),
+            volume_root: dir.join("volumes"),
+            ..Default::default()
+        };
+        let cfg = NodeConfig {
+            node_id: "n1".into(),
+            master_url: "http://127.0.0.1:1".into(),
+            token: None,
+            api_token: None,
+            pki_dir: dir.join("pki"),
+            runtime: runtime.clone(),
+            hold: Duration::from_secs(25),
+            admit_min_free_mib: 0,
+            admit_max_psi: f64::MAX,
+        };
+        (cfg, Runtime::new(runtime).unwrap())
+    }
+
+    fn set_tier(tier: Tier) -> Command {
+        Command::SetTier {
+            id: "sb".into(),
+            tier,
+        }
+    }
+
+    /// A demotion issued before the master heard about a request must not
+    /// undo the wake that request caused. It is deferred, not failed: the
+    /// failure book stays empty, so nothing shows up as an error and the
+    /// master's quarantine count does not move.
+    #[test]
+    fn a_sandbox_in_use_is_not_demoted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, rt) = node(dir.path());
+        let w = Wakeups::new(|_| Ok(()));
+        let mut failing = HashMap::new();
+        w.saw("sb");
+
+        for tier in [Tier::Frozen, Tier::Snapshot, Tier::Detached] {
+            match run_one(&cfg, &rt, &mut failing, &w, &set_tier(tier), Instant::now()) {
+                Step::Later(d) => {
+                    assert!(d > wake::GRACE - Duration::from_secs(1), "{tier}: {d:?}")
+                }
+                _ => panic!("{tier}: demoted a sandbox that just served a request"),
+            }
+        }
+        assert!(failing.is_empty(), "a deferral is not a failure");
+
+        // Promotion is never deferred. This one reaches the runtime, which
+        // fails it -- there is no such sandbox here -- and that is the
+        // evidence it was attempted.
+        run_one(
+            &cfg,
+            &rt,
+            &mut failing,
+            &w,
+            &set_tier(Tier::Hot),
+            Instant::now(),
+        );
+        assert!(failing.contains_key("sb"));
+
+        // And once the grace is over, demotion goes ahead (to the same
+        // runtime failure).
+        failing.clear();
+        let later = Instant::now() + wake::GRACE;
+        run_one(
+            &cfg,
+            &rt,
+            &mut failing,
+            &w,
+            &set_tier(Tier::Snapshot),
+            later,
+        );
+        assert!(failing.contains_key("sb"));
     }
 }

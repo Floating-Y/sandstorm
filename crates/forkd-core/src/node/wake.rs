@@ -1,0 +1,213 @@
+//! Waking a sandbox because a request arrived for it.
+//!
+//! Without this, a frozen or snapshotted sandbox answers its gateway port
+//! with a 503 telling the caller to POST `/touch` to the master and try
+//! again. That makes every client of an exposed port aware of tiers, and it
+//! is the reason the density figures came with an asterisk: a sandbox that
+//! has been demoted is only "available" to callers who know to wake it.
+//!
+//! Here the gateway wakes it instead. A forward that fails with connection
+//! refused -- #327 makes a cold sandbox refuse at once rather than hang --
+//! wakes the sandbox on this node and forwards again, and the caller sees a
+//! slow response rather than an error. Nothing goes through the master,
+//! which RFC §15.5 requires of a wake ("唤醒请求绝不经过 master").
+//!
+//! The master still owns desired state, so two things keep it and the node
+//! from fighting over a sandbox that was just woken:
+//!
+//! - every request is reported back (`PollRequest::traffic`), and the
+//!   master moves the idle clock and makes Hot the desired tier;
+//! - until it has, the node will not demote a sandbox that served a
+//!   request in the last `GRACE`, so a demotion the master issued from a
+//!   stale view is deferred rather than undoing the wake.
+//!
+//! The node is the one that pays for a wake, so it is subject to the same
+//! admission check as a promotion the master asks for.
+
+use anyhow::{Context, Result};
+use parking_lot::Mutex;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// How long after a request a sandbox is safe from demotion.
+///
+/// Long enough to cover the master hearing about the request: a listening
+/// node reports every 5 s, and a polling node reports as soon as a deferred
+/// command shortens its hold. The master's idle thresholds are 30 s and up,
+/// so this never decides on its own when a sandbox goes cold.
+pub const GRACE: Duration = Duration::from_secs(15);
+
+type WakeFn = dyn Fn(&str) -> Result<()> + Send + Sync;
+
+pub struct Wakeups {
+    /// One per sandbox, held across any tier change -- a wake, or a command
+    /// from the master -- so the two never run runsc on one sandbox at once.
+    locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// When each sandbox last had a request through the gateway.
+    seen: Mutex<HashMap<String, Instant>>,
+    /// Requests the master has not been told about yet.
+    unreported: Mutex<HashSet<String>>,
+    /// Restores read whole images from disk, so a burst of wakes for
+    /// different sandboxes is queued rather than run all at once and left
+    /// to fight over the same disk.
+    restores: tokio::sync::Semaphore,
+    wake: Box<WakeFn>,
+}
+
+impl Wakeups {
+    /// `wake` brings a sandbox to Hot and returns when it is serving. It
+    /// blocks, and is called with that sandbox's lock held.
+    pub fn new(wake: impl Fn(&str) -> Result<()> + Send + Sync + 'static) -> Self {
+        let parallel = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .max(2);
+        Self {
+            locks: Mutex::default(),
+            seen: Mutex::default(),
+            unreported: Mutex::default(),
+            restores: tokio::sync::Semaphore::new(parallel),
+            wake: Box::new(wake),
+        }
+    }
+
+    /// The lock for one sandbox's tier.
+    pub fn lock(&self, id: &str) -> Arc<Mutex<()>> {
+        self.locks.lock().entry(id.to_string()).or_default().clone()
+    }
+
+    /// A request for this sandbox reached the gateway.
+    pub fn saw(&self, id: &str) {
+        self.seen.lock().insert(id.to_string(), Instant::now());
+        self.unreported.lock().insert(id.to_string());
+    }
+
+    /// How much longer this sandbox is protected from demotion, if at all.
+    pub fn in_grace(&self, id: &str, now: Instant) -> Option<Duration> {
+        let at = *self.seen.lock().get(id)?;
+        GRACE
+            .checked_sub(now.saturating_duration_since(at))
+            .filter(|d| !d.is_zero())
+    }
+
+    /// The sandboxes to report as used, emptied as it is read.
+    pub fn take_traffic(&self) -> Vec<String> {
+        let now = Instant::now();
+        // Pruned here because this runs on every report: nothing outside
+        // the grace window is consulted again.
+        self.seen
+            .lock()
+            .retain(|_, at| now.saturating_duration_since(*at) < GRACE);
+        let mut ids: Vec<String> = self.unreported.lock().drain().collect();
+        ids.sort();
+        ids
+    }
+
+    /// A destroyed sandbox needs none of this any more.
+    pub fn forget(&self, id: &str) {
+        self.locks.lock().remove(id);
+        self.seen.lock().remove(id);
+        self.unreported.lock().remove(id);
+    }
+
+    /// Wake a sandbox and wait until it is serving. A sandbox that is
+    /// already hot costs one observe: `set_tier` returns at once when the
+    /// tier already matches, which is also what makes a burst of requests
+    /// for one cold sandbox wake it once rather than once each.
+    pub async fn wake(self: &Arc<Self>, id: &str) -> Result<Duration> {
+        let _permit = self.restores.acquire().await.context("shutting down")?;
+        let me = self.clone();
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let lock = me.lock(&id);
+            let _held = lock.lock();
+            let t0 = Instant::now();
+            (me.wake)(&id)?;
+            Ok(t0.elapsed())
+        })
+        .await
+        .context("the wake task panicked")?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn traffic_is_reported_once() {
+        let w = Wakeups::new(|_| Ok(()));
+        w.saw("a");
+        w.saw("b");
+        w.saw("a");
+        assert_eq!(w.take_traffic(), vec!["a".to_string(), "b".to_string()]);
+        assert!(w.take_traffic().is_empty(), "already reported");
+    }
+
+    #[test]
+    fn grace_runs_out() {
+        let w = Wakeups::new(|_| Ok(()));
+        assert_eq!(w.in_grace("a", Instant::now()), None, "never seen");
+        w.saw("a");
+        let left = w.in_grace("a", Instant::now()).expect("just seen");
+        assert!(left <= GRACE && left > GRACE - Duration::from_secs(1));
+        assert_eq!(w.in_grace("a", Instant::now() + GRACE), None);
+    }
+
+    #[test]
+    fn forgetting_drops_everything() {
+        let w = Wakeups::new(|_| Ok(()));
+        w.saw("a");
+        w.forget("a");
+        assert_eq!(w.in_grace("a", Instant::now()), None);
+        assert!(w.take_traffic().is_empty());
+    }
+
+    /// The point of the per-sandbox lock: a wake must not run runsc while
+    /// a command from the master is changing the same sandbox's tier.
+    #[tokio::test]
+    async fn a_wake_waits_for_a_tier_change_in_progress() {
+        let running = Arc::new(AtomicUsize::new(0));
+        let overlapped = Arc::new(AtomicUsize::new(0));
+        let (r, o) = (running.clone(), overlapped.clone());
+        let w = Arc::new(Wakeups::new(move |_| {
+            if r.fetch_add(1, Ordering::SeqCst) > 0 {
+                o.fetch_add(1, Ordering::SeqCst);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            r.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        }));
+
+        // Held by "the master's command" on another thread for 100 ms.
+        let lock = w.lock("sb");
+        let (taken, is_taken) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _held = lock.lock();
+            taken.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+        });
+        is_taken.recv().unwrap();
+        let t0 = Instant::now();
+        w.wake("sb").await.unwrap();
+        assert!(
+            t0.elapsed() >= Duration::from_millis(80),
+            "the wake ran through a held lock"
+        );
+        holder.join().unwrap();
+
+        // And many wakes for one sandbox run one at a time.
+        let all: Vec<_> = (0..8)
+            .map(|_| {
+                let w = w.clone();
+                tokio::spawn(async move { w.wake("sb").await })
+            })
+            .collect();
+        for h in all {
+            h.await.unwrap().unwrap();
+        }
+        assert_eq!(overlapped.load(Ordering::SeqCst), 0);
+    }
+}

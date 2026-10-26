@@ -2397,3 +2397,104 @@ async fn a_tag_that_is_not_a_plain_name_is_refused_with_400() {
         .unwrap();
     assert_eq!(r.status().as_u16(), 400);
 }
+
+/// The gateway woke a snapshotted sandbox on its own and says so. The master
+/// must adopt that -- desired becomes Hot -- rather than diff the node's Hot
+/// against its own Snapshot and put the sandbox straight back on disk.
+#[tokio::test]
+async fn traffic_at_the_gateway_keeps_a_woken_sandbox_awake() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    register(&h, "bm-2", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+    let created: serde_json::Value = c
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let node = created["node_id"].as_str().unwrap().to_string();
+    let other = if node == "bm-1" { "bm-2" } else { "bm-1" };
+    let r = c
+        .post(format!("{}/v1/sandboxes/{id}/tier", h.base))
+        .json(&serde_json::json!({ "tier": "snapshot" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+
+    let poll = |from: &str, traffic: Vec<String>| {
+        let base = h.base.clone();
+        let observed = if from == node {
+            vec![ObservedSandbox {
+                id: id.clone(),
+                tier: Tier::Hot,
+                serving: true,
+                ip: None,
+                net_index: None,
+            }]
+        } else {
+            vec![]
+        };
+        let from = from.to_string();
+        async move {
+            reqwest::Client::new()
+                .post(format!("{base}/v1/node/poll"))
+                .json(&serde_json::json!({
+                    "node_id": from,
+                    "observed": observed,
+                    "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
+                    "traffic": traffic,
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json::<PollResponse>()
+                .await
+                .unwrap()
+        }
+    };
+    let tier = || {
+        let url = format!("{}/v1/sandboxes/{id}", h.base);
+        async move {
+            reqwest::Client::new()
+                .get(url)
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()["tier"]
+                .clone()
+        }
+    };
+
+    // A node that does not hold the sandbox cannot keep it awake.
+    poll(other, vec![id.clone()]).await;
+    assert_eq!(tier().await, "snapshot");
+
+    // Without traffic, a hot sandbox the master wants on disk is demoted --
+    // which is exactly what must not happen to one that was just woken.
+    let resp = poll(&node, vec![]).await;
+    assert!(
+        resp.commands.iter().any(|c| matches!(
+            c,
+            forkd_core::proto::Command::SetTier {
+                tier: Tier::Snapshot,
+                ..
+            }
+        )),
+        "got {:?}",
+        resp.commands
+    );
+
+    // With it, the master adopts the wake and asks for nothing.
+    let resp = poll(&node, vec![id.clone()]).await;
+    assert!(resp.commands.is_empty(), "got {:?}", resp.commands);
+    assert_eq!(tier().await, "hot");
+}
