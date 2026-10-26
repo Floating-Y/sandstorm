@@ -204,6 +204,20 @@ pub fn setup(cfg: &NetConfig, id: &str, index: u32) -> Result<Slot> {
     Ok(s)
 }
 
+/// Take down a sandbox's namespace and veth while keeping its slot.
+///
+/// For the Snapshot tier: the process is gone and the image is on disk, so
+/// nothing needs the kernel objects until a restore, which rebuilds them
+/// with `setup` -- same index, same addresses, same names. They are not
+/// small. Measured on the load-test fleet at ~0.4 MiB of unreclaimable
+/// slab per namespace: 1538 snapshotted sandboxes held 694 MiB on a 1.9 GiB
+/// node, which is what capped the cluster at 7284 sandboxes, not memory
+/// for the sandboxes and not disk. The slot itself is a number in the
+/// master's plan and costs nothing to keep.
+pub fn release(cfg: &NetConfig, id: &str, index: u32) -> Result<()> {
+    teardown(cfg, id, index)
+}
+
 pub fn teardown(cfg: &NetConfig, id: &str, index: u32) -> Result<()> {
     let s = cfg.slot(id, index)?;
     // Deleting the netns takes the peer with it; the host end has to go too.
@@ -221,10 +235,11 @@ const COLD_CHAIN: &str = "FORKD-COLD";
 
 /// Refuse connections to a sandbox that is not running.
 ///
-/// Its namespace outlives its container -- that is deliberate, and is why
-/// a restore is 92-128 ms rather than a cold start -- but with the veth up
-/// and nothing inside, a SYN is dropped rather than rejected and the
-/// caller waits out its own timeout. Measured before this existed:
+/// A frozen sandbox keeps its namespace, veth up and nothing answering, so
+/// a SYN is dropped rather than rejected and the caller waits out its own
+/// timeout. (A snapshotted one no longer has a namespace at all -- see
+/// `release` -- and the unreachable floor in `install_rules` refuses for
+/// it instead, so this rule is taken off again once it gets there.) Measured before this existed:
 /// `curl -m 5` against a snapshotted sandbox took 5011 ms, and `-m 1`
 /// took 1019 ms. The duration was purely the caller's deadline.
 ///
@@ -350,6 +365,19 @@ pub fn install_rules(cfg: &NetConfig) -> Result<()> {
     // since forgotten; the tier each one is in is re-derived on the first
     // poll, so start from none rather than from a stale set.
     let _ = run("clearing the cold chain", &["iptables", "-F", COLD_CHAIN]);
+
+    // A floor under the whole range. A sandbox with its namespace up has a
+    // /30 route through its veth, which is more specific and wins. One in
+    // Snapshot has had its namespace taken down (`release`), and without
+    // this its address would follow the default route off the machine --
+    // UDP and ICMP and all, possibly to a real host that has that address
+    // in the VPC. With it, anything sent there fails at once with "no
+    // route to host", which the gateway reads as cold and wakes on, and
+    // no per-sandbox rule is needed for the whole Snapshot tier.
+    run(
+        "installing the unreachable floor",
+        &["ip", "route", "replace", "unreachable", &subnet],
+    )?;
 
     tracing::info!(subnet = %subnet, "sandbox network rules in place");
     Ok(())
