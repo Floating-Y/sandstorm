@@ -157,6 +157,21 @@ struct ServeArgs {
     /// restore 3.3 s -> 1.4 s).
     #[arg(long, default_value = "auto")]
     compress_snapshots: forkd_core::node::Lever,
+    /// Keep squeezing the cold pages of hot sandboxes into compressed swap,
+    /// paced by each sandbox's own memory stalls: auto, on or off. Auto
+    /// follows --reclaim-frozen's test: zswap or zram present.
+    #[arg(long, default_value = "auto")]
+    reclaim_hot: forkd_core::node::Lever,
+    /// Read a snapshotted sandbox's image just before its next request when
+    /// its requests come on a schedule: auto (= on), on or off.
+    #[arg(long, default_value = "auto")]
+    prefetch_snapshots: forkd_core::node::Lever,
+    /// Give the reclaim levers compressed RAM to work with where there is
+    /// none: turn zswap on in front of an existing disk swap, or add a zram
+    /// device on a machine with no swap at all. auto or off. Host-wide; see
+    /// `bootstrap_compressed_swap`.
+    #[arg(long, default_value = "auto")]
+    compressed_swap: forkd_core::node::Lever,
 }
 
 #[derive(Args)]
@@ -286,7 +301,9 @@ async fn serve(a: ServeArgs) -> Result<()> {
             idle,
             api_token: api_token.clone(),
             // A /30 each, minus the one slot that would run past the end.
-            max_net_index: (1u32 << (32 - a.net_prefix.min(30) as u32)) / 4 - 1,
+            // One short of the plan: the top slot is the node's own, for the
+            // seed a warm template is taken from (`NetConfig::reserved_index`).
+            max_net_index: (1u32 << (32 - a.net_prefix.min(30) as u32)) / 4 - 2,
             port_range: (a.port_min, a.port_max),
             insecure_transport: a.insecure_transport,
             admit: forkd_core::master::Admission {
@@ -362,10 +379,33 @@ async fn serve(a: ServeArgs) -> Result<()> {
 
         // Probed once, here, so the reasons land in the startup log where an
         // operator looks for them.
+        // First, so the reclaim decisions below see the swap it makes.
+        let (made, why) = node::bootstrap_compressed_swap(a.compressed_swap);
+        tracing::info!(changed = made, reason = %why, "compressed swap");
         let (reclaim_frozen, why) = node::decide_reclaim(a.reclaim_frozen);
         tracing::info!(on = reclaim_frozen, reason = %why, "frozen-sandbox reclaim");
+        let (reclaim_hot, why) = node::decide_reclaim(a.reclaim_hot);
+        tracing::info!(on = reclaim_hot, reason = %why, "hot-sandbox reclaim");
         let (compress_snapshots, why) = node::decide_compression(a.compress_snapshots, &a.work_dir);
         tracing::info!(on = compress_snapshots, reason = %why, "snapshot compression");
+
+        let mut features = Vec::new();
+        if let Some(kind) = node::compressed_swap() {
+            features.push(format!("swap:{kind}"));
+        }
+        for (on, name) in [
+            (reclaim_frozen, "reclaim-frozen"),
+            (reclaim_hot, "reclaim-hot"),
+            (compress_snapshots, "snapshot-compression"),
+            (
+                a.prefetch_snapshots != node::Lever::Off,
+                "prefetch-snapshots",
+            ),
+        ] {
+            if on {
+                features.push(name.to_string());
+            }
+        }
 
         let cfg = NodeConfig {
             node_id,
@@ -388,12 +428,16 @@ async fn serve(a: ServeArgs) -> Result<()> {
                 },
                 reclaim_frozen,
                 compress_snapshots,
+                reclaim_hot,
+                prefetch_snapshots: a.prefetch_snapshots != node::Lever::Off,
+                pin_in_zswap: node::pin_in_zswap(),
             },
             hold: Duration::from_secs(a.hold_secs),
             // The same two numbers the master places with, applied here
             // against a reading taken now rather than one up to a hold old.
             admit_min_free_mib: a.admit_min_free_mib,
             admit_max_psi: a.admit_max_psi,
+            features,
         };
         Some(match listening {
             Some(addr) => tokio::spawn(node::serve_listen(cfg, addr)),

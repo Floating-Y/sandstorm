@@ -110,6 +110,12 @@ pub struct PollRequest {
     /// does not put it straight back to sleep.
     #[serde(default)]
     pub traffic: Vec<String>,
+    /// The density levers this node has on (`snapshot-compression`,
+    /// `reclaim-hot`, `swap:zswap`, ...). Each node decides for itself from
+    /// what its machine can do, so nodes in one pool can differ, and this is
+    /// where that shows: `forkd_node_feature` on the master's /metrics.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -46,6 +46,40 @@ pub struct TemplateSpec {
     /// A template that is not a Python one overrides it.
     #[serde(default = "default_eval_argv")]
     pub eval_argv: Vec<String>,
+    /// Start new sandboxes from an image of this template already booted,
+    /// instead of booting each one. Opt-in, because every sandbox restored
+    /// from one image starts with the same memory: see `WarmSpec`.
+    #[serde(default)]
+    pub warm: Option<WarmSpec>,
+}
+
+/// How a template is kept warm.
+///
+/// Every sandbox restored from the image begins with the seed's memory,
+/// and that includes any random state the program drew before the image
+/// was taken. The kernel's randomness is fresh after a restore -- measured
+/// on bm, `os.urandom` differs in every child -- but anything seeded in
+/// user space is not: Python's `random`, OpenSSL's DRBG and the string hash
+/// seed came out identical in a parent and two children. Identical TLS
+/// randomness across sandboxes is a security bug, not a curiosity.
+///
+/// So the template says how to reseed. `after_restore` runs inside each
+/// sandbox right after it is restored and before it is given any traffic;
+/// a failure there means a cold start instead. For Python that is a signal
+/// the program handles by calling `random.seed()` and `ssl.RAND_add()`.
+/// The same contract as Lambda SnapStart's and CRaC's after-restore hooks.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WarmSpec {
+    #[serde(default)]
+    pub after_restore: Vec<String>,
+    /// How long the seed may take to start listening before the image is
+    /// given up on.
+    #[serde(default = "default_ready_timeout")]
+    pub ready_timeout_secs: u64,
+}
+
+fn default_ready_timeout() -> u64 {
+    60
 }
 
 fn default_eval_argv() -> Vec<String> {
@@ -428,6 +462,7 @@ mod tests {
             ro_binds: default_ro_binds(),
             memory_max_mib: Some(256),
             eval_argv: default_eval_argv(),
+            warm: None,
         }
     }
 
@@ -640,6 +675,7 @@ mod netns_tests {
             ro_binds: default_ro_binds(),
             memory_max_mib: None,
             eval_argv: default_eval_argv(),
+            warm: None,
         }
     }
 }

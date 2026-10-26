@@ -143,6 +143,9 @@ struct RouteStats {
 /// to rule in or out, so measuring it is the point.
 #[derive(Debug)]
 pub struct Metrics {
+    /// What each node last said it has on. Kept here rather than in the
+    /// store: it is re-sent on every report and means nothing once stale.
+    pub node_features: parking_lot::Mutex<HashMap<String, Vec<String>>>,
     pub creates_placed: AtomicU64,
     pub creates_refused: AtomicU64,
     pub deletes: AtomicU64,
@@ -163,6 +166,7 @@ pub struct Metrics {
 impl Default for Metrics {
     fn default() -> Self {
         Self {
+            node_features: Default::default(),
             creates_placed: AtomicU64::new(0),
             creates_refused: AtomicU64::new(0),
             deletes: AtomicU64::new(0),
@@ -397,6 +401,27 @@ impl Metrics {
                 "forkd_node_last_seen_age_seconds{{{l}}} {}",
                 (now - n.last_seen_at).max(0)
             );
+        }
+
+        help(
+            o,
+            "forkd_node_feature",
+            "gauge",
+            "A density lever a node has on, as it reported (1 per lever)",
+        );
+        {
+            let features = self.node_features.lock();
+            for n in &nodes {
+                for f in features.get(&n.id).into_iter().flatten() {
+                    let _ = writeln!(
+                        o,
+                        "forkd_node_feature{{node=\"{}\",pool=\"{}\",feature=\"{}\"}} 1",
+                        esc(&n.id),
+                        esc(&n.pool),
+                        esc(f)
+                    );
+                }
+            }
         }
 
         help(

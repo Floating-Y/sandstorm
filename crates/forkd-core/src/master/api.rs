@@ -181,7 +181,8 @@ impl Default for MasterOptions {
             admit: Admission::default(),
             api_token: None,
             // A /16 in /30s.
-            max_net_index: 16383,
+            // The top slot of a /16 is the node's own; see `NetConfig::reserved_index`.
+            max_net_index: 16382,
             // Tests build the router without a TLS listener, so there is no
             // certificate to demand; the live default comes from
             // MasterConfig and is the opposite.
@@ -1818,6 +1819,13 @@ pub(super) fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
     store
         .set_node_health(&req.node_id, req.free_memory_mib, req.pressure_some_avg10)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // An empty list from an early wake report says nothing; keep the last.
+    if !req.features.is_empty() {
+        st.metrics
+            .node_features
+            .lock()
+            .insert(req.node_id.clone(), req.features.clone());
+    }
 
     // The node owns addressing, so what it reports is the truth.
     for o in &req.observed {
@@ -2107,6 +2115,21 @@ async fn create_sandbox(
         return Err(err(
             StatusCode::BAD_REQUEST,
             "id cannot be given with n > 1",
+        ));
+    }
+    // A node hides its own seed sandboxes by this prefix, so a sandbox named
+    // with it would be invisible to the node that runs it.
+    if req
+        .id
+        .as_deref()
+        .is_some_and(|i| i.starts_with(crate::node::WARM_SEED_PREFIX))
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "ids starting with {} are reserved",
+                crate::node::WARM_SEED_PREFIX
+            ),
         ));
     }
 
