@@ -242,3 +242,65 @@ Timing a tier change from outside, over the network, measures the probe as
 much as the product. A directory the code creates before doing the work
 is not a signal that the work is done, and a dropped SYN is not a signal
 that a process has exited. Both harnesses now read `cgroup.procs`.
+
+## Waking on traffic, and two levers the machine decides
+
+Until now a cold sandbox's gateway port answered 503 and told the caller
+to `POST /touch` to the master and retry. Every client of an exposed port
+had to know about tiers, which is the asterisk on every density figure
+above: a demoted sandbox was "available" only to callers who knew to wake
+it.
+
+**The gateway wakes it now.** A forward refused by #327's REJECT wakes the
+sandbox on the node and forwards again; the caller gets a slower answer,
+not an error, and nothing goes through the master (RFC §15.5). The node
+reports the traffic, the master makes Hot the desired tier, and until it
+has heard the node will not demote a sandbox that served a request in the
+last 15 s. Responses that waited carry `x-forkd-woke-ms`.
+
+Two more levers, both plain Linux and plain runsc, each probed at startup
+and logged with the reason it is on or off:
+
+- **Frozen reclaim** (`--reclaim-frozen auto`). After freezing, push the
+  sandbox's memory into swap with `memory.reclaim`, with zswap writeback
+  off for that cgroup so it stays compressed in RAM. On only where swap is
+  zswap or zram: into a disk swap file the pages come back slower than a
+  snapshot restores, so there it is left off.
+- **Snapshot compression** (`--compress-snapshots auto`). Measures the
+  disk's uncached read speed at startup and compresses where it is under
+  500 MB/s, which is where a smaller image restores faster.
+
+Measured on bm (2 vCPU, 3.6 GiB, 135 MB/s disk, zswap) with a 376 MiB
+Python heap, 40 MiB of it random:
+
+| | memory while cold | back to touching all of it |
+| --- | --- | --- |
+| frozen, as before | 376 MiB | 60 ms |
+| frozen + reclaim (zswap, no writeback) | **113 MiB** | 310 ms |
+| frozen + reclaim (writeback allowed) | 13-115 MiB | 0.4-3.9 s, unpredictable |
+
+| snapshot image | size | restore, cold cache | restore, warm |
+| --- | --- | --- | --- |
+| uncompressed | 363 MiB | 3.3 s | 138 ms |
+| flate-best-speed | **84 MiB** | **1.4 s** | 696 ms |
+
+Tried and not adopted: `restore --background` returns sooner but the app
+cannot run until the whole image is in (2.06 s either way);
+`--exclude-committed-zero-pages` changed nothing, as gVisor already leaves
+zero pages out; `--direct` made warm restores 3.2 s by bypassing the page
+cache.
+
+End to end through the gateway, a ~185 MiB heap, nothing calling `/touch`:
+
+| wake from | memory while cold | first request | then a request touching the whole heap |
+| --- | --- | --- | --- |
+| frozen + reclaim | 70-88 MiB (hot: 171-184) | **24-34 ms** (wake 7-14) | 109-117 ms |
+| snapshot (compressed) | 0, 57 MiB image on disk | **354-359 ms** (wake 341-346) | 28 ms |
+
+Four rounds each, same process every time, and the master showed the
+sandbox hot one second after each wake. That last figure needed its own
+fix: a polling node's regular report can sit parked for a whole hold, and
+until it arrived an explicit freeze matched the stale desired tier and did
+nothing. The node now sends `POST /v1/node/traffic` the moment it wakes
+something. A listening node is asked for a report every 5 s, which is its
+window.

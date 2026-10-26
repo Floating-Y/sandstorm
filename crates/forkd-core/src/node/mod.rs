@@ -13,6 +13,7 @@
 mod agent;
 mod bundle;
 mod gateway;
+mod host;
 mod net;
 mod runtime;
 mod wake;
@@ -20,6 +21,7 @@ mod wake;
 pub use agent::{serve_listen, Identity as AgentIdentity};
 pub use bundle::TemplateSpec;
 pub use gateway::{Exposed, Gateway};
+pub use host::{decide_compression, decide_reclaim, Lever};
 pub use net::NetConfig;
 pub use runtime::{Runtime, RuntimeConfig};
 pub use wake::Wakeups;
@@ -251,6 +253,14 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
     // Listeners for the sandboxes exposed off-box. Reconciled on every poll.
     let wake = wakeups(&cfg, &rt);
     let mut gateway = Gateway::waking(wake.clone());
+    tokio::spawn(report_wakes(
+        cfg.node_id.clone(),
+        format!("{}/v1/node/traffic", cfg.master_url.trim_end_matches('/')),
+        cfg.api_token.clone(),
+        client.clone(),
+        rt.clone(),
+        wake.clone(),
+    ));
     loop {
         match poll_once(
             &cfg,
@@ -273,6 +283,51 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
                 net_backoff = (net_backoff * 2).min(Duration::from_secs(15));
                 next_hold = cfg.hold;
             }
+        }
+    }
+}
+
+/// Tell the master about a wake as soon as it happens, instead of on the
+/// next poll -- which, with the poll parked, can be a whole hold away.
+///
+/// Best effort: if this is lost the traffic still goes out with the next
+/// poll's report, which is where it went before this existed.
+async fn report_wakes(
+    node_id: String,
+    url: String,
+    api_token: Option<String>,
+    client: reqwest::Client,
+    rt: Runtime,
+    wake: Arc<Wakeups>,
+) {
+    loop {
+        wake.woke.notified().await;
+        let observed = {
+            let rt = rt.clone();
+            match tokio::task::spawn_blocking(move || rt.observe()).await {
+                Ok(Ok(o)) => o,
+                _ => continue,
+            }
+        };
+        let (free_memory_mib, pressure_some_avg10) = runtime::host_pressure();
+        let req = PollRequest {
+            node_id: node_id.clone(),
+            observed,
+            free_memory_mib,
+            pressure_some_avg10,
+            hold_ms: None,
+            failures: Vec::new(),
+            traffic: wake.take_traffic(),
+        };
+        let mut rb = client
+            .post(&url)
+            .timeout(Duration::from_secs(10))
+            .json(&req);
+        if let Some(t) = api_token.as_deref().filter(|t| !t.is_empty()) {
+            rb = rb.bearer_auth(t);
+        }
+        if let Err(e) = rb.send().await.and_then(|r| r.error_for_status()) {
+            tracing::debug!(error = %e, "could not report a wake early; it goes with the next poll");
         }
     }
 }

@@ -53,6 +53,9 @@ pub struct Wakeups {
     /// to fight over the same disk.
     restores: tokio::sync::Semaphore,
     wake: Box<WakeFn>,
+    /// Signalled after every wake, so a polling node can tell the master at
+    /// once rather than on its next poll.
+    pub woke: tokio::sync::Notify,
 }
 
 impl Wakeups {
@@ -69,6 +72,7 @@ impl Wakeups {
             unreported: Mutex::default(),
             restores: tokio::sync::Semaphore::new(parallel),
             wake: Box::new(wake),
+            woke: tokio::sync::Notify::new(),
         }
     }
 
@@ -119,15 +123,18 @@ impl Wakeups {
         let _permit = self.restores.acquire().await.context("shutting down")?;
         let me = self.clone();
         let id = id.to_string();
-        tokio::task::spawn_blocking(move || {
+        let me2 = self.clone();
+        let took = tokio::task::spawn_blocking(move || {
             let lock = me.lock(&id);
             let _held = lock.lock();
             let t0 = Instant::now();
             (me.wake)(&id)?;
-            Ok(t0.elapsed())
+            Ok::<_, anyhow::Error>(t0.elapsed())
         })
         .await
-        .context("the wake task panicked")?
+        .context("the wake task panicked")??;
+        me2.woke.notify_one();
+        Ok(took)
     }
 }
 

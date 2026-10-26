@@ -14,7 +14,7 @@
 //! to write for a freeze.
 
 use anyhow::{bail, Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command as Exec, Stdio};
 use std::time::{Duration, Instant};
 
@@ -62,6 +62,12 @@ pub struct RuntimeConfig {
     pub volume_root: PathBuf,
     /// Address plan for per-sandbox network namespaces.
     pub net: NetConfig,
+    /// Push a frozen sandbox's memory into compressed swap. Only worth it
+    /// where swap is zswap or zram; see `host.rs`, which decides.
+    pub reclaim_frozen: bool,
+    /// Compress the images Snapshot writes. Worth it on a slow disk; see
+    /// `host.rs`, which decides.
+    pub compress_snapshots: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -73,8 +79,80 @@ impl Default for RuntimeConfig {
             max_sandboxes: 0,
             volume_root: "/var/lib/forkd/volumes".into(),
             net: NetConfig::default(),
+            reclaim_frozen: false,
+            compress_snapshots: false,
         }
     }
+}
+
+/// Reclaim a frozen sandbox's memory, off the command path.
+///
+/// One worker for the whole node, taking sandboxes in the order they were
+/// frozen: reclaim costs CPU to compress (1.3 s for 376 MiB on bm), and a
+/// wave of idle demotions should not turn into a wave of threads. In 64 MiB
+/// steps, so a sandbox thawed partway through -- woken by a request -- stops
+/// being squeezed at once.
+fn reclaim_later(id: &str, cg: PathBuf) {
+    use std::sync::mpsc::{channel, Sender};
+    use std::sync::{Mutex, OnceLock};
+    static QUEUE: OnceLock<Mutex<Sender<(String, PathBuf)>>> = OnceLock::new();
+    let q = QUEUE.get_or_init(|| {
+        let (tx, rx) = channel::<(String, PathBuf)>();
+        std::thread::Builder::new()
+            .name("forkd-reclaim".into())
+            .spawn(move || {
+                for (id, cg) in rx {
+                    reclaim_frozen(&id, &cg);
+                }
+            })
+            .expect("spawning the reclaim worker");
+        Mutex::new(tx)
+    });
+    if let Ok(tx) = q.lock() {
+        let _ = tx.send((id.to_string(), cg));
+    }
+}
+
+fn reclaim_frozen(id: &str, cg: &Path) {
+    let frozen = || {
+        std::fs::read_to_string(cg.join("cgroup.freeze"))
+            .map(|s| s.trim() == "1")
+            .unwrap_or(false)
+    };
+    let mib = || {
+        std::fs::read_to_string(cg.join("memory.current"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map_or(0, |b| b >> 20)
+    };
+    if !frozen() {
+        return;
+    }
+    // Keep what is reclaimed in compressed RAM rather than letting zswap
+    // write it on to disk: that is the difference between 310 ms and 3.9 s
+    // to page it all back. Kernels before 6.8 have no such knob, and there
+    // some pages may reach disk -- slower to wake, never wrong.
+    let _ = std::fs::write(cg.join("memory.zswap.writeback"), "0");
+    let (t0, before) = (Instant::now(), mib());
+    // The kernel answers EAGAIN when it cannot take the WHOLE amount asked
+    // for, having taken what it could. Stopping at the first one left 135
+    // of 185 MiB on bm; halving the ask and carrying on gets the rest.
+    let mut ask = 64u64;
+    for _ in 0..(before / 4 + 16) {
+        if !frozen() {
+            break;
+        }
+        if std::fs::write(cg.join("memory.reclaim"), format!("{ask}M")).is_err() {
+            if ask == 4 {
+                break;
+            }
+            ask /= 2;
+        }
+    }
+    tracing::info!(
+        %id, before_mib = before, after_mib = mib(), ms = t0.elapsed().as_millis() as u64,
+        "reclaimed a frozen sandbox"
+    );
 }
 
 /// Holds no state of its own beyond its configuration -- everything it
@@ -564,6 +642,12 @@ impl Runtime {
             if want.is_serving() {
                 rt.accept_connections(id);
             }
+            // Only when Frozen is where it is staying. Hot -> Snapshot
+            // passes through Frozen, and squeezing a sandbox that is about
+            // to be checkpointed only makes the checkpoint page it back in.
+            if want == Tier::Frozen && rt.cfg.reclaim_frozen {
+                reclaim_later(id, rt.cgroup_path(id));
+            }
         };
         for _ in 0..Tier::ORDER.len() {
             let have = self
@@ -642,6 +726,12 @@ impl Runtime {
             std::thread::sleep(Duration::from_millis(1));
         }
         tracing::info!(%id, frozen = on, "freeze");
+        if self.cfg.reclaim_frozen && !on {
+            // After the thaw, which is what a waiting caller needs first.
+            // Back to the default, so a hot sandbox under real pressure can
+            // still spill to disk rather than be stuck.
+            let _ = std::fs::write(cg.join("memory.zswap.writeback"), "1");
+        }
         Ok(())
     }
 
@@ -649,11 +739,16 @@ impl Runtime {
         let dir = self.cfg.work_dir.join("snapshots").join(id);
         std::fs::create_dir_all(&dir)?;
         let img = dir.join("checkpoint.img");
-        self.runsc_timeout(
-            &["checkpoint", &format!("--image-path={}", dir.display()), id],
-            RUNSC_SNAPSHOT_TIMEOUT,
-        )
-        .with_context(|| format!("checkpointing {id}"))?;
+        let image_path = format!("--image-path={}", dir.display());
+        // Restore reads the compression from the image, so images written
+        // either way restore the same and a node can change its mind.
+        let mut args = vec!["checkpoint", image_path.as_str()];
+        if self.cfg.compress_snapshots {
+            args.push("--compression=flate-best-speed");
+        }
+        args.push(id);
+        self.runsc_timeout(&args, RUNSC_SNAPSHOT_TIMEOUT)
+            .with_context(|| format!("checkpointing {id}"))?;
         if !img.exists() && std::fs::read_dir(&dir)?.next().is_none() {
             bail!("checkpoint produced no image for {id}");
         }

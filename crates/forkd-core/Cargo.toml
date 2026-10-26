@@ -24,6 +24,7 @@ serde_json = { workspace = true }
 clap = { workspace = true }
 axum = { workspace = true }
 parking_lot = { workspace = true }
+libc = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 reqwest = { workspace = true }
