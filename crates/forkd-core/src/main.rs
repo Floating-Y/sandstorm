@@ -145,6 +145,18 @@ struct ServeArgs {
     /// the machine off the network.
     #[arg(long, default_value_t = 8.0)]
     admit_max_psi: f64,
+
+    /// Squeeze a frozen sandbox's memory into compressed swap: auto, on or
+    /// off. Auto turns it on where swap is zswap or zram, which on bm took
+    /// a frozen 376 MiB heap to 113 MiB at the cost of a 310 ms thaw.
+    #[arg(long, default_value = "auto")]
+    reclaim_frozen: forkd_core::node::Lever,
+    /// Compress snapshot images: auto, on or off. Auto measures the disk at
+    /// startup and compresses where it reads slower than 500 MB/s, which is
+    /// where a smaller image restores faster (on bm: 4.3x smaller, cold
+    /// restore 3.3 s -> 1.4 s).
+    #[arg(long, default_value = "auto")]
+    compress_snapshots: forkd_core::node::Lever,
 }
 
 #[derive(Args)]
@@ -348,6 +360,13 @@ async fn serve(a: ServeArgs) -> Result<()> {
             None => None,
         };
 
+        // Probed once, here, so the reasons land in the startup log where an
+        // operator looks for them.
+        let (reclaim_frozen, why) = node::decide_reclaim(a.reclaim_frozen);
+        tracing::info!(on = reclaim_frozen, reason = %why, "frozen-sandbox reclaim");
+        let (compress_snapshots, why) = node::decide_compression(a.compress_snapshots, &a.work_dir);
+        tracing::info!(on = compress_snapshots, reason = %why, "snapshot compression");
+
         let cfg = NodeConfig {
             node_id,
             master_url,
@@ -367,6 +386,8 @@ async fn serve(a: ServeArgs) -> Result<()> {
                     base: a.net_base,
                     prefix: a.net_prefix,
                 },
+                reclaim_frozen,
+                compress_snapshots,
             },
             hold: Duration::from_secs(a.hold_secs),
             // The same two numbers the master places with, applied here

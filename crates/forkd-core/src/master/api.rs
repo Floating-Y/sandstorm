@@ -324,6 +324,7 @@ pub fn router(st: St) -> Router {
     };
     let node_routes = Router::new()
         .route("/v1/node/poll", post(poll))
+        .route("/v1/node/traffic", post(node_traffic))
         .route("/v1/node/result", post(command_result))
         .layer(axum::middleware::from_fn({
             let st = st.clone();
@@ -1126,6 +1127,33 @@ async fn poll(
     Ok(Json(PollResponse { commands }))
 }
 
+/// A report out of turn, sent by a polling node the moment its gateway
+/// woke a sandbox.
+///
+/// The node's regular report rides on its next poll, and the one it has
+/// parked here can sit for the whole hold -- 25 s by default. Until then the
+/// master shows the old tier, and an explicit request for that same tier is
+/// a no-op because desired state already says so (measured on bm: a freeze
+/// sent 16 s after a wake did nothing). This closes that window to a round
+/// trip. It returns no commands, so it cannot race the parked poll for them.
+async fn node_traffic(
+    State(st): State<St>,
+    Extension(who): Extension<NodeIdentity>,
+    Json(req): Json<PollRequest>,
+) -> Result<StatusCode, ApiErr> {
+    if !who.authorises(&req.node_id) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "this certificate is not registered for that node id",
+        ));
+    }
+    apply_traffic(&st, &req)?;
+    // The parked poll diffs against the report it arrived with, from before
+    // the wake. Wake it so the node comes back with a current one.
+    st.wake_node(&req.node_id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub(super) fn take_execs(st: &St, node_id: &str) -> Vec<Command> {
     let mut q = st.exec_queue.lock();
     match q.get_mut(node_id) {
@@ -1748,6 +1776,14 @@ pub(super) fn record_failures(st: &St, req: &PollRequest) -> Result<(), ApiErr> 
 /// Only the node holding the sandbox is believed. Any node can put any id
 /// in its report, and one that does not hold the sandbox has no business
 /// keeping it awake.
+///
+/// And traffic only promotes a sandbox this same report shows serving --
+/// one that really was woken. A polling node can sit on a report for a
+/// whole hold, so traffic can arrive after the node has, quite rightly,
+/// demoted the sandbox on a later command once it had gone quiet. Found on
+/// bm: a freeze issued 16 s after the last request was undone at once by
+/// that request's late report. Late traffic still moves the idle clock;
+/// it just does not overrule a demotion that came after it.
 pub(super) fn apply_traffic(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
     if req.traffic.is_empty() {
         return Ok(());
@@ -1763,7 +1799,11 @@ pub(super) fn apply_traffic(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
             continue;
         }
         store.touch(id).map_err(ise)?;
-        if sb.tier != Tier::Hot {
+        let serving = req
+            .observed
+            .iter()
+            .any(|o| &o.id == id && o.tier.is_serving());
+        if serving && sb.tier != Tier::Hot {
             tracing::info!(sandbox = %id, node = %req.node_id, was = %sb.tier, "woken by traffic at its gateway");
             store.set_tier(id, Tier::Hot).map_err(ise)?;
         }

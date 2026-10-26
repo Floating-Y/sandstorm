@@ -2497,4 +2497,77 @@ async fn traffic_at_the_gateway_keeps_a_woken_sandbox_awake() {
     let resp = poll(&node, vec![id.clone()]).await;
     assert!(resp.commands.is_empty(), "got {:?}", resp.commands);
     assert_eq!(tier().await, "hot");
+
+    // Late traffic for a sandbox the node has since demoted -- it went
+    // quiet, then a freeze came -- must not undo the freeze.
+    let r = c
+        .post(format!("{}/v1/sandboxes/{id}/tier", h.base))
+        .json(&serde_json::json!({ "tier": "frozen" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+    let resp: PollResponse = c
+        .post(format!("{}/v1/node/poll", h.base))
+        .json(&serde_json::json!({
+            "node_id": node,
+            "observed": [ObservedSandbox { id: id.clone(), tier: Tier::Frozen, serving: false, ip: None, net_index: None }],
+            "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
+            "traffic": [id],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(resp.commands.is_empty(), "got {:?}", resp.commands);
+    assert_eq!(tier().await, "frozen");
+}
+
+/// A polling node reports a wake out of turn, so the master's view is right
+/// within a round trip rather than a whole hold later.
+#[tokio::test]
+async fn a_wake_reported_out_of_turn_is_adopted_at_once() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+    let created: serde_json::Value = c
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    c.post(format!("{}/v1/sandboxes/{id}/tier", h.base))
+        .json(&serde_json::json!({ "tier": "frozen" }))
+        .send()
+        .await
+        .unwrap();
+
+    let r = c
+        .post(format!("{}/v1/node/traffic", h.base))
+        .json(&serde_json::json!({
+            "node_id": "bm-1",
+            "observed": [ObservedSandbox { id: id.clone(), tier: Tier::Hot, serving: true, ip: None, net_index: None }],
+            "free_memory_mib": 2000, "pressure_some_avg10": 0.0,
+            "traffic": [id],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+    let sb: serde_json::Value = c
+        .get(format!("{}/v1/sandboxes/{id}", h.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(sb["tier"], "hot");
 }
