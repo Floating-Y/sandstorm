@@ -1039,6 +1039,7 @@ impl Runtime {
         // The process is gone; the writable layer stays, which is why
         // Snapshot frees memory but not disk.
         let _ = self.runsc(&["delete", "-force", id]);
+        self.release_net(id);
         tracing::info!(%id, "checkpointed");
         Ok(())
     }
@@ -1242,6 +1243,27 @@ impl Runtime {
             .trim()
             .parse()
             .ok()
+    }
+
+    /// Take a snapshotted sandbox's namespace down, keeping its slot; see
+    /// `net::release`. The per-address REJECT goes with it: with no route
+    /// left, the unreachable floor refuses faster than the rule did, and a
+    /// rule per snapshotted sandbox was one more line every outgoing packet
+    /// on the host walked past. `restore` rebuilds both through
+    /// `ensure_net`. A failure is logged, not returned: the snapshot itself
+    /// succeeded, and a namespace left up costs memory, not correctness.
+    fn release_net(&self, id: &str) {
+        let Some(index) = self.net_index_of(id) else {
+            return;
+        };
+        let ip = self.sandbox_ip(id);
+        if let Err(e) = net::release(&self.cfg.net, id, index) {
+            tracing::warn!(%id, error = %e, "could not release the network of a snapshotted sandbox");
+            return;
+        }
+        if let Some(ip) = ip {
+            let _ = net::allow(ip);
+        }
     }
 
     /// Refuse connections to this sandbox, because it is not running.

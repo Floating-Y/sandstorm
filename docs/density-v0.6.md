@@ -391,3 +391,30 @@ values, as a cold one does.
 486, 494, 498 and 645 MB/s, right across a bare threshold. A pool can
 still mix -- images are only restored on the node that wrote them, and
 restore reads the format from the image -- and `/metrics` shows which.
+## The Snapshot tier gives back its network namespace
+
+The multi-node load test topped out at 7284 healthy sandboxes, about 17x
+its hot capacity, and the limit was neither sandbox memory nor disk: it
+was kernel slab. A snapshotted sandbox's process is gone, but it kept its
+namespace and veth, ~0.4 MiB of unreclaimable kernel memory each; 1538 of
+them held 694 MiB of slab on a 1.9 GiB node. The snapshot image itself was
+3.2 MiB of disk.
+
+Now reaching Snapshot takes the namespace and veth down and keeps the
+slot: same index, addresses, gateway port and token. A restore rebuilds
+them before `runsc restore`. One `unreachable` route under the whole
+sandbox range replaces the per-sandbox REJECT for this tier: a sandbox
+with a namespace has a more specific /30 route through its veth; one
+without gets "no route to host" for anything sent to it -- which the
+gateway reads as cold and wakes on -- instead of its address following
+the default route off the machine.
+
+On bm, 200 sandboxes of a small HTTP template, all demoted to Snapshot:
+
+| | slab after → before | netns / veths | cold REJECT rules | wake p50 / p90, through the gateway |
+| --- | --- | --- | --- | --- |
+| before | **+65 MiB** (SUnreclaim +58) | 200 / 200 | 200 | 140 / 154 ms |
+| after | **+3 MiB** (SUnreclaim +1) | 0 / 0 | 0 | 174 / 181 ms |
+
+Rebuilding the network costs ~34 ms of the wake: eight `ip` invocations.
+Doing it over netlink directly would take most of that back.
