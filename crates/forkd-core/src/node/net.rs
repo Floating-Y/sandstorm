@@ -82,6 +82,13 @@ impl NetConfig {
         format!("{}/{}", self.base, self.prefix)
     }
 
+    /// The one slot the master never hands out, kept for the node's own
+    /// use: the seed sandbox a warm template image is taken from. The
+    /// master's plan stops one short of it (`max_net_index` in main.rs).
+    pub fn reserved_index(&self) -> u32 {
+        (1u32 << (32 - self.prefix.min(30) as u32)) / 4 - 1
+    }
+
     /// The /30 for one index. Interface names stay inside the kernel's
     /// 15-character limit even at the top of the range.
     pub fn slot(&self, id: &str, index: u32) -> Result<Slot> {

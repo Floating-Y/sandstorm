@@ -52,6 +52,9 @@ use crate::master::SANDBOX_TOKEN_HEADER;
 /// long. For whoever is measuring cold starts; nothing depends on it.
 pub const WAKE_HEADER: &str = "x-forkd-woke-ms";
 
+/// How long a request waits for a sandbox that is up but not yet listening.
+const BOOT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Everything the gateway needs to serve one sandbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Exposed {
@@ -291,6 +294,19 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
                     tracing::info!(id = %t.id, ms = took.as_millis() as u64, "woke on traffic");
                     woke = Some(took);
                     sent = send().await;
+                    // Up and still refusing: the program is still starting
+                    // -- a sandbox created a moment ago, typically. Wait for
+                    // it a while rather than answer 502 to a request that
+                    // would have succeeded a second later.
+                    let deadline = std::time::Instant::now() + BOOT_WAIT;
+                    let mut pause = std::time::Duration::from_millis(50);
+                    while sent.as_ref().is_err_and(|e| e.is_connect())
+                        && std::time::Instant::now() < deadline
+                    {
+                        tokio::time::sleep(pause).await;
+                        pause = (pause * 2).min(std::time::Duration::from_millis(500));
+                        sent = send().await;
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(id = %t.id, error = %format!("{e:#}"), "could not wake on traffic");

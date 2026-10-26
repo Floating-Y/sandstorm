@@ -2571,3 +2571,50 @@ async fn a_wake_reported_out_of_turn_is_adopted_at_once() {
         .unwrap();
     assert_eq!(sb["tier"], "hot");
 }
+
+#[tokio::test]
+async fn the_seed_prefix_cannot_be_used_for_a_sandbox() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+    let r = reqwest::Client::new()
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python", "id": "forkd-warm-mine" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+}
+
+/// Nodes decide their density levers for themselves, so a pool can be
+/// mixed; /metrics is where that shows.
+#[tokio::test]
+async fn what_each_node_has_on_shows_in_metrics() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    let c = reqwest::Client::new();
+    c.post(format!("{}/v1/node/poll", h.base))
+        .json(&serde_json::json!({
+            "node_id": "bm-1", "observed": [],
+            "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
+            "features": ["swap:zswap", "snapshot-compression"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    let m = c
+        .get(format!("{}/metrics", h.base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        m.contains(
+            r#"forkd_node_feature{node="bm-1",pool="default",feature="snapshot-compression"} 1"#
+        ),
+        "{m}"
+    );
+    assert!(m.contains(r#"feature="swap:zswap"} 1"#));
+}

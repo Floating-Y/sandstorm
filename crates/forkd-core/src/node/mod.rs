@@ -15,15 +15,19 @@ mod bundle;
 mod gateway;
 mod host;
 mod net;
+mod reclaim;
 mod runtime;
 mod wake;
 
 pub use agent::{serve_listen, Identity as AgentIdentity};
 pub use bundle::TemplateSpec;
 pub use gateway::{Exposed, Gateway};
-pub use host::{decide_compression, decide_reclaim, Lever};
+pub use host::{
+    bootstrap_compressed_swap, compressed_swap, decide_compression, decide_reclaim, pin_in_zswap,
+    Lever,
+};
 pub use net::NetConfig;
-pub use runtime::{Runtime, RuntimeConfig};
+pub use runtime::{Runtime, RuntimeConfig, WARM_SEED_PREFIX};
 pub use wake::Wakeups;
 
 use anyhow::{bail, Context, Result};
@@ -92,6 +96,9 @@ pub struct NodeConfig {
     /// So the node now decides for itself. It is the only process with a
     /// current number, and it is the one that pays.
     pub admit_min_free_mib: u64,
+    /// Which density levers are on here, for the master to show per node.
+    /// Decided at startup (`host.rs`), so fixed for the process's life.
+    pub features: Vec<String>,
     /// And above this 10-second memory-pressure average. PSI is the
     /// signal that leads free memory: on bm the apparent cost per sandbox
     /// FELL while pressure climbed, because swap was absorbing it.
@@ -252,6 +259,7 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
     let mut next_hold = cfg.hold;
     // Listeners for the sandboxes exposed off-box. Reconciled on every poll.
     let wake = wakeups(&cfg, &rt);
+    start_workers(&cfg, &rt, &wake);
     let mut gateway = Gateway::waking(wake.clone());
     tokio::spawn(report_wakes(
         cfg.node_id.clone(),
@@ -282,6 +290,39 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
                 tokio::time::sleep(net_backoff).await;
                 net_backoff = (net_backoff * 2).min(Duration::from_secs(15));
                 next_hold = cfg.hold;
+            }
+        }
+    }
+}
+
+/// The node's background workers, the same whichever way it is driven.
+fn start_workers(cfg: &NodeConfig, rt: &Runtime, wake: &Arc<Wakeups>) {
+    if cfg.runtime.reclaim_hot {
+        reclaim::start(rt.clone(), cfg.admit_max_psi);
+    }
+    if cfg.runtime.prefetch_snapshots {
+        tokio::spawn(prefetch(rt.clone(), wake.clone()));
+    }
+}
+
+/// Warm the page cache with the snapshot images of sandboxes about to be
+/// called, one at a time so a prediction never competes with a real wake
+/// for the disk more than it has to.
+async fn prefetch(rt: Runtime, wake: Arc<Wakeups>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        for id in wake.due_prefetch(Instant::now()) {
+            let rt = rt.clone();
+            let who = id.clone();
+            let t0 = Instant::now();
+            match tokio::task::spawn_blocking(move || rt.prefetch_snapshot(&who)).await {
+                Ok(Ok(Some(bytes))) => tracing::info!(
+                    %id, mib = bytes >> 20, ms = t0.elapsed().as_millis() as u64,
+                    "prefetched the snapshot ahead of its predicted request"
+                ),
+                Ok(Ok(None)) => {}
+                Ok(Err(e)) => tracing::debug!(%id, error = %e, "prefetch failed"),
+                Err(_) => {}
             }
         }
     }
@@ -318,6 +359,7 @@ async fn report_wakes(
             hold_ms: None,
             failures: Vec::new(),
             traffic: wake.take_traffic(),
+            features: Vec::new(),
         };
         let mut rb = client
             .post(&url)
@@ -448,6 +490,7 @@ async fn report(
         hold_ms: hold.map(|h| h.as_millis() as u64),
         failures,
         traffic: wake.take_traffic(),
+        features: cfg.features.clone(),
     })
 }
 
@@ -851,6 +894,7 @@ mod wake_tests {
             hold: Duration::from_secs(25),
             admit_min_free_mib: 0,
             admit_max_psi: f64::MAX,
+            features: Vec::new(),
         };
         (cfg, Runtime::new(runtime).unwrap())
     }

@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as Exec, Stdio};
 use std::time::{Duration, Instant};
 
-use super::bundle::{self, TemplateSpec};
+use super::bundle::{self, TemplateSpec, WarmSpec};
 use super::net::{self, NetConfig};
 use crate::proto::ObservedSandbox;
 use crate::tier::Tier;
@@ -50,6 +50,15 @@ const RUNSC_TIMEOUT: Duration = Duration::from_secs(20);
 /// Measured at 84 ms on bm, but a large sandbox on a loaded node is slower.
 const RUNSC_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// The node's own seed sandboxes, which a warm template image is taken
+/// from. `observe` never reports them, and the master refuses the prefix
+/// for anything it creates, so the two can never be confused.
+pub const WARM_SEED_PREFIX: &str = "forkd-warm-";
+/// How long a failed seed keeps a template cold before it is tried again.
+const WARM_RETRY: Duration = Duration::from_secs(600);
+/// How long `after_restore` may take.
+const AFTER_RESTORE_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub runsc: String,
@@ -68,6 +77,15 @@ pub struct RuntimeConfig {
     /// Compress the images Snapshot writes. Worth it on a slow disk; see
     /// `host.rs`, which decides.
     pub compress_snapshots: bool,
+    /// Keep squeezing the cold pages of hot sandboxes into compressed swap,
+    /// paced by their own memory stalls; see `reclaim.rs`.
+    pub reclaim_hot: bool,
+    /// Read a periodic sandbox's snapshot image just before its next
+    /// predicted request; see `wake.rs`.
+    pub prefetch_snapshots: bool,
+    /// Turn zswap writeback off for reclaimed sandboxes. Right when swap is
+    /// zswap over a disk, wrong over zram; `host::pin_in_zswap` decides.
+    pub pin_in_zswap: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -81,6 +99,9 @@ impl Default for RuntimeConfig {
             net: NetConfig::default(),
             reclaim_frozen: false,
             compress_snapshots: false,
+            reclaim_hot: false,
+            prefetch_snapshots: false,
+            pin_in_zswap: true,
         }
     }
 }
@@ -92,28 +113,41 @@ impl Default for RuntimeConfig {
 /// wave of idle demotions should not turn into a wave of threads. In 64 MiB
 /// steps, so a sandbox thawed partway through -- woken by a request -- stops
 /// being squeezed at once.
-fn reclaim_later(id: &str, cg: PathBuf) {
+fn reclaim_later(id: &str, cg: PathBuf, pin: bool) {
     use std::sync::mpsc::{channel, Sender};
     use std::sync::{Mutex, OnceLock};
-    static QUEUE: OnceLock<Mutex<Sender<(String, PathBuf)>>> = OnceLock::new();
+    type Job = (String, PathBuf, bool);
+    static QUEUE: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
     let q = QUEUE.get_or_init(|| {
-        let (tx, rx) = channel::<(String, PathBuf)>();
+        let (tx, rx) = channel::<Job>();
         std::thread::Builder::new()
             .name("forkd-reclaim".into())
             .spawn(move || {
-                for (id, cg) in rx {
-                    reclaim_frozen(&id, &cg);
+                for (id, cg, pin) in rx {
+                    reclaim_frozen(&id, &cg, pin);
                 }
             })
             .expect("spawning the reclaim worker");
         Mutex::new(tx)
     });
     if let Ok(tx) = q.lock() {
-        let _ = tx.send((id.to_string(), cg));
+        let _ = tx.send((id.to_string(), cg, pin));
     }
 }
 
-fn reclaim_frozen(id: &str, cg: &Path) {
+/// Where a sandbox's reclaimed pages go: kept in zswap's pool when the swap
+/// behind it is a disk, or past zswap straight to the device when that
+/// device is zram -- otherwise every page is compressed twice, once into
+/// zswap and again when zswap hands it on.
+pub(super) fn route_reclaim(cg: &Path, pin_in_zswap: bool) {
+    if pin_in_zswap {
+        let _ = std::fs::write(cg.join("memory.zswap.writeback"), "0");
+    } else {
+        let _ = std::fs::write(cg.join("memory.zswap.max"), "0");
+    }
+}
+
+fn reclaim_frozen(id: &str, cg: &Path, pin: bool) {
     let frozen = || {
         std::fs::read_to_string(cg.join("cgroup.freeze"))
             .map(|s| s.trim() == "1")
@@ -132,7 +166,7 @@ fn reclaim_frozen(id: &str, cg: &Path) {
     // write it on to disk: that is the difference between 310 ms and 3.9 s
     // to page it all back. Kernels before 6.8 have no such knob, and there
     // some pages may reach disk -- slower to wake, never wrong.
-    let _ = std::fs::write(cg.join("memory.zswap.writeback"), "0");
+    route_reclaim(cg, pin);
     let (t0, before) = (Instant::now(), mib());
     // The kernel answers EAGAIN when it cannot take the WHOLE amount asked
     // for, having taken what it could. Stopping at the first one left 135
@@ -330,6 +364,9 @@ impl Runtime {
                 continue;
             }
             let id = entry.file_name().to_string_lossy().into_owned();
+            if id.starts_with(WARM_SEED_PREFIX) {
+                continue;
+            }
 
             if self.cfg.work_dir.join("snapshots").join(&id).is_dir() {
                 found.push(ObservedSandbox {
@@ -366,6 +403,42 @@ impl Runtime {
 
     fn cgroup_path(&self, id: &str) -> PathBuf {
         PathBuf::from("/sys/fs/cgroup/forkd").join(id)
+    }
+
+    /// Read a snapshotted sandbox's image so it is in the page cache when a
+    /// request wakes it. Returns the bytes read, or `None` when there is no
+    /// image -- the sandbox is not snapshotted, or has gone.
+    pub fn prefetch_snapshot(&self, id: &str) -> Result<Option<u64>> {
+        use std::io::Read;
+        let dir = self.cfg.work_dir.join("snapshots").join(id);
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            return Ok(None);
+        };
+        let mut buf = vec![0u8; 1 << 20];
+        let mut total = 0u64;
+        for e in rd.flatten() {
+            if !e.path().is_file() {
+                continue;
+            }
+            let mut f = std::fs::File::open(e.path())?;
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                total += n as u64;
+            }
+        }
+        Ok(Some(total))
+    }
+
+    pub(super) fn pins_in_zswap(&self) -> bool {
+        self.cfg.pin_in_zswap
+    }
+
+    /// The sandbox's cgroup, for the node's other workers.
+    pub(super) fn cgroup_dir(&self, id: &str) -> PathBuf {
+        self.cgroup_path(id)
     }
 
     fn is_frozen(&self, id: &str) -> bool {
@@ -466,6 +539,38 @@ impl Runtime {
         .with_context(|| format!("building bundle for {id}"))?;
 
         tracing::info!(%id, %template, port, ?volume, "create");
+
+        // A warm start: restore the template's booted image instead of
+        // booting. Not with a volume -- the seed booted against an empty
+        // one, and a program that read its volume at startup would carry
+        // that view into a sandbox whose volume is not empty -- and never for
+        // a seed itself.
+        let warm = match (&spec.warm, from_tag, restore_from, volume) {
+            (Some(w), None, None, None) if !id.starts_with(WARM_SEED_PREFIX) => {
+                let dir = self.warm_dir(template, req.spec, port, &rootfs);
+                if dir.join("ready").exists() {
+                    Some((dir, w.clone()))
+                } else {
+                    self.seed_later(template, req.spec, port, dir);
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some((image, w)) = warm {
+            let t0 = Instant::now();
+            match self.restore_warm(id, &layout.bundle, &image, &w) {
+                Ok(()) => {
+                    self.accept_connections(id);
+                    tracing::info!(%id, %template, ms = t0.elapsed().as_millis() as u64, "started warm");
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!(%id, %template, error = %format!("{e:#}"), "warm start failed; booting instead");
+                    let _ = self.runsc(&["delete", "-force", id]);
+                }
+            }
+        }
 
         match from_tag {
             // A fork: restore from the tag's image. One image serves any
@@ -582,6 +687,184 @@ impl Runtime {
         Ok(size)
     }
 
+    /// Where a template's warm image lives, keyed by everything that would
+    /// make an image of it wrong: the spec as the master sent it, the port,
+    /// this node's runsc and kernel, and when the template's rootfs last
+    /// changed. A change to any of them is a new key, and so a new seed.
+    fn warm_dir(
+        &self,
+        template: &str,
+        spec: &serde_json::Value,
+        port: u16,
+        rootfs: &Path,
+    ) -> PathBuf {
+        use sha2::{Digest, Sha256};
+        static FP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let fp = FP.get_or_init(|| fingerprint().unwrap_or_default());
+        let mtime = |p: &Path| {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos())
+        };
+        let mut h = Sha256::new();
+        h.update(template.as_bytes());
+        h.update(serde_json::to_vec(spec).unwrap_or_default());
+        h.update(port.to_le_bytes());
+        h.update(fp.as_bytes());
+        h.update(mtime(rootfs).to_le_bytes());
+        h.update(mtime(&rootfs.join("app")).to_le_bytes());
+        let key = hex::encode(&h.finalize()[..12]);
+        self.cfg.work_dir.join("warm").join(template).join(key)
+    }
+
+    fn restore_warm(&self, id: &str, bundle: &Path, image: &Path, w: &WarmSpec) -> Result<()> {
+        self.ensure_net(id)?;
+        self.runsc_spawn(
+            id,
+            &[
+                "restore",
+                "--bundle",
+                &bundle.to_string_lossy(),
+                &format!("--image-path={}", image.display()),
+                "--detach",
+                id,
+            ],
+        )
+        .context("restoring the warm image")?;
+        if !w.after_restore.is_empty() {
+            let (_, stderr, code) = self
+                .exec(id, &w.after_restore, AFTER_RESTORE_TIMEOUT)
+                .context("running after_restore")?;
+            if code != 0 {
+                bail!("after_restore exited {code}: {}", stderr.trim());
+            }
+        }
+        Ok(())
+    }
+
+    /// Take a template's warm image in the background, from a sandbox of
+    /// its own, so no caller's request state can end up in it.
+    ///
+    /// One seed at a time on a node -- it uses the node's single reserved
+    /// network slot -- and none while the node is short of memory.
+    fn seed_later(&self, template: &str, spec: &serde_json::Value, port: u16, dir: PathBuf) {
+        use std::sync::{Mutex, OnceLock};
+        static BUSY: OnceLock<Mutex<()>> = OnceLock::new();
+        let failed = dir.with_extension("failed");
+        let recently_failed = std::fs::metadata(&failed)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age < WARM_RETRY);
+        if recently_failed || host_pressure().0 < 1024 {
+            return;
+        }
+        let Ok(guard) = BUSY.get_or_init(Mutex::default).try_lock() else {
+            return;
+        };
+        drop(guard);
+        let (rt, template, spec) = (self.clone(), template.to_string(), spec.clone());
+        let spawned = std::thread::Builder::new()
+            .name("forkd-warm-seed".into())
+            .spawn(move || {
+                let Ok(_one) = BUSY.get_or_init(Mutex::default).try_lock() else {
+                    return;
+                };
+                if dir.join("ready").exists() {
+                    return;
+                }
+                let t0 = Instant::now();
+                match rt.seed(&template, &spec, port, &dir) {
+                    Ok(mib) => tracing::info!(
+                        %template, image_mib = mib, ms = t0.elapsed().as_millis() as u64,
+                        "warm image ready; new sandboxes of this template start from it"
+                    ),
+                    Err(e) => {
+                        tracing::warn!(%template, error = %format!("{e:#}"), "could not take a warm image; staying cold for now");
+                        let _ = std::fs::create_dir_all(dir.parent().unwrap_or(&dir));
+                        let _ = std::fs::write(&failed, format!("{e:#}\n"));
+                    }
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "could not start a warm seed");
+        }
+    }
+
+    fn seed(&self, template: &str, spec: &serde_json::Value, port: u16, dir: &Path) -> Result<u64> {
+        let w: WarmSpec = serde_json::from_value::<TemplateSpec>(spec.clone())?
+            .warm
+            .unwrap_or_default();
+        let key = dir.file_name().unwrap_or_default().to_string_lossy();
+        let seed = format!("{WARM_SEED_PREFIX}{}", &key[..key.len().min(12)]);
+        let slot = self.cfg.net.reserved_index();
+        // Whatever an interrupted seed left behind.
+        let _ = self.destroy_with_net(&seed, Some(slot));
+
+        let result = (|| {
+            self.create(&CreateRequest {
+                id: &seed,
+                template,
+                spec,
+                port,
+                volume: None,
+                net_index: Some(slot),
+                from_tag: None,
+                gateway_port: None,
+                token: "",
+            })?;
+            let ip = self.sandbox_ip(&seed).context("the seed has no address")?;
+            let deadline = Instant::now() + Duration::from_secs(w.ready_timeout_secs);
+            let addr = std::net::SocketAddr::from((ip, port));
+            while std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_err() {
+                if Instant::now() > deadline {
+                    bail!(
+                        "the seed was not listening on {port} after {}s",
+                        w.ready_timeout_secs
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            // Let the program finish with the probe's connection, so the
+            // image does not carry a half-handled socket.
+            std::thread::sleep(Duration::from_millis(300));
+
+            let tmp = dir.with_extension("tmp");
+            let _ = std::fs::remove_dir_all(&tmp);
+            std::fs::create_dir_all(&tmp)?;
+            // Uncompressed on purpose: this image is restored on every
+            // create, so it lives in the page cache, where an uncompressed
+            // image restores fastest (138 ms against 696 on bm).
+            self.runsc_timeout(
+                &[
+                    "checkpoint",
+                    &format!("--image-path={}", tmp.display()),
+                    &seed,
+                ],
+                RUNSC_SNAPSHOT_TIMEOUT,
+            )
+            .context("checkpointing the seed")?;
+            std::fs::write(tmp.join("ready"), "")?;
+            // Older images of this template are for a spec or rootfs that
+            // no longer exists.
+            if let Some(parent) = dir.parent() {
+                for e in std::fs::read_dir(parent).into_iter().flatten().flatten() {
+                    if e.path() != tmp {
+                        let _ = std::fs::remove_dir_all(e.path());
+                        let _ = std::fs::remove_file(e.path());
+                    }
+                }
+            }
+            std::fs::rename(&tmp, dir)?;
+            Ok(dir_size(dir) >> 20)
+        })();
+        let _ = self.runsc(&["delete", "-force", &seed]);
+        let _ = self.destroy_with_net(&seed, Some(slot));
+        result
+    }
+
     /// Remove a tag's image. Only called once the master knows nothing is
     /// forked from it.
     pub fn drop_tag(&self, tag: &str) -> Result<()> {
@@ -646,7 +929,7 @@ impl Runtime {
             // passes through Frozen, and squeezing a sandbox that is about
             // to be checkpointed only makes the checkpoint page it back in.
             if want == Tier::Frozen && rt.cfg.reclaim_frozen {
-                reclaim_later(id, rt.cgroup_path(id));
+                reclaim_later(id, rt.cgroup_path(id), rt.cfg.pin_in_zswap);
             }
         };
         for _ in 0..Tier::ORDER.len() {
@@ -726,10 +1009,11 @@ impl Runtime {
             std::thread::sleep(Duration::from_millis(1));
         }
         tracing::info!(%id, frozen = on, "freeze");
-        if self.cfg.reclaim_frozen && !on {
+        if self.cfg.reclaim_frozen && self.cfg.pin_in_zswap && !self.cfg.reclaim_hot && !on {
             // After the thaw, which is what a waiting caller needs first.
             // Back to the default, so a hot sandbox under real pressure can
-            // still spill to disk rather than be stuck.
+            // still spill to disk rather than be stuck -- unless hot reclaim
+            // is managing it, which wants compressed RAM only.
             let _ = std::fs::write(cg.join("memory.zswap.writeback"), "1");
         }
         Ok(())
@@ -1242,4 +1526,83 @@ fn dir_size(p: &std::path::Path) -> u64 {
         .filter_map(|e| e.metadata().ok())
         .map(|m| if m.is_dir() { 0 } else { m.len() })
         .sum()
+}
+
+#[cfg(test)]
+mod warm_tests {
+    use super::*;
+
+    fn rt(work: &Path) -> Runtime {
+        Runtime {
+            cfg: RuntimeConfig {
+                work_dir: work.to_path_buf(),
+                volume_root: work.join("volumes"),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// A seed is the node's own business: reporting it would have the
+    /// master destroy it as an orphan halfway through being imaged.
+    #[test]
+    fn a_seed_is_never_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = rt(dir.path());
+        for id in ["sb-real", "forkd-warm-abc123"] {
+            std::fs::create_dir_all(dir.path().join("bundles").join(id)).unwrap();
+            std::fs::create_dir_all(dir.path().join("snapshots").join(id)).unwrap();
+        }
+        let ids: Vec<String> = rt.observe().unwrap().into_iter().map(|o| o.id).collect();
+        assert_eq!(ids, vec!["sb-real".to_string()]);
+    }
+
+    /// Anything that would make an image wrong makes a new key.
+    #[test]
+    fn the_warm_key_follows_the_spec_port_and_rootfs() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = rt(dir.path());
+        let rootfs = dir.path().join("templates/py/rootfs");
+        std::fs::create_dir_all(rootfs.join("app")).unwrap();
+        let spec = serde_json::json!({"args": ["python3", "app.py"], "warm": {}});
+        let a = rt.warm_dir("py", &spec, 8080, &rootfs);
+        assert_eq!(a, rt.warm_dir("py", &spec, 8080, &rootfs), "stable");
+        assert_ne!(a, rt.warm_dir("py", &spec, 9090, &rootfs), "port");
+        let other = serde_json::json!({"args": ["python3", "other.py"], "warm": {}});
+        assert_ne!(a, rt.warm_dir("py", &other, 8080, &rootfs), "spec");
+        assert!(a.starts_with(dir.path().join("warm/py")));
+
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(rootfs.join("app/new.py"), "").unwrap();
+        assert_ne!(a, rt.warm_dir("py", &spec, 8080, &rootfs), "rootfs changed");
+    }
+
+    #[test]
+    fn warm_is_opt_in_and_parses_with_defaults() {
+        let plain: TemplateSpec =
+            serde_json::from_value(serde_json::json!({"args": ["x"]})).unwrap();
+        assert!(plain.warm.is_none());
+        let warm: TemplateSpec = serde_json::from_value(
+            serde_json::json!({"args": ["x"], "warm": {"after_restore": ["kill", "-USR1", "1"]}}),
+        )
+        .unwrap();
+        let w = warm.warm.unwrap();
+        assert_eq!(w.after_restore, vec!["kill", "-USR1", "1"]);
+        assert_eq!(w.ready_timeout_secs, 60);
+    }
+
+    /// The node's slot and the master's plan must not overlap.
+    #[test]
+    fn the_reserved_slot_is_past_the_masters_plan() {
+        let net = NetConfig::default();
+        assert_eq!(net.prefix, 16);
+        assert_eq!(net.reserved_index(), 16383);
+        assert!(
+            net.slot("seed", net.reserved_index()).is_ok(),
+            "it is a real slot"
+        );
+        assert!(
+            net.slot("x", net.reserved_index() + 1).is_err(),
+            "and the last one"
+        );
+    }
 }

@@ -47,8 +47,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::{
-    command_id, net, report, run_one, runtime, sooner, wakeups, write_private, Failing, Gateway,
-    NodeConfig, Runtime, Step, Wakeups,
+    command_id, net, report, run_one, runtime, sooner, start_workers, wakeups, write_private,
+    Failing, Gateway, NodeConfig, Runtime, Step, Wakeups,
 };
 use crate::proto::{AgentHello, SyncRequest, SyncResponse};
 
@@ -266,6 +266,7 @@ pub async fn serve_listen(cfg: NodeConfig, listen: SocketAddr) -> Result<()> {
 
     let server = crate::tls::plain_server_config(&identity.cert_pem, &identity.key_pem)?;
     let wake = wakeups(&cfg, &rt);
+    start_workers(&cfg, &rt, &wake);
     let agent = Arc::new(Agent {
         secret: identity.secret.clone(),
         hello: about,
