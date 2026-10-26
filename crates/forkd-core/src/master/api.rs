@@ -1106,6 +1106,7 @@ async fn poll(
     // of a machine that accepts scheduling the moment its service is up,
     // without the node listening on anything.
     record_failures(&st, &req)?;
+    apply_traffic(&st, &req)?;
 
     let mut commands = diff(&st, &req)?;
     commands.extend(take_execs(&st, &req.node_id));
@@ -1730,6 +1731,41 @@ pub(super) fn record_failures(st: &St, req: &PollRequest) -> Result<(), ApiErr> 
                 sandbox = %f.id, node = %req.node_id, attempts = f.attempts,
                 error = %f.error, "node reported a failing sandbox"
             );
+        }
+    }
+    Ok(())
+}
+
+/// Requests the node's gateway forwarded since it last reported.
+///
+/// The gateway wakes a cold sandbox on its own, so by the time this arrives
+/// the sandbox may already be hot against a desired tier that says
+/// otherwise. Making Hot the desired tier here, before `diff`, is what stops
+/// the next diff from putting it straight back to sleep. And every request
+/// moves the idle clock, which nothing did for gateway traffic before: a
+/// sandbox serving requests on its port was demoted as idle on schedule.
+///
+/// Only the node holding the sandbox is believed. Any node can put any id
+/// in its report, and one that does not hold the sandbox has no business
+/// keeping it awake.
+pub(super) fn apply_traffic(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
+    if req.traffic.is_empty() {
+        return Ok(());
+    }
+    let store = st.store();
+    let ise = |e: anyhow::Error| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    for id in &req.traffic {
+        let Some(sb) = store.get_sandbox(id).map_err(ise)? else {
+            continue;
+        };
+        if sb.node_id != req.node_id {
+            tracing::warn!(sandbox = %id, node = %req.node_id, holder = %sb.node_id, "ignored traffic reported by a node that does not hold the sandbox");
+            continue;
+        }
+        store.touch(id).map_err(ise)?;
+        if sb.tier != Tier::Hot {
+            tracing::info!(sandbox = %id, node = %req.node_id, was = %sb.tier, "woken by traffic at its gateway");
+            store.set_tier(id, Tier::Hot).map_err(ise)?;
         }
     }
     Ok(())

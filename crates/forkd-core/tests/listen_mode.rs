@@ -105,6 +105,7 @@ async fn fake_sync(
             pressure_some_avg10: 0.0,
             hold_ms: None,
             failures: vec![],
+            traffic: vec![],
         },
         results: vec![],
         retry_in_ms: None,

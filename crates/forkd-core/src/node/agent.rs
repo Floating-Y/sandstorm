@@ -47,8 +47,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::{
-    command_id, net, report, run_one, runtime, sooner, write_private, Failing, Gateway, NodeConfig,
-    Runtime, Step,
+    command_id, net, report, run_one, runtime, sooner, wakeups, write_private, Failing, Gateway,
+    NodeConfig, Runtime, Step, Wakeups,
 };
 use crate::proto::{AgentHello, SyncRequest, SyncResponse};
 
@@ -134,6 +134,7 @@ struct Inner {
     rt: Runtime,
     failing: HashMap<String, Failing>,
     gateway: Gateway,
+    wake: Arc<Wakeups>,
 }
 
 fn authorised(agent: &Agent, headers: &HeaderMap) -> bool {
@@ -188,6 +189,7 @@ async fn sync(
         rt,
         failing,
         gateway,
+        wake,
     } = &mut *guard;
 
     let now = Instant::now();
@@ -198,7 +200,7 @@ async fn sync(
             let mut asked_about: Vec<String> = Vec::with_capacity(commands.len());
             for cmd in commands {
                 asked_about.push(command_id(cmd).to_string());
-                match run_one(&agent.cfg, rt, failing, cmd, now) {
+                match run_one(&agent.cfg, rt, failing, wake, cmd, now) {
                     Step::Done => {}
                     Step::Later(wait) => soonest = sooner(soonest, wait),
                     Step::Answered(r) => results.push(r),
@@ -221,7 +223,7 @@ async fn sync(
 
     // After the batch, not before: the master diffs against this, and it
     // has to see what the batch just did.
-    let report = report(&agent.cfg, rt, failing, gateway, None)
+    let report = report(&agent.cfg, rt, failing, gateway, wake, None)
         .await
         .map_err(|e| refuse(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
     Ok(Json(SyncResponse {
@@ -263,13 +265,15 @@ pub async fn serve_listen(cfg: NodeConfig, listen: SocketAddr) -> Result<()> {
     );
 
     let server = crate::tls::plain_server_config(&identity.cert_pem, &identity.key_pem)?;
+    let wake = wakeups(&cfg, &rt);
     let agent = Arc::new(Agent {
         secret: identity.secret.clone(),
         hello: about,
         inner: tokio::sync::Mutex::new(Inner {
             rt,
             failing: HashMap::new(),
-            gateway: Gateway::new(),
+            gateway: Gateway::waking(wake.clone()),
+            wake,
         }),
         cfg,
     });

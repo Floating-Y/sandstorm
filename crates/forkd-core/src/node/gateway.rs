@@ -29,9 +29,11 @@
 //!
 //! **Cold sandboxes need no tier lookup here.** #327 made a sandbox that is
 //! not hot REJECT connections with a TCP reset, so the forward fails at once
-//! with connection-refused rather than hanging, and the gateway turns that
-//! into a 503 naming the reason. The gateway therefore holds no tier state
-//! and cannot go stale against it.
+//! with connection-refused rather than hanging. The gateway takes that as
+//! the sandbox being cold, wakes it (`wake.rs`) and forwards again, so the
+//! caller sees a slower response rather than an error. It therefore holds
+//! no tier state and cannot go stale against it; a listener stays up for
+//! every tier that is on this node, frozen and snapshotted included.
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -43,7 +45,12 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use tokio::task::JoinHandle;
 
+use super::wake::Wakeups;
 use crate::master::SANDBOX_TOKEN_HEADER;
+
+/// How the response says a request had to wait for a wake, and for how
+/// long. For whoever is measuring cold starts; nothing depends on it.
+pub const WAKE_HEADER: &str = "x-forkd-woke-ms";
 
 /// Everything the gateway needs to serve one sandbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +101,8 @@ struct Target {
     /// longer touches the socket; only a port or address change does.
     token: std::sync::RwLock<String>,
     client: reqwest::Client,
+    /// `None` only in tests that exercise the token check alone.
+    wake: Option<Arc<Wakeups>>,
 }
 
 /// Listeners for the sandboxes currently exposed on this node.
@@ -106,11 +115,21 @@ struct Live {
 #[derive(Default)]
 pub struct Gateway {
     running: HashMap<String, Live>,
+    wake: Option<Arc<Wakeups>>,
 }
 
 impl Gateway {
+    /// A gateway that answers a cold sandbox's requests with a 503.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A gateway that wakes a cold sandbox when a request arrives for it.
+    pub fn waking(wake: Arc<Wakeups>) -> Self {
+        Self {
+            running: HashMap::new(),
+            wake: Some(wake),
+        }
     }
 
     /// Bring the listeners in line with what should be exposed.
@@ -157,7 +176,7 @@ impl Gateway {
                 }
                 continue;
             }
-            match spawn_one(e.clone()).await {
+            match spawn_one(e.clone(), self.wake.clone()).await {
                 Ok((target, handle)) => {
                     tracing::info!(
                         id = %e.id, port = e.gateway_port,
@@ -186,7 +205,10 @@ impl Gateway {
     }
 }
 
-async fn spawn_one(e: Exposed) -> anyhow::Result<(Arc<Target>, JoinHandle<()>)> {
+async fn spawn_one(
+    e: Exposed,
+    wake: Option<Arc<Wakeups>>,
+) -> anyhow::Result<(Arc<Target>, JoinHandle<()>)> {
     let bind: SocketAddr = format!("0.0.0.0:{}", e.gateway_port).parse()?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let target = Arc::new(Target {
@@ -198,6 +220,7 @@ async fn spawn_one(e: Exposed) -> anyhow::Result<(Arc<Target>, JoinHandle<()>)> 
         client: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()?,
+        wake,
     });
     let app = axum::Router::new()
         .fallback(proxy)
@@ -245,13 +268,45 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
     headers.remove(axum::http::header::HOST);
 
     let url = format!("{}{}", t.upstream, path);
-    let sent = t
-        .client
-        .request(parts.method.clone(), &url)
-        .headers(headers)
-        .body(bytes)
-        .send()
-        .await;
+    let send = || {
+        t.client
+            .request(parts.method.clone(), &url)
+            .headers(headers.clone())
+            .body(bytes.clone())
+            .send()
+    };
+
+    // Before forwarding, so a demotion that arrives while this request is
+    // in flight is deferred rather than pulling the sandbox out from under
+    // it.
+    if let Some(w) = &t.wake {
+        w.saw(&t.id);
+    }
+    let mut sent = send().await;
+    let mut woke = None;
+    if let (Err(e), Some(w)) = (&sent, &t.wake) {
+        if e.is_connect() {
+            match w.wake(&t.id).await {
+                Ok(took) => {
+                    tracing::info!(id = %t.id, ms = took.as_millis() as u64, "woke on traffic");
+                    woke = Some(took);
+                    sent = send().await;
+                }
+                Err(e) => {
+                    tracing::warn!(id = %t.id, error = %format!("{e:#}"), "could not wake on traffic");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        [("content-type", "application/json"), ("retry-after", "5")],
+                        serde_json::json!({
+                            "error": format!("sandbox {} is cold and could not be woken: {e:#}", t.id)
+                        })
+                        .to_string(),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
 
     match sent {
         Ok(r) => {
@@ -263,6 +318,9 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
                     for (k, v) in hdrs.iter() {
                         out = out.header(k, v);
                     }
+                    if let Some(took) = woke {
+                        out = out.header(WAKE_HEADER, took.as_millis().to_string());
+                    }
                     out.body(Body::from(b))
                         .unwrap_or_else(|e| {
                             (StatusCode::BAD_GATEWAY, format!("{e}")).into_response()
@@ -273,8 +331,19 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
         }
         // A sandbox that is not hot REJECTs with a reset (#327), so this is
         // the ordinary cold case and arrives in milliseconds rather than as
-        // a timeout. Said plainly, because a bare 502 would look like the
-        // sandbox had crashed.
+        // a timeout. A gateway that wakes has already tried that and only
+        // gets here if the sandbox came up and still refused. Said plainly,
+        // because a bare 502 would look like the sandbox had crashed.
+        Err(e) if e.is_connect() && woke.is_some() => (
+            StatusCode::BAD_GATEWAY,
+            [("content-type", "application/json")],
+            format!(
+                r#"{{"error":"sandbox {} was woken but nothing is listening on port {} inside it"}}"#,
+                t.id,
+                t.upstream.rsplit(':').next().unwrap_or("?")
+            ),
+        )
+            .into_response(),
         Err(e) if e.is_connect() => (
             StatusCode::SERVICE_UNAVAILABLE,
             [("content-type", "application/json")],
@@ -356,7 +425,8 @@ mod tests {
     ///    token changes.
     ///
     /// These stay under 32768 so `:0` never collides with them, on Linux or
-    /// macOS. Do not "simplify" them back to `:0`.
+    /// macOS. Do not "simplify" them back to `:0`. The wake tests use
+    /// 28461-28464 for the same reason.
     async fn free_pair() -> (u16, u16) {
         let a = tokio::net::TcpListener::bind(("127.0.0.1", 28451u16))
             .await
@@ -371,6 +441,95 @@ mod tests {
         drop(a);
         drop(b);
         (pa, pb)
+    }
+
+    /// A plain HTTP server on `port` that answers every request with "hi".
+    /// What a sandbox looks like once it is woken.
+    fn serve_hi(port: u16) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        std::thread::spawn(move || {
+            for mut s in l.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nhi",
+                );
+            }
+        });
+    }
+
+    async fn get(port: u16) -> reqwest::Response {
+        reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/x"))
+            .header(SANDBOX_TOKEN_HEADER, "a".repeat(32))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    /// The whole point: a request for a cold sandbox wakes it and gets the
+    /// sandbox's answer, not a 503 telling the caller to go and wake it.
+    #[tokio::test]
+    async fn a_request_for_a_cold_sandbox_wakes_it() {
+        let (gw_port, upstream) = (28461u16, 28462u16);
+        let woken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let w = {
+            let woken = woken.clone();
+            Arc::new(Wakeups::new(move |_| {
+                // Nothing listens until the first wake, which is how a
+                // frozen sandbox behind #327's REJECT looks from here.
+                if woken.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    serve_hi(upstream);
+                }
+                Ok(())
+            }))
+        };
+        let mut g = Gateway::waking(w.clone());
+        let mut e = spec("sb-cold", gw_port);
+        e.sandbox_ip = "127.0.0.1".parse().unwrap();
+        e.sandbox_port = upstream;
+        g.reconcile(&[e]).await;
+
+        let r = get(gw_port).await;
+        assert_eq!(r.status(), 200);
+        assert!(
+            r.headers().contains_key(WAKE_HEADER),
+            "a woken request says so"
+        );
+        assert_eq!(r.text().await.unwrap(), "hi");
+        assert_eq!(woken.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Now it is up: no second wake, and nothing says there was one.
+        let r = get(gw_port).await;
+        assert_eq!(r.status(), 200);
+        assert!(!r.headers().contains_key(WAKE_HEADER));
+        assert_eq!(woken.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Both requests are reported to the master, once.
+        assert_eq!(w.take_traffic(), vec!["sb-cold".to_string()]);
+        g.reconcile(&[]).await;
+    }
+
+    #[tokio::test]
+    async fn a_wake_the_node_refuses_is_a_503_with_the_reason() {
+        let gw_port = 28463u16;
+        let w = Arc::new(Wakeups::new(|_| {
+            anyhow::bail!("node held it back: 100 MiB free, below its own 512 MiB floor")
+        }));
+        let mut g = Gateway::waking(w);
+        let mut e = spec("sb-full", gw_port);
+        e.sandbox_ip = "127.0.0.1".parse().unwrap();
+        // Nothing will ever listen here.
+        e.sandbox_port = 28464;
+        g.reconcile(&[e]).await;
+
+        let r = get(gw_port).await;
+        assert_eq!(r.status(), 503);
+        assert!(r.headers().contains_key("retry-after"));
+        let body = r.text().await.unwrap();
+        assert!(body.contains("512 MiB floor"), "{body}");
+        g.reconcile(&[]).await;
     }
 
     #[tokio::test]
