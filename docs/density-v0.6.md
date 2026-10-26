@@ -304,3 +304,90 @@ until it arrived an explicit freeze matched the stale desired tier and did
 nothing. The node now sends `POST /v1/node/traffic` the moment it wakes
 something. A listening node is asked for a report every 5 s, which is its
 window.
+
+## Four more levers, and what the load-test fleet changed about them
+
+All decided per node at startup, logged with the reason, and listed per
+node on the master's `/metrics` as `forkd_node_feature`, because nodes in
+one pool can come out differently.
+
+**Compressed swap where there is none** (`--compressed-swap auto`). The
+reclaim levers need swap in compressed RAM. The load-test fleet had a
+2 GiB disk `/swap.img` on every node and zswap off, so both levers were
+off everywhere. Now: disk swap with zswap off → zswap is turned on in
+front of it; no swap at all → a zram device is added (via `hot_add`,
+capped at a quarter of RAM by `mem_limit`); swap that is already
+compressed → nothing. Either change is host-wide -- the host's own idle
+pages can be compressed too -- and `--compressed-swap off` declines it.
+Over zram, reclaimed pages skip zswap (`memory.zswap.max=0`) rather than
+being compressed twice; and zram's pages are not charged to the sandbox's
+cgroup, so per-sandbox memory reads low there (admission uses the host's
+MemAvailable, which does not).
+
+Both new routes measured on bm, a ~185 MiB heap frozen through the API:
+
+| starting point | what forkd did | frozen cgroup | first request / whole heap |
+| --- | --- | --- | --- |
+| disk swap, zswap off (the fleet) | turned zswap on | 172-184 → 70-86 MiB | 21-27 / 99-108 ms |
+| no swap at all | added zram0 (3.6 GiB logical) | 149-191 → 2 MiB, 56 MiB in zram | 25-28 / 204-209 ms |
+
+**Hot reclaim** (`--reclaim-hot auto`). Senpai-style: every 6 s each hot
+sandbox's cgroup is asked to give up a small fraction of what it holds,
+growing while the sandbox does not stall on memory (0.1% of its time) and
+reset when it does. The whole pass sits out while the host's PSI is above
+half of `--admit-max-psi`: refaults count towards the PSI admission reads,
+and reclaim must never be why a node refuses a sandbox. On bm, four hot
+~185 MiB sandboxes each taking a light request every second:
+
+| | total after 3 min | light request p50 / p99 | a request touching the whole heap |
+| --- | --- | --- | --- |
+| off | 748 MiB | 10 / 13 ms | 24-29 ms |
+| on | **461-480 MiB** (still falling) | 10 / 13-15 ms | 85-91 ms |
+
+Host PSI `some avg10` stayed at 0.00-0.02 throughout, against the 8.0
+admission ceiling.
+
+**Snapshot prefetch** (`--prefetch-snapshots auto`). A sandbox whose
+traffic comes on a schedule -- three intervals within 25% of each other,
+30 s or longer -- has its snapshot image read ~20 s before the next
+predicted request. One sandbox called every 60 s, the page cache dropped
+while it sat in Snapshot:
+
+| | wake, cycles 4-7 |
+| --- | --- |
+| off | 1094-1112 ms |
+| on | **841-942 ms** |
+
+`drop_caches` also evicts runsc and the Python libraries, which prefetch
+does not read; the 355 ms of a fully cached wake is the other end. Real
+eviction is gentler than `drop_caches`, so this is the small end of it.
+
+**Warm templates** (opt-in: `"warm": {"after_restore": [...]}`). New
+sandboxes restore a booted image instead of booting. The image is taken
+from a seed sandbox of the node's own, on the one network slot the
+master's plan leaves out, so no caller's request state can be in it.
+Every sandbox restored from one image starts with its memory, so the
+template must say how to reseed: measured on bm, `os.urandom` is fresh in
+each child but Python's `random`, OpenSSL's `RAND_bytes` and the string
+hash seed are identical across a parent and its children. `after_restore`
+runs inside each sandbox before it takes traffic; if it fails, that
+sandbox boots cold instead. This is the contract of Lambda SnapStart and
+CRaC, and it is why this one is not on by default.
+
+On bm, a template that builds a ~185 MiB heap at startup, create to first
+answer through the gateway:
+
+| | create → first answer |
+| --- | --- |
+| cold | 644-704 ms |
+| warm | **215-241 ms**, with outliers of 549 and 1043 ms (restores of 457 and 923 ms in the node log) |
+
+Taking the image cost 2.5 s once, in the background. With a reseed hook
+of one signal, three warm children drew different `random` and `ssl`
+values, as a cold one does.
+
+**Snapshot compression** now keeps its decision inside ±100 MB/s of the
+500 MB/s threshold, remembered in the work dir: the fleet's disks read
+486, 494, 498 and 645 MB/s, right across a bare threshold. A pool can
+still mix -- images are only restored on the node that wrote them, and
+restore reads the format from the image -- and `/metrics` shows which.
