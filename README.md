@@ -22,15 +22,15 @@
 
 </div>
 
-**A sandbox fleet that is oversold on purpose.** Most agent sandboxes sit idle most of the time. sandstorm pauses an idle sandbox, then checkpoints it to disk, and brings it back the moment a request reaches it. So a machine holds far more sandboxes than it could keep running. Every sandbox is a [gVisor](https://gvisor.dev) container with its own network namespace, and sandstorm runs on ordinary cloud VMs: no KVM, no nested virtualisation.
+**A sandbox fleet that is oversold on purpose.** Most agent sandboxes sit idle most of the time. Sandstorm pauses an idle sandbox, then checkpoints it to disk, and brings it back the moment a request reaches it. So a machine holds far more sandboxes than it could keep running. Every sandbox is a [gVisor](https://gvisor.dev) container with its own network namespace, and Sandstorm runs on ordinary cloud VMs: no KVM, no nested virtualisation.
 
-On six cloud machines with 2 cores and 2 GB each, which hold **431** sandboxes kept in memory, sandstorm ran **18,290**.
+On six cloud machines with 2 cores and 2 GB each, which hold **286** Python HTTP servers kept in memory, Sandstorm held **20,000** — and of 1,200 picked at random afterwards and called, 1,198 answered.
 
 <div align="center">
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-overview-dark.svg">
-  <img alt="18,290 sandboxes running on six 2-core, 2 GB machines that hold 431 kept in memory; below it, request latency by idle time, latency and refusals under rising traffic, sandboxes kept in memory by heap size, and wake time from disk by heap size" src="docs/assets/charts/fleet-overview-light.svg" width="800">
+  <img alt="20,000 sandboxes on six 2-core, 2 GB machines that hold 286 kept in memory; below it, request latency by idle time, latency and refusals under rising traffic against what round 3 refused, sandboxes kept in memory by heap size, and wake time from disk by heap size" src="docs/assets/charts/fleet-overview-light.svg" width="800">
 </picture>
 
 </div>
@@ -55,31 +55,48 @@ Every sandbox is in one of four tiers. It drops a tier at a time as it stays idl
 
 The four smaller panels in the figure at the top, in order:
 
-- **Waking.** Timed on the node, so no network is in the path. A hot sandbox answers in 3.5 ms. Frozen, the thaw takes 10 ms and reading its heap back from zswap takes most of the rest. On disk, the restore is about 200 ms for a 64 MiB heap.
-- **Under traffic.** 40 sandboxes per node, where about 12 fit awake, with a few of them getting most requests. The median stays at a hot sandbox's 3.4 ms. **What does not hold up is the tail:** waking a sandbox needs memory, and when the node has none to spare it refuses the wake rather than putting an idle sandbox to sleep to make room. 13% of requests were refused at 5 req/s, a third at 40.
-- **Heavier sandboxes.** With a large heap, a sandbox costs about what the same program does as a plain process. With a small one, gVisor's own overhead dominates: an idle Python fits 314 times per node as plain processes and 72 times as sandboxes, which is what tiering makes up for. Waking from disk grows with the heap: 0.2 s at 64 MiB, 2.6 s at 512 MiB, 3.9 s at 1 GiB.
+- **Waking.** Timed on the node, so no network is in the path. A hot sandbox answers in 3.8 ms. Frozen, the thaw takes 11 ms and reading its heap back from zswap takes most of the rest: about 100 ms. On disk, the restore is about 230 ms for a 64 MiB heap.
+- **Under traffic.** 40 sandboxes per node, where about 12 fit awake, with a few of them getting most requests. A wake that finds the node out of memory puts its longest-idle sandboxes to disk to make room, and one that finds memory under pressure waits for it to ease, so at 1, 2, 4 and 8 requests a second per node **1.2%, 0.0%, 0.1% and 2.6%** of requests were refused, against 13%, 26%, 32% and 33% before (three runs, 41,000 requests). The cost is in the tail: a request that has to wait for a restore takes 2 to 2.4 s at p99 up to 4 req/s, and 12 s at 8. Past what a node can turn over — 80 per node at 8 req/s — it refuses 12.5% and the p99 is close to a minute.
+- **Heavier sandboxes.** With a large heap, a sandbox costs about what the same program does as a plain process: 13 against 11 per node at 64 MiB, 6 against 4 at 256 MiB, because the node squeezes idle pages into zswap and the test heap compresses well. With a small one, gVisor's own overhead dominates, which is what tiering makes up for. Waking from disk grows with the heap: 0.2 s at 64 MiB, 1 s at 256 and 512 MiB, 3.6 s at 1 GiB.
+
+## Against the same machines without Sandstorm
+
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-compare-dark.svg">
+  <img alt="Python HTTP servers one 2-core, 2 GB node holds: about 96 as plain processes, 94 under bubblewrap, 88 under Podman, 60 under Docker, 32 under Docker with gVisor, 48 in Sandstorm with every one awake, and 3,333 in Sandstorm with idle ones tiered" src="docs/assets/charts/fleet-compare-light.svg" width="800">
+</picture>
+
+</div>
+
+The same Python HTTP server on the same six nodes, each runtime kept in memory until 512 MiB is left, twice on every node ([`baselines.py`](bench/fleet/baselines.py)). Sandstorm with every sandbox awake holds half again as many as Docker with gVisor, the same isolation, because it runs no daemon and no shim per container; with idle ones tiered it holds two orders of magnitude more than anything that keeps them in memory.
+
+| Per node, 2 vCPU, 1.9 GB | HTTP server kept in memory | 64 MiB heap | Start to first answer |
+|---|---:|---:|---:|
+| plain process | 96 | 11 | 52 ms |
+| bubblewrap | 94 | 11 | 52 ms |
+| Podman (crun) | 88 | 12 | 238 ms |
+| Docker (runc) | 60 | 10 | 264 ms |
+| Docker + gVisor | 32 | 9 | 349 ms |
+| **Sandstorm, all awake** | **48** | **13** | 1.4 s (64 MiB app) |
+| **Sandstorm, idle ones tiered** | **3,333** | | |
+
+Checkpoint and restore with CRIU under Podman, the nearest standard counterpart to the snapshot tier, takes 0.3 s to checkpoint a 64 MiB app and 0.24 s from restore to first answer; Sandstorm restores the same app in 0.2 s. E2B, CubeSandbox and microsandbox are built on Firecracker and need KVM, which these VMs do not have, so they could not be run here; [docs/COMPARISON.md](docs/COMPARISON.md) covers the field.
 
 ## Numbers
 
-Six nodes (AMD EPYC, 2 vCPU, 1.9 GB each) and one master (2 vCPU), runsc `release-20261019.0`, on 2026-10-26.
-
-| An idle Python sandbox, per node | |
-|---|---:|
-| as a plain process, no sandbox | 314 |
-| as a gVisor sandbox, kept in memory | 72 |
-| as a sandstorm sandbox, idle ones tiered down | **3,048** |
+Six nodes (AMD EPYC, 2 vCPU, 1.9 GB each) and one master (2 vCPU), runsc `release-20261019.0`, on 2026-10-28.
 
 | | |
 |---|---|
-| Create to first answer, 64 MiB app | p50 1.3 s |
-| Wake: frozen / from disk, 64 MiB app | 10 ms / 200 ms (sandstorm's own time) |
-| Wake 10 at once on one node | all 10, slowest 2.8 s |
-| Create requests the master accepts | ~500/s |
-| Master | 16 MiB RSS, store lock p99 0.5 ms |
+| 20,000 Python HTTP servers at 20/s | all 20,000 up with nothing retried by hand, twice |
+| 100 of them per node, picked at random, called | 1,198 of 1,200 answered; p50 1.3 s, p99 2.8–5.5 s |
+| Wake: frozen / from disk, 64 MiB app | 11 ms / 200 ms (Sandstorm's own time) |
+| Wake 20 / 40 at once on one node | all of them; slowest 6 s / 13 s |
+| Create to first answer, 64 MiB app | p50 1.4 s |
 
-Some caveats. The idle timers were shortened so a run fits in minutes. The test heap is `numpy.ones`, which compresses unusually well in zswap. The 18,290 was not a ceiling: memory was still free when the ramp ended. It needs #351 and #352, which are not merged yet. Method, raw data and every run are in [bench/fleet/results/2026-10-26](bench/fleet/results/2026-10-26/README.md).
-
-**Other sandboxes on the same machines.** E2B, CubeSandbox and microsandbox are built on Firecracker and need KVM, which these VMs do not have, so they could not be run here. [docs/COMPARISON.md](docs/COMPARISON.md) covers the field.
+Some caveats. The idle timers were shortened so a run fits in minutes. The test heap is `numpy.ones`, which compresses unusually well in zswap. 20,000 is where the fill stopped, not a ceiling. Method, raw data, every run, and the bugs the runs turned up are in [bench/fleet/results/2026-10-28](bench/fleet/results/2026-10-28/README.md); the earlier round is [2026-10-26](bench/fleet/results/2026-10-26/README.md).
 
 ## Quick start
 
@@ -118,8 +135,9 @@ v0.6 is not released yet, and it changes a lot: the backend moves from Firecrack
 
 Next, from what the fleet runs found:
 
-- [ ] Make room on wake: put the least recently used sandbox to disk instead of refusing the request.
-- [ ] Retry a create the node held back once memory frees, instead of parking it; and clear its error once it runs.
+- [x] Make room on wake: put the least recently used sandbox to disk instead of refusing the request.
+- [x] Retry a create the node held back once memory frees, instead of parking it; and clear its error once it runs.
+- [x] Clear away a sandbox that dies, network included, and restart it if it is still wanted.
 - [ ] Reserve capacity on the master as it places, so a burst cannot overshoot a node's last report.
 - [ ] Restore several snapshots in parallel on one node.
 
