@@ -42,7 +42,7 @@ _ids = itertools.count()
 class Chart:
     """A titled plot area with one x scale and one y scale."""
 
-    def __init__(self, theme, title, subtitle, h=400, legend=(), top_pad=0, left=60, right=32, bottom=44, w=W, compact=False):
+    def __init__(self, theme, title, subtitle, h=400, legend=(), top_pad=0, left=60, right=32, bottom=44, w=W, compact=False, title_left=None):
         """`compact` is a panel in a figure: smaller type, a shorter header."""
         self.t = THEMES[theme]
         self.w, self.h = w, h
@@ -54,8 +54,9 @@ class Chart:
         self.top += (20 if compact else 22) if legend else 0
         self.top += top_pad
         self.out = [f'<rect width="{w}" height="{h}" rx="12" fill="{self.t["surface"]}"/>']
-        self.text(self.left, ty, title, size=14 if compact else 18, weight=600, colour=self.t["ink"])
-        self.text(self.left, sy, subtitle, size=self.fs if compact else 13, colour=self.t["ink2"])
+        tx = self.left if title_left is None else title_left
+        self.text(tx, ty, title, size=14 if compact else 18, weight=600, colour=self.t["ink"])
+        self.text(tx, sy, subtitle, size=self.fs if compact else 13, colour=self.t["ink2"])
         x = self.left
         for colour, label, kind in legend:
             if x + 30 + cw * len(label) > w - self.right:
@@ -457,7 +458,51 @@ def figure(src, theme):
     return svg(W, top + gap + sum(rows) + gap, "Sandboxes running across six machines, with latency by idle time, under traffic, and by heap size", "\n".join(out))
 
 
-CHARTS = {"overview": figure, "herd": herd}
+def compare(src, theme):
+    """How many Python HTTP servers one node holds, by what runs them.
+
+    Every runtime but Sandstorm keeps each one in memory, started one at a
+    time until the machine is at the 512 MiB floor Sandstorm holds back at
+    (baselines.py, every node, twice). Sandstorm is shown twice: with every
+    sandbox kept awake, and with idle ones tiered -- the count the fill run
+    reached with every sampled one still answering. Log scale: the last bar
+    is two orders past the rest.
+    """
+    rows = [json.loads(l) for f in sorted((src / "baselines").glob("*-baselines-*.jsonl")) for l in open(f)]
+    ours = src / "sandstorm.json"
+    if not rows or not ours.exists():
+        return None
+    ours = json.load(open(ours))
+    per = {}
+    for r in rows:
+        if r.get("kind") == "density" and r["app"] == "web":
+            per.setdefault(r["runtime"], []).append(r["instances"])
+    names = [("process", "Plain process, no isolation"), ("bwrap", "bubblewrap"), ("podman", "Podman (crun)"),
+             ("runc", "Docker (runc)"), ("runsc", "Docker + gVisor")]
+    t = THEMES[theme]
+    bars = [(label, quantile(per[k], 0.5), t["muted"], False) for k, label in names if k in per]
+    bars += [("Sandstorm, every sandbox awake", ours["web_awake_per_node"], t["series"][0], True),
+             ("Sandstorm, idle ones tiered, all callable", ours["web_held_per_node"], t["series"][1], True)]
+    h = 96 + 34 * len(bars) + 40
+    c = Chart(theme, "Python HTTP servers one 2-core, 2 GB node holds",
+              "Kept in memory until 512 MiB is left; median of 12 runs on 6 nodes. Log scale.",
+              h=h, left=270, right=60, title_left=24)
+    c.xscale(10, 10000, log=True)
+    x0, y0, x1, y1 = c.plot
+    for v in (10, 100, 1000, 10000):
+        X = c.sx(v)
+        c.out.append(f'<line x1="{X:.1f}" x2="{X:.1f}" y1="{y0}" y2="{y1}" stroke="{t["grid"] if v > 10 else t["axis"]}"/>')
+        c.text(X, y1 + 18, f"{v:,}", anchor="middle")
+    for i, (label, v, colour, bold) in enumerate(bars):
+        y = y0 + 8 + i * 34
+        c.text(x0 - 12, y + 15, label, colour=t["ink"] if bold else t["ink2"], anchor="end", weight=600 if bold else 400)
+        w = c.sx(v) - x0
+        c.out.append(f'<rect x="{x0}" y="{y + 3}" width="{w:.1f}" height="18" rx="4" fill="{colour}"/>')
+        c.text(c.sx(v) + 8, y + 16, f"{v:,.0f}", colour=t["ink"], weight=600)
+    return c.svg("Python HTTP servers one node holds, by runtime")
+
+
+CHARTS = {"overview": figure, "herd": herd, "compare": compare}
 
 
 def main():
