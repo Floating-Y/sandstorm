@@ -164,6 +164,36 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .gate .hint[hidden] { display: none; }
 .gate .err b { font-weight: 600; }
 .gate .err .why { display: block; color: var(--ink-2); margin-top: 3px; }
+.bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0 10px; }
+.bar input, .bar select, .gate select { font: inherit; font-size: 13px; padding: 7px 10px; border-radius: 9px; border: 1px solid var(--line); background: var(--card-2); color: var(--ink); }
+.bar input { flex: 1; min-width: 180px; }
+.chips { display: flex; gap: 4px; flex-wrap: wrap; }
+.chips button { font: inherit; font-size: 12.5px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line); background: none; color: var(--ink-2); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.chips button[aria-pressed="true"] { background: var(--card-2); color: var(--ink); border-color: var(--accent); }
+.tbl-wrap { overflow-x: auto; }
+table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.tbl th { text-align: left; font-weight: 600; color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .4px; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.tbl td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
+table.tbl td .wrap { white-space: normal; max-width: 320px; }
+table.tbl tr:hover td { background: var(--card-2); }
+table.tbl .id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+table.tbl .sub { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+table.tbl .bad { color: var(--bad); }
+table.tbl td.r, table.tbl th.r { text-align: right; }
+.tierpill { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.tierpill i { width: 8px; height: 8px; border-radius: 50%; }
+.acts { display: flex; gap: 4px; justify-content: flex-end; flex-wrap: nowrap; }
+.acts button { font: inherit; font-size: 12px; padding: 3px 9px; border-radius: 7px; border: 1px solid var(--line); background: none; color: var(--ink-2); cursor: pointer; }
+.acts button:hover { color: var(--ink); border-color: var(--ink-2); }
+.acts button.danger:hover, .acts button.armed { color: #fff; background: var(--bad); border-color: var(--bad); }
+.acts button:disabled { opacity: .5; cursor: progress; }
+.pager { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; font-size: 12.5px; color: var(--muted); }
+.pager button { font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 7px; border: 1px solid var(--line); background: none; color: var(--ink-2); cursor: pointer; }
+.pager button:disabled { opacity: .4; cursor: default; }
+.flash { font-size: 12.5px; margin-left: 8px; }
+.gate .secret { display: flex; gap: 6px; align-items: stretch; margin-top: 6px; }
+.gate .secret code { flex: 1; background: var(--card-2); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; font-size: 12px; word-break: break-all; }
+.gate .secret button { margin: 0; width: auto; padding: 0 12px; }
 .gate .err details { margin-top: 4px; color: var(--muted); }
 .gate .err summary { cursor: pointer; font-size: 12px; }
 .gate .err details code { display: block; margin-top: 4px; white-space: pre-wrap; word-break: break-all; font-size: 11.5px; }
@@ -215,6 +245,23 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
   <section class="card span-12" style="animation-delay:.42s">
     <div class="head"><div><h2>Nodes</h2><div class="sub" id="nodesSub"></div></div><button class="btn" id="addNode" type="button">+ Add a node</button></div>
     <div class="nodes" id="nodes"></div>
+  </section>
+
+  <section class="card span-12" style="animation-delay:.44s">
+    <div class="head"><div><h2>Sandboxes</h2><div class="sub" id="sbSub">Every sandbox, a page at a time.</div></div><button class="btn" id="newSb" type="button">+ New sandbox</button></div>
+    <div class="bar">
+      <input id="sbQ" type="search" placeholder="Search by id or template">
+      <div class="chips" id="sbTiers"></div>
+      <select id="sbNode"><option value="">All nodes</option></select>
+      <span class="flash" id="sbFlash"></span>
+    </div>
+    <div class="tbl-wrap"><table class="tbl" id="sbTable"></table></div>
+    <div class="pager"><span id="sbRange"></span><span><button id="sbPrev" type="button">Previous</button> <button id="sbNext" type="button">Next</button></span></div>
+  </section>
+
+  <section class="card span-12" style="animation-delay:.45s">
+    <h2>Snapshots</h2><div class="sub" id="snapSub">Images a sandbox was branched into, which new sandboxes can be forked from.</div>
+    <div class="tbl-wrap"><table class="tbl" id="snapTable"></table></div>
   </section>
 
   <section class="card span-7" style="animation-delay:.46s">
@@ -277,6 +324,24 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
       <div class="ok" id="addOk" hidden></div>
     </div>
     <div class="err" id="addErr"></div>
+  </form>
+</div>
+
+<div class="gate" id="newDlg" hidden>
+  <form class="wide" id="newForm" autocomplete="off">
+    <h1>New sandbox</h1>
+    <button class="x" type="button" id="newClose" aria-label="Close">×</button>
+    <p>The master places it on a node with room, unless you pick one.</p>
+    <label for="newTpl">Template</label><select id="newTpl"></select>
+    <label for="newNode">Node</label><select id="newNode"><option value="">Any node with room</option></select>
+    <label for="newPort">Port inside the sandbox</label><input id="newPort" type="number" min="1" max="65535" placeholder="the template's default">
+    <button type="submit" id="newGo">Create it</button>
+    <div id="newOut" hidden>
+      <div class="ok" id="newOk"></div>
+      <div class="note">Its token is shown once. Requests to the sandbox's gateway port carry it in <code>x-sandstorm-sandbox-token</code>.</div>
+      <div class="secret"><code id="newTok"></code><button type="button" id="newCopy">Copy</button></div>
+    </div>
+    <div class="err" id="newErr"></div>
   </form>
 </div>
 
@@ -817,6 +882,11 @@ async function refresh(first = false) {
     };
     donut(tiers);
     redrawAll(first || firstDraw); firstDraw = false;
+    const nodeOpts = ["", ...now.nodes.map((n) => n.id)];
+    if ($("sbNode").options.length !== nodeOpts.length) {
+      $("sbNode").innerHTML = nodeOpts.map((n) => `<option value="${escapeHtml(n)}"${n === sb.node ? " selected" : ""}>${n ? escapeHtml(n) : "All nodes"}</option>`).join("");
+    }
+    loadSandboxes(); loadSnapshots();
     feed(events);
     failing(now.failing, now.failed);
     setLive();
@@ -831,6 +901,175 @@ function setLive(err) {
 }
 setInterval(() => lastOk && setLive(), 1000);
 addEventListener("resize", () => redrawAll());
+// ---- sandboxes ----------------------------------------------------------------
+// A page of the fleet's sandboxes, filtered on the master: on a fleet of
+// 20,000 the whole list is about 10 MB, and the table only ever shows 50.
+const SB_PAGE = 50;
+const sb = { tier: "", q: "", node: "", offset: 0, total: 0, rows: [], busy: false };
+const SB_CHIPS = [["", "All"], ...TIERS.map((t) => [t, TIER_LABEL[t]]), ["failing", "Failing"]];
+$("sbTiers").innerHTML = SB_CHIPS.map(([t, l]) => `<button type="button" data-t="${t}" aria-pressed="${t === "" }">${t && t !== "failing" ? `<i class="swatch" style="background:var(--${t})"></i>` : ""}${l}</button>`).join("");
+$("sbTiers").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  sb.tier = b.dataset.t; sb.offset = 0;
+  for (const x of $("sbTiers").children) x.setAttribute("aria-pressed", String(x === b));
+  loadSandboxes();
+});
+let sbTyping;
+$("sbQ").addEventListener("input", () => { clearTimeout(sbTyping); sbTyping = setTimeout(() => { sb.q = $("sbQ").value.trim(); sb.offset = 0; loadSandboxes(); }, 250); });
+$("sbNode").addEventListener("change", () => { sb.node = $("sbNode").value; sb.offset = 0; loadSandboxes(); });
+$("sbPrev").onclick = () => { sb.offset = Math.max(0, sb.offset - SB_PAGE); loadSandboxes(); };
+$("sbNext").onclick = () => { if (sb.offset + SB_PAGE < sb.total) { sb.offset += SB_PAGE; loadSandboxes(); } };
+
+async function apiPage(path) {
+  const r = await fetch(path, { headers: token ? { authorization: "Bearer " + token } : {} });
+  if (r.status === 401) { showGate("That token was refused."); throw new Error("401"); }
+  if (!r.ok) throw new Error((await r.text()) || r.status);
+  return { total: Number(r.headers.get("x-total-count") || 0), rows: await r.json() };
+}
+async function loadSandboxes() {
+  if (!token || sb.busy) return;
+  sb.busy = true;
+  try {
+    const qs = new URLSearchParams({ limit: SB_PAGE, offset: sb.offset });
+    if (sb.tier === "failing") qs.set("failing", "true"); else if (sb.tier) qs.set("tier", sb.tier);
+    if (sb.q) qs.set("q", sb.q);
+    if (sb.node) qs.set("node", sb.node);
+    const { total, rows } = await apiPage("/v1/sandboxes?" + qs);
+    sb.total = total; sb.rows = rows;
+    if (sb.offset >= total && total > 0) { sb.offset = Math.floor((total - 1) / SB_PAGE) * SB_PAGE; sb.busy = false; return loadSandboxes(); }
+    renderSandboxes();
+  } catch (e) { if (String(e.message) !== "401") flash(String(e.message || e), true); }
+  finally { sb.busy = false; }
+}
+function tierPill(t) { return `<span class="tierpill"><i style="background:var(--${t})"></i>${TIER_LABEL[t] || t}</span>`; }
+function sbActions(b) {
+  const a = [];
+  if (b.last_error) a.push(["retry", "Retry"]);
+  if (b.tier !== "hot") a.push(["hot", "Wake"]);
+  if (b.tier === "hot") a.push(["frozen", "Freeze"]);
+  if (b.tier === "hot" || b.tier === "frozen") a.push(["snapshot", "To disk"]);
+  a.push(["delete", "Delete"]);
+  return a.map(([act, label]) => `<button type="button" data-act="${act}" data-id="${escapeHtml(b.id)}"${act === "delete" ? ' class="danger"' : ""}>${label}</button>`).join("");
+}
+function renderSandboxes() {
+  const nowS = Date.now() / 1000;
+  $("sbTable").innerHTML = `<thead><tr><th>Sandbox</th><th>Node</th><th>Tier</th><th>Reachable on</th><th class="r">Last active</th><th class="r"></th></tr></thead><tbody>` +
+    (sb.rows.length ? sb.rows.map((b) => `<tr>
+      <td><div class="id" title="${escapeHtml(b.id)}">${escapeHtml(b.id.length > 19 ? b.id.slice(0, 18) + "…" : b.id)}</div><div class="sub">${escapeHtml(b.template)}${b.snapshot_tag ? " · from " + escapeHtml(b.snapshot_tag) : ""}</div></td>
+      <td>${escapeHtml(b.node_id)}</td>
+      <td>${tierPill(b.tier)}${b.last_error ? `<div class="sub bad wrap">${escapeHtml(b.last_error)}${b.error_attempts ? ` (${b.error_attempts} tries)` : ""}</div>` : ""}</td>
+      <td>${b.gateway_port ? `<span class="id" title="${escapeHtml(b.ip || "")}:${b.port || ""} inside">:${b.gateway_port}</span>` : '<span class="sub">node-local</span>'}</td>
+      <td class="r">${ago(Math.max(0, nowS - b.last_active_at))}</td>
+      <td class="r"><div class="acts">${sbActions(b)}</div></td></tr>`).join("")
+    : `<tr><td colspan="6"><div class="empty">${sb.total === 0 && !sb.q && !sb.tier && !sb.node ? "No sandboxes yet. Use “+ New sandbox”, or POST /v1/sandboxes." : "Nothing matches."}</div></td></tr>`) + "</tbody>";
+  const end = Math.min(sb.total, sb.offset + sb.rows.length);
+  $("sbRange").textContent = sb.total ? `${fmt(sb.offset + 1)}–${fmt(end)} of ${fmt(sb.total)}` : "";
+  $("sbPrev").disabled = sb.offset === 0; $("sbNext").disabled = end >= sb.total;
+}
+let flashTimer;
+function flash(msg, bad) {
+  $("sbFlash").textContent = msg; $("sbFlash").style.color = bad ? "var(--bad)" : "var(--good)";
+  clearTimeout(flashTimer); flashTimer = setTimeout(() => { $("sbFlash").textContent = ""; }, 5000);
+}
+// Delete asks twice: the first click arms the button for three seconds.
+$("sbTable").addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-act]"); if (!b) return;
+  const id = b.dataset.id, act = b.dataset.act;
+  if (act === "delete" && !b.classList.contains("armed")) {
+    b.classList.add("armed"); b.textContent = "Sure?";
+    setTimeout(() => { b.classList.remove("armed"); b.textContent = "Delete"; }, 3000);
+    return;
+  }
+  b.disabled = true;
+  try {
+    const path = "/v1/sandboxes/" + encodeURIComponent(id);
+    if (act === "delete") {
+      const r = await fetch(path, { method: "DELETE", headers: { authorization: "Bearer " + token } });
+      if (!r.ok) throw new Error((await r.text()) || r.status);
+      flash(`Deleting ${id}`);
+    } else if (act === "retry") {
+      await api(path + "/retry", {}); flash(`Retrying ${id}`);
+    } else {
+      await api(path + "/tier", { tier: act });
+      flash(`${{ hot: "Waking", frozen: "Freezing", snapshot: "Putting to disk" }[act]} ${id}`);
+    }
+    loadSandboxes();
+  } catch (err) {
+    let msg = String(err.message || err); try { msg = JSON.parse(msg).error || msg; } catch (x) {}
+    flash(msg, true); b.disabled = false;
+  }
+});
+
+// ---- snapshots ----------------------------------------------------------------
+const mib = (b) => b >= 2 ** 30 ? (b / 2 ** 30).toFixed(1) + " GiB" : (b / 2 ** 20).toFixed(b < 10 * 2 ** 20 ? 1 : 0) + " MiB";
+async function loadSnapshots() {
+  if (!token) return;
+  try {
+    const ss = await api("/v1/snapshots");
+    const nowS = Date.now() / 1000;
+    $("snapSub").textContent = ss.length ? `${ss.length} on ${new Set(ss.map((x) => x.node_id)).size} node(s). Images a sandbox was branched into, which new sandboxes can be forked from.` : "Images a sandbox was branched into, which new sandboxes can be forked from.";
+    $("snapTable").innerHTML = ss.length ? `<thead><tr><th>Tag</th><th>Node</th><th>Template</th><th>Branched from</th><th class="r">Size</th><th class="r">Created</th><th class="r"></th></tr></thead><tbody>` +
+      ss.slice().sort((a, b) => b.created_at - a.created_at).map((x) => `<tr>
+        <td><div class="id wrap">${escapeHtml(x.tag)}</div></td><td>${escapeHtml(x.node_id)}</td><td>${escapeHtml(x.template || "")}</td>
+        <td class="id">${x.branched_from ? escapeHtml(x.branched_from) : "–"}</td>
+        <td class="r">${x.size_bytes != null ? mib(x.size_bytes) : "–"}</td><td class="r">${ago(Math.max(0, nowS - x.created_at))}</td>
+        <td class="r"><div class="acts"><button type="button" class="danger" data-tag="${escapeHtml(x.tag)}">Delete</button></div></td></tr>`).join("") + "</tbody>"
+      : `<tbody><tr><td><div class="empty">None yet. Branch a running sandbox (POST /v1/sandboxes/:id/branch) to make one.</div></td></tr></tbody>`;
+  } catch (e) { if (String(e.message) !== "401") console.warn(e); }
+}
+$("snapTable").addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-tag]"); if (!b) return;
+  if (!b.classList.contains("armed")) {
+    b.classList.add("armed"); b.textContent = "Sure?";
+    setTimeout(() => { b.classList.remove("armed"); b.textContent = "Delete"; }, 3000);
+    return;
+  }
+  b.disabled = true;
+  const r = await fetch("/v1/snapshots/" + encodeURIComponent(b.dataset.tag), { method: "DELETE", headers: { authorization: "Bearer " + token } });
+  if (!r.ok) {
+    let msg = await r.text(); try { msg = JSON.parse(msg).error || msg; } catch (x) {}
+    b.disabled = false; b.classList.remove("armed"); b.textContent = "Delete";
+    b.closest("td").insertAdjacentHTML("beforeend", `<div class="sub bad">${escapeHtml(msg)}</div>`);
+    return;
+  }
+  loadSnapshots();
+});
+
+// ---- new sandbox ----------------------------------------------------------------
+$("newSb").onclick = async () => {
+  $("newErr").textContent = ""; $("newOut").hidden = true; $("newDlg").hidden = false;
+  try {
+    const tpls = await api("/v1/templates");
+    $("newTpl").innerHTML = tpls.length ? tpls.map((t) => `<option>${escapeHtml(typeof t === "string" ? t : t.name)}</option>`).join("") : "<option value=''>No templates registered</option>";
+    $("newNode").innerHTML = `<option value="">Any node with room</option>` + (NOW ? NOW.nodes.filter((n) => n.connected).map((n) => `<option>${escapeHtml(n.id)}</option>`).join("") : "");
+  } catch (e) { $("newErr").textContent = String(e.message || e); }
+};
+$("newClose").onclick = () => { $("newDlg").hidden = true; };
+$("newDlg").addEventListener("click", (e) => { if (e.target === $("newDlg")) $("newDlg").hidden = true; });
+$("newForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  $("newErr").textContent = ""; $("newOut").hidden = true;
+  const body = { template: $("newTpl").value };
+  if (!body.template) { $("newErr").textContent = "Register a template first (POST /v1/templates)."; return; }
+  if ($("newNode").value) body.node_id = $("newNode").value;
+  if ($("newPort").value) body.port = Number($("newPort").value);
+  $("newGo").disabled = true;
+  try {
+    const r = await api("/v1/sandboxes", body);
+    const v = Array.isArray(r) ? r[0] : r;
+    $("newOk").textContent = `Created ${v.id} on ${v.node_id}` + (v.gateway_port ? `, reachable on port ${v.gateway_port} of that node.` : ".");
+    $("newTok").textContent = v.token || "(no token returned)";
+    $("newOut").hidden = false;
+    loadSandboxes();
+  } catch (err) {
+    $("newErr").innerHTML = `<b>The master did not create it.</b><details open><summary>Details</summary><code>${escapeHtml(String(err.message || err))}</code></details>`;
+  } finally { $("newGo").disabled = false; }
+});
+$("newCopy").onclick = async () => {
+  try { await navigator.clipboard.writeText($("newTok").textContent); $("newCopy").textContent = "Copied"; } catch (e) { $("newCopy").textContent = "Select and copy"; }
+  setTimeout(() => { $("newCopy").textContent = "Copy"; }, 2000);
+};
+
 // ---- add a node ---------------------------------------------------------------
 // Two ways in, because a node either can or cannot be reached from here. One
 // it cannot reach runs a single-use command that dials in; one it can is
@@ -847,7 +1086,7 @@ $("addNode").onclick = () => {
 };
 $("addClose").onclick = () => { $("addDlg").hidden = true; };
 $("addDlg").addEventListener("click", (e) => { if (e.target === $("addDlg")) $("addDlg").hidden = true; });
-addEventListener("keydown", (e) => { if (e.key === "Escape") $("addDlg").hidden = true; });
+addEventListener("keydown", (e) => { if (e.key === "Escape") { $("addDlg").hidden = true; $("newDlg").hidden = true; } });
 $("tabDial").onclick = () => addTab(false);
 $("tabListen").onclick = () => addTab(true);
 $("mint").onclick = async () => {

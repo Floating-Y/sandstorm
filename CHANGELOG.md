@@ -27,6 +27,14 @@ pairing code for one the master connects to -- the Sandstorm mark and a
 favicon in place of forkd's bolt, and sparklines that draw in once instead of
 replaying the sweep on every refresh.
 
+What the panel had and more is in the console too: every sandbox, searchable
+and filtered by tier, node or failing, a page at a time, with wake, freeze,
+to-disk, retry and delete on each; **New sandbox**, which shows the token
+the one time the master hands it out; and the snapshots, with delete.
+`GET /v1/sandboxes` takes `tier`, `node`, `q`, `failing`, `limit` and
+`offset` for this, and says the matching total in `x-total-count`; with none
+of them it is the whole list, as before.
+
 ### A web panel, and a join command that works
 
 `GET /` serves an admin panel: nodes with their pool, fingerprint and

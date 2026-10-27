@@ -2900,3 +2900,66 @@ async fn what_each_node_has_on_shows_in_metrics() {
     );
     assert!(m.contains(r#"feature="swap:zswap"} 1"#));
 }
+
+/// The sandbox list filters and pages when asked, says how many matched,
+/// and is the whole list when not asked.
+#[tokio::test]
+async fn the_sandbox_list_filters_and_pages() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let v: serde_json::Value = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({ "template": "python" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(v["id"].as_str().unwrap().to_string());
+    }
+    let r = c
+        .post(format!("{}/v1/sandboxes/{}/tier", h.base, ids[0]))
+        .json(&serde_json::json!({ "tier": "snapshot" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+
+    let list = |query: String| {
+        let url = format!("{}/v1/sandboxes{query}", h.base);
+        async move {
+            let r = reqwest::Client::new().get(url).send().await.unwrap();
+            let total: usize = r.headers()["x-total-count"]
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let page: Vec<serde_json::Value> = r.json().await.unwrap();
+            (
+                total,
+                page.into_iter()
+                    .map(|v| v["id"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>(),
+            )
+        }
+    };
+    let (total, all) = list(String::new()).await;
+    assert_eq!((total, all.len()), (3, 3));
+    let (total, page) = list("?limit=2".into()).await;
+    assert_eq!((total, page.len()), (3, 2));
+    let (total, rest) = list("?limit=2&offset=2".into()).await;
+    assert_eq!((total, rest.len()), (3, 1));
+    let (total, disk) = list("?tier=snapshot".into()).await;
+    assert_eq!((total, disk), (1, vec![ids[0].clone()]));
+    let (total, found) = list(format!("?q={}", &ids[1][3..15].to_uppercase())).await;
+    assert_eq!((total, found), (1, vec![ids[1].clone()]));
+    let (total, _) = list("?node=bm-2".into()).await;
+    assert_eq!(total, 0);
+    let (total, _) = list("?failing=true".into()).await;
+    assert_eq!(total, 0);
+}

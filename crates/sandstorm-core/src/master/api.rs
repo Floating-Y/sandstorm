@@ -1,7 +1,7 @@
 //! The master's HTTP surface: sandboxes for callers, poll and register for
 //! nodes.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -2698,12 +2698,59 @@ enum Place {
     Like { fingerprint: String, tag: String },
 }
 
-async fn list_sandboxes(State(st): State<St>) -> Result<Json<Vec<SandboxView>>, ApiErr> {
+/// Optional filters and a page for `GET /v1/sandboxes`. With none of them
+/// the answer is every sandbox, as it always was.
+#[derive(Deserialize, Default)]
+struct ListSandboxes {
+    tier: Option<Tier>,
+    node: Option<String>,
+    /// Part of the id or the template name.
+    q: Option<String>,
+    /// Only those carrying an error.
+    #[serde(default)]
+    failing: bool,
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: usize,
+}
+
+/// Every sandbox, or a filtered page of them.
+///
+/// A page is what the console asks for: on a 20,000-sandbox fleet the whole
+/// list is about 10 MB, too much to fetch every few seconds to show 50 rows.
+/// The matching total is in `x-total-count`, so a page can say what it is a
+/// page of.
+async fn list_sandboxes(
+    State(st): State<St>,
+    Query(f): Query<ListSandboxes>,
+) -> Result<impl IntoResponse, ApiErr> {
     let all = st
         .store()
         .list_sandboxes()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(all.into_iter().map(Into::into).collect()))
+    let q =
+        f.q.as_deref()
+            .map(str::to_lowercase)
+            .filter(|q| !q.is_empty());
+    let matched: Vec<_> = all
+        .into_iter()
+        .filter(|s| f.tier.is_none_or(|t| s.tier == t))
+        .filter(|s| f.node.as_deref().is_none_or(|n| s.node_id == n))
+        .filter(|s| !f.failing || s.last_error.is_some())
+        .filter(|s| {
+            q.as_deref().is_none_or(|q| {
+                s.id.to_lowercase().contains(q) || s.template.to_lowercase().contains(q)
+            })
+        })
+        .collect();
+    let total = matched.len();
+    let page: Vec<SandboxView> = matched
+        .into_iter()
+        .skip(f.offset)
+        .take(f.limit.unwrap_or(usize::MAX))
+        .map(Into::into)
+        .collect();
+    Ok(([("x-total-count", total.to_string())], Json(page)))
 }
 
 async fn get_sandbox(
