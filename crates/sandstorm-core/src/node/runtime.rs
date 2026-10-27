@@ -401,6 +401,39 @@ impl Runtime {
         Ok(found)
     }
 
+    /// Sandboxes that have died: a bundle, nothing in the cgroup, no
+    /// snapshot, for longer than `min_age`.
+    ///
+    /// `observe` leaves these out -- reporting one as present would stop the
+    /// master retrying a failed start -- so the master never asks for them to
+    /// be destroyed either, and their network outlives them. On f9 one killed
+    /// by the OOM killer kept its veth while the master handed its slot to a
+    /// new sandbox, whose address then routed to the dead one.
+    pub fn dead(&self, min_age: Duration) -> Vec<String> {
+        let Ok(rd) = std::fs::read_dir(self.cfg.work_dir.join("bundles")) else {
+            return Vec::new();
+        };
+        rd.flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
+            .filter(|(id, _)| !id.starts_with(WARM_SEED_PREFIX))
+            .filter(|(id, _)| !self.cfg.work_dir.join("snapshots").join(id).is_dir())
+            .filter(|(id, _)| {
+                std::fs::read_to_string(self.cgroup_path(id).join("cgroup.procs"))
+                    .map(|s| s.trim().is_empty())
+                    .unwrap_or(true)
+            })
+            .filter(|(_, path)| {
+                std::fs::metadata(path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age >= min_age)
+            })
+            .map(|(id, _)| id)
+            .collect()
+    }
+
     fn cgroup_path(&self, id: &str) -> PathBuf {
         PathBuf::from("/sys/fs/cgroup/sandstorm").join(id)
     }

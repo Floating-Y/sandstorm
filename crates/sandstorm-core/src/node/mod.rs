@@ -288,6 +288,36 @@ fn promote_reading(
     }
 }
 
+/// How long a bundle may sit with nothing running in it before the node
+/// takes it for dead. A start or a restore in progress holds the sandbox's
+/// lock, which the reaper never waits for, so this only has to outlast the
+/// moment between writing a bundle and starting it.
+const DEAD_AFTER: Duration = Duration::from_secs(60);
+
+/// Clear away sandboxes that have died, network and all.
+///
+/// The master never hears of one -- `observe` leaves it out -- so it cannot
+/// ask for it to be destroyed, and the slot it held is handed on while its
+/// veth still answers for the address. Once it is gone, a sandbox the
+/// master still wants is simply not here, and the next diff creates it
+/// again: a crashed sandbox restarts, from its template.
+fn reap_dead(rt: &Runtime, wake: &Wakeups) {
+    for id in rt.dead(DEAD_AFTER) {
+        let lock = wake.lock(&id);
+        let Some(_held) = lock.try_lock() else {
+            continue;
+        };
+        match rt.destroy_with_net(&id, None) {
+            Ok(()) => tracing::warn!(sandbox = %id, "cleared away a sandbox that had died"),
+            Err(e) => {
+                tracing::warn!(sandbox = %id, error = %format!("{e:#}"), "could not clear away a sandbox that had died")
+            }
+        }
+        drop(_held);
+        wake.forget(&id);
+    }
+}
+
 /// Put the longest-idle sandbox here other than `except` to disk. False
 /// when there is none that can go.
 fn evict_one(rt: &Runtime, wake: &Wakeups, except: &str) -> Result<bool> {
@@ -604,6 +634,7 @@ async fn report(
     wake: &Wakeups,
     hold: Option<Duration>,
 ) -> Result<PollRequest> {
+    reap_dead(rt, wake);
     let observed: Vec<ObservedSandbox> = rt.observe()?;
 
     // Expose what is here, withdraw what is not. Driven off `observed` for
@@ -1168,6 +1199,25 @@ mod wake_tests {
             later,
         );
         assert!(failing.contains_key("sb"));
+    }
+
+    /// A bundle with nothing running and no snapshot is dead once it is old
+    /// enough; one on disk, a warm seed, or a young one is not.
+    #[test]
+    fn a_sandbox_that_died_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, rt) = node(dir.path());
+        let bundles = cfg.runtime.work_dir.join("bundles");
+        let seed = format!("{}py", runtime::WARM_SEED_PREFIX);
+        for id in ["sb-dead", "sb-on-disk", seed.as_str()] {
+            std::fs::create_dir_all(bundles.join(id)).unwrap();
+        }
+        std::fs::create_dir_all(cfg.runtime.work_dir.join("snapshots").join("sb-on-disk")).unwrap();
+        assert_eq!(rt.dead(Duration::ZERO), ["sb-dead"]);
+        assert!(
+            rt.dead(Duration::from_secs(3600)).is_empty(),
+            "too young to call dead"
+        );
     }
 
     /// A wake waits out memory pressure rather than being refused for it,

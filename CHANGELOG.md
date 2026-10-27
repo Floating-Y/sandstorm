@@ -42,6 +42,18 @@ And a sandbox's error now clears as soon as a report shows it up with nothing
 failing. It used to stay until `/retry`, so sandboxes that were running fine
 still read as failed.
 
+### A sandbox that dies is cleared away, and its slot is not shared
+
+A sandbox whose processes died -- killed by the OOM killer, say -- left a
+bundle with nothing running in it. The node does not report one of those,
+so the master never asked for it to be destroyed: its network namespace and
+veth stayed, while the master handed its slot to a new sandbox. Both host
+ends then held the same address, the route went to the dead one, and the
+new sandbox, running, could not be reached. The node now clears away a
+sandbox that has had nothing running for a minute, network included -- one
+the master still wants is then created again, so a crash restarts it -- and
+setting up a slot removes any other veth still holding its address.
+
 ### A wake makes room instead of refusing
 
 A request that reached a sandbox on disk while its node was under its
