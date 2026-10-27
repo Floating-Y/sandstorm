@@ -57,6 +57,16 @@ header { position: sticky; top: 0; z-index: 10; display: flex; align-items: cent
 .seg button { border: 0; background: none; color: var(--ink-2); padding: 5px 11px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px; }
 .seg button.on { background: var(--card-2); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.25); }
 .iconbtn { border: 1px solid var(--line); background: var(--card); color: var(--ink-2); border-radius: 8px; padding: 6px 10px; cursor: pointer; font: inherit; font-size: 13px; }
+.tabs-nav { display: flex; gap: 2px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 3px; }
+.tabs-nav a { font-size: 13px; font-weight: 600; color: var(--ink-2); text-decoration: none; padding: 6px 12px; border-radius: 7px; display: inline-flex; align-items: center; gap: 6px; }
+.tabs-nav a:hover { color: var(--ink); }
+.tabs-nav a[aria-current="page"] { background: var(--card-2); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
+.tabs-nav .n { font-size: 11px; font-weight: 600; color: var(--muted); background: var(--card-2); border-radius: 999px; padding: 0 6px; min-width: 18px; text-align: center; }
+.tabs-nav a[aria-current="page"] .n { background: var(--card); }
+.tabs-nav .n.bad { color: #fff; background: var(--bad); }
+[data-tab][hidden] { display: none !important; }
+/* The cards rise in once, when the page opens; switching tabs just shows them. */
+body.settled .card { animation: none; }
 main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns: repeat(12, 1fr); max-width: 1680px; margin: 0 auto; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--glow);
   padding: 16px 18px; position: relative; overflow: hidden;
@@ -222,6 +232,13 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
 <body>
 <header>
   <div class="brand"><svg viewBox="0 0 56 56" aria-hidden="true"><g transform="translate(2,2)" fill="#e0892c"><rect x="28.2" y="25.2" width="1.6" height="1.6" rx="0.4" transform="rotate(0.0 29.00 26.00)" opacity="1.0"/><rect x="29.7" y="26.6" width="2.0" height="2.0" rx="0.4" transform="rotate(19.5 30.71 27.67)" opacity="0.9"/><rect x="30.2" y="29.1" width="2.4" height="2.4" rx="0.5" transform="rotate(39.0 31.44 30.40)" opacity="0.9"/><rect x="29.2" y="32.2" width="2.8" height="2.8" rx="0.6" transform="rotate(58.4 30.71 33.67)" opacity="0.9"/><rect x="26.6" y="35.1" width="3.2" height="3.2" rx="0.7" transform="rotate(77.9 28.30 36.76)" opacity="0.9"/><rect x="22.4" y="37.0" width="3.7" height="3.7" rx="0.8" transform="rotate(97.4 24.33 38.89)" opacity="0.8"/><rect x="17.1" y="37.3" width="4.1" height="4.1" rx="0.9" transform="rotate(116.9 19.22 39.38)" opacity="0.8"/><rect x="11.4" y="35.4" width="4.5" height="4.5" rx="1.0" transform="rotate(136.4 13.70 37.73)" opacity="0.8"/><rect x="6.1" y="31.3" width="4.9" height="4.9" rx="1.1" transform="rotate(155.9 8.66 33.78)" opacity="0.8"/><rect x="2.3" y="25.0" width="5.3" height="5.3" rx="1.2" transform="rotate(175.3 5.07 27.71)" opacity="0.7"/><rect x="0.8" y="17.2" width="5.8" height="5.8" rx="1.3" transform="rotate(194.8 3.76 20.12)" opacity="0.7"/><rect x="23.7" y="27.8" width="1.6" height="1.6" rx="0.4" transform="rotate(120.0 24.50 28.60)" opacity="1.0"/><rect x="21.1" y="28.2" width="2.0" height="2.0" rx="0.4" transform="rotate(139.5 22.20 29.25)" opacity="0.9"/><rect x="18.2" y="27.2" width="2.4" height="2.4" rx="0.5" transform="rotate(159.0 19.47 28.51)" opacity="0.9"/><rect x="15.5" y="24.8" width="2.8" height="2.8" rx="0.6" transform="rotate(178.5 17.00 26.24)" opacity="0.9"/><rect x="13.8" y="20.9" width="3.2" height="3.2" rx="0.7" transform="rotate(197.9 15.53 22.62)" opacity="0.9"/><rect x="13.8" y="16.2" width="3.7" height="3.7" rx="0.8" transform="rotate(217.4 15.67 18.10)" opacity="0.8"/><rect x="15.7" y="11.3" width="4.1" height="4.1" rx="0.9" transform="rotate(236.9 17.80 13.44)" opacity="0.8"/><rect x="19.7" y="7.2" width="4.5" height="4.5" rx="1.0" transform="rotate(256.4 21.99 9.48)" opacity="0.8"/><rect x="25.4" y="4.6" width="4.9" height="4.9" rx="1.1" transform="rotate(275.9 27.93 7.10)" opacity="0.8"/><rect x="32.2" y="4.3" width="5.3" height="5.3" rx="1.2" transform="rotate(295.3 34.98 7.02)" opacity="0.7"/><rect x="39.3" y="6.7" width="5.8" height="5.8" rx="1.3" transform="rotate(314.8 42.21 9.68)" opacity="0.7"/><rect x="23.7" y="22.6" width="1.6" height="1.6" rx="0.4" transform="rotate(240.0 24.50 23.40)" opacity="1.0"/><rect x="24.0" y="20.0" width="2.0" height="2.0" rx="0.4" transform="rotate(259.5 25.09 21.08)" opacity="0.9"/><rect x="25.8" y="17.8" width="2.4" height="2.4" rx="0.5" transform="rotate(279.0 27.09 19.09)" opacity="0.9"/><rect x="28.8" y="16.6" width="2.8" height="2.8" rx="0.6" transform="rotate(298.5 30.29 18.09)" opacity="0.9"/><rect x="32.5" y="16.9" width="3.2" height="3.2" rx="0.7" transform="rotate(317.9 34.16 18.63)" opacity="0.9"/><rect x="36.1" y="19.1" width="3.7" height="3.7" rx="0.8" transform="rotate(337.4 38.00 21.00)" opacity="0.8"/><rect x="38.9" y="23.1" width="4.1" height="4.1" rx="0.9" transform="rotate(356.9 40.98 25.18)" opacity="0.8"/><rect x="40.0" y="28.5" width="4.5" height="4.5" rx="1.0" transform="rotate(376.4 42.31 30.79)" opacity="0.8"/><rect x="38.9" y="34.6" width="4.9" height="4.9" rx="1.1" transform="rotate(395.9 41.40 37.13)" opacity="0.8"/><rect x="35.2" y="40.5" width="5.3" height="5.3" rx="1.2" transform="rotate(415.4 37.95 43.27)" opacity="0.7"/><rect x="29.1" y="45.3" width="5.8" height="5.8" rx="1.3" transform="rotate(434.8 32.03 48.20)" opacity="0.7"/></g></svg>Sandstorm <small>console</small></div>
+  <nav class="tabs-nav" id="tabs" aria-label="Sections">
+    <a href="#overview" data-go="overview">Overview</a>
+    <a href="#nodes" data-go="nodes">Nodes <span class="n" id="n-nodes"></span></a>
+    <a href="#sandboxes" data-go="sandboxes">Sandboxes <span class="n" id="n-sandboxes"></span></a>
+    <a href="#snapshots" data-go="snapshots">Snapshots <span class="n" id="n-snapshots"></span></a>
+    <a href="#activity" data-go="activity">Activity</a>
+  </nav>
   <div class="live"><span class="dot" id="dot"></span><span id="liveText">connecting</span></div>
   <div class="spacer"></div>
   <div class="seg" id="range" role="group" aria-label="Time range">
@@ -232,41 +249,41 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
 </header>
 
 <main>
-  <section class="card kpi span-2" style="animation-delay:.02s"><div class="label">Sandboxes</div><div class="value num" id="k-total">0</div><div class="foot" id="k-total-f"></div><svg class="spark" id="s-total"></svg></section>
-  <section class="card kpi span-2" style="animation-delay:.06s"><div class="label"><span class="swatch" style="background:var(--hot)"></span>Awake</div><div class="value num" id="k-hot">0</div><div class="foot" id="k-hot-f"></div><svg class="spark" id="s-hot"></svg></section>
-  <section class="card kpi span-2" style="animation-delay:.10s"><div class="label">Sandboxes per awake one</div><div class="value num" id="k-ratio">0</div><div class="foot">how far idle tiers stretch memory</div><svg class="spark" id="s-ratio"></svg></section>
-  <section class="card kpi span-2" style="animation-delay:.14s"><div class="label">Nodes</div><div class="value num" id="k-nodes">0</div><div class="foot" id="k-nodes-f"></div><svg class="spark" id="s-nodes"></svg></section>
-  <section class="card kpi span-2" style="animation-delay:.18s"><div class="label">Creates / min</div><div class="value num" id="k-creates">0</div><div class="foot" id="k-creates-f"></div><svg class="spark" id="s-creates"></svg></section>
-  <section class="card kpi span-2" style="animation-delay:.22s"><div class="label">API p99</div><div class="value num" id="k-p99">–</div><div class="foot" id="k-p99-f"></div><svg class="spark" id="s-p99"></svg></section>
+  <section data-tab="overview" class="card kpi span-2" style="animation-delay:.02s"><div class="label">Sandboxes</div><div class="value num" id="k-total">0</div><div class="foot" id="k-total-f"></div><svg class="spark" id="s-total"></svg></section>
+  <section data-tab="overview" class="card kpi span-2" style="animation-delay:.06s"><div class="label"><span class="swatch" style="background:var(--hot)"></span>Awake</div><div class="value num" id="k-hot">0</div><div class="foot" id="k-hot-f"></div><svg class="spark" id="s-hot"></svg></section>
+  <section data-tab="overview" class="card kpi span-2" style="animation-delay:.10s"><div class="label">Sandboxes per awake one</div><div class="value num" id="k-ratio">0</div><div class="foot">how far idle tiers stretch memory</div><svg class="spark" id="s-ratio"></svg></section>
+  <section data-tab="overview" class="card kpi span-2" style="animation-delay:.14s"><div class="label">Nodes</div><div class="value num" id="k-nodes">0</div><div class="foot" id="k-nodes-f"></div><svg class="spark" id="s-nodes"></svg></section>
+  <section data-tab="overview" class="card kpi span-2" style="animation-delay:.18s"><div class="label">Creates / min</div><div class="value num" id="k-creates">0</div><div class="foot" id="k-creates-f"></div><svg class="spark" id="s-creates"></svg></section>
+  <section data-tab="overview" class="card kpi span-2" style="animation-delay:.22s"><div class="label">API p99</div><div class="value num" id="k-p99">–</div><div class="foot" id="k-p99-f"></div><svg class="spark" id="s-p99"></svg></section>
 
-  <section class="card span-8" style="animation-delay:.25s">
+  <section data-tab="overview" class="card span-8" style="animation-delay:.25s">
     <h2>Tier flow</h2>
     <div class="sub" id="flowSub">Sandboxes move right as they idle and jump back to awake when a request arrives. Each dot is a sandbox moving now.</div>
     <canvas id="flow" aria-label="Animated flow of sandboxes between tiers"></canvas>
   </section>
-  <section class="card span-4" style="animation-delay:.3s">
+  <section data-tab="overview" class="card span-4" style="animation-delay:.3s">
     <h2>Where the sandboxes are</h2>
     <div class="sub">Desired tier, right now</div>
     <div class="donutwrap"><svg id="donut" width="168" height="168" viewBox="0 0 168 168" role="img" aria-label="Sandboxes by tier"></svg><div class="dlist" id="dlist"></div></div>
   </section>
 
-  <section class="card span-7" style="animation-delay:.34s">
+  <section data-tab="overview" class="card span-7" style="animation-delay:.34s">
     <h2>Sandboxes by tier</h2><div class="sub" id="tiersSub">Over the selected range</div>
     <div class="legend" id="tiersLegend"></div>
     <svg class="chart" id="c-tiers" height="250"></svg>
   </section>
-  <section class="card span-5" style="animation-delay:.38s">
+  <section data-tab="overview" class="card span-5" style="animation-delay:.38s">
     <h2>Lifecycle rates</h2><div class="sub">Per second</div>
     <div class="legend" id="ratesLegend"></div>
     <svg class="chart" id="c-rates" height="250"></svg>
   </section>
 
-  <section class="card span-12" style="animation-delay:.42s">
+  <section data-tab="nodes" class="card span-12" style="animation-delay:.42s">
     <div class="head"><div><h2>Nodes</h2><div class="sub" id="nodesSub"></div></div><button class="btn" id="addNode" type="button">+ Add a node</button></div>
     <div class="nodes" id="nodes"></div>
   </section>
 
-  <section class="card span-12" style="animation-delay:.44s">
+  <section data-tab="sandboxes" class="card span-12" style="animation-delay:.44s">
     <div class="head"><div><h2>Sandboxes</h2><div class="sub" id="sbSub">Every sandbox, a page at a time.</div></div><button class="btn" id="newSb" type="button">+ New sandbox</button></div>
     <div class="bar">
       <input id="sbQ" type="search" placeholder="Search by id or template">
@@ -284,26 +301,26 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
     <div class="pager"><span id="sbRange"></span><span><button id="sbPrev" type="button">Previous</button> <button id="sbNext" type="button">Next</button></span></div>
   </section>
 
-  <section class="card span-12" style="animation-delay:.45s">
+  <section data-tab="snapshots" class="card span-12" style="animation-delay:.45s">
     <h2>Snapshots</h2><div class="sub" id="snapSub">Images a sandbox was branched into, which new sandboxes can be forked from.</div>
     <div class="tbl-wrap"><table class="tbl" id="snapTable"></table></div>
   </section>
 
-  <section class="card span-7" style="animation-delay:.46s">
+  <section data-tab="nodes" class="card span-7" style="animation-delay:.46s">
     <h2>Free memory by node</h2><div class="sub">Each row a node, each column a moment. Darker is fuller.</div>
     <canvas id="heat" data-h="210"></canvas>
   </section>
-  <section class="card span-5" style="animation-delay:.5s">
+  <section data-tab="overview" class="card span-5" style="animation-delay:.5s">
     <h2>Latency</h2><div class="sub">Milliseconds, log scale. The API, creates, and waiting for the store lock.</div>
     <div class="legend" id="latLegend"></div>
     <svg class="chart" id="c-lat" height="210"></svg>
   </section>
 
-  <section class="card span-7" style="animation-delay:.54s">
+  <section data-tab="activity" class="card span-7" style="animation-delay:.54s">
     <h2>What happened</h2><div class="sub">Recorded by the master as it samples the fleet</div>
     <ul class="feed" id="feed"></ul>
   </section>
-  <section class="card span-5" style="animation-delay:.58s">
+  <section data-tab="sandboxes" class="card span-5" style="animation-delay:.58s">
     <h2>Not starting</h2><div class="sub" id="failSub"></div>
     <div class="fail" id="fail"></div>
   </section>
@@ -623,6 +640,7 @@ function flowRoute(g, kind) {
   }
 }
 function drawFlow(now) {
+  if (tab !== "overview") { flow.last = now; requestAnimationFrame(drawFlow); return; }
   const g = flowGeom(), { ctx, dpr, w, h, cols } = g;
   const dt = Math.min(100, now - flow.last); flow.last = now;
   // counts ease toward their targets
@@ -832,6 +850,25 @@ function failing(list, total) {
 }
 const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+// ---- tabs -------------------------------------------------------------------
+// In the hash, so a reload or a shared link lands on the same one.
+const TABS = ["overview", "nodes", "sandboxes", "snapshots", "activity"];
+let tab = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "overview";
+function showTab(t) {
+  tab = TABS.includes(t) ? t : "overview";
+  for (const sec of document.querySelectorAll("main > [data-tab]")) sec.hidden = sec.dataset.tab !== tab;
+  for (const a of $("tabs").querySelectorAll("a")) {
+    if (a.dataset.go === tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+  }
+  // The time range only shapes the charts.
+  $("range").style.visibility = tab === "overview" || tab === "nodes" ? "" : "hidden";
+  // Charts measure their box, which is nothing while hidden.
+  requestAnimationFrame(() => redrawAll());
+  if (tab === "sandboxes") loadSandboxes();
+  if (tab === "snapshots") loadSnapshots();
+}
+addEventListener("hashchange", () => showTab(location.hash.slice(1)));
+
 // ---- one refresh ------------------------------------------------------------
 let lastOk = 0, firstDraw = true;
 function redrawAll(first = false) {
@@ -911,7 +948,12 @@ async function refresh(first = false) {
     if ($("sbNode").options.length !== nodeOpts.length) {
       $("sbNode").innerHTML = nodeOpts.map((n) => `<option value="${escapeHtml(n)}"${n === sb.node ? " selected" : ""}>${n ? escapeHtml(n) : "All nodes"}</option>`).join("");
     }
-    loadSandboxes(); loadSnapshots();
+    if (tab === "sandboxes") loadSandboxes();
+    if (tab === "snapshots") loadSnapshots();
+    $("n-nodes").textContent = now.nodes.length ? `${up}/${now.nodes.length}` : "";
+    $("n-sandboxes").textContent = total ? compact(total) : "";
+    $("n-snapshots").textContent = now.snapshots ? fmt(now.snapshots) : "";
+    $("n-nodes").classList.toggle("bad", up < now.nodes.length);
     feed(events);
     failing(now.failing, now.failed);
     setLive();
@@ -1241,6 +1283,8 @@ $("addForm").addEventListener("submit", async (e) => {
   finally { $("addGo").disabled = false; $("addGo").textContent = "Add it"; }
 });
 
+showTab(tab);
+setTimeout(() => document.body.classList.add("settled"), 1500);
 if (!token) showGate(); else refresh(true);
 setInterval(() => refresh(false), 5000);
 requestAnimationFrame(drawFlow);

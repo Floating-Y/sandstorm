@@ -35,6 +35,10 @@ the one time the master hands it out; and the snapshots, with delete.
 `offset` for this, and says the matching total in `x-total-count`; with none
 of them it is the whole list, as before.
 
+It is in five tabs -- Overview, Nodes, Sandboxes, Snapshots and Activity --
+kept in the URL's hash, with counts on the tabs. The sandbox and snapshot
+lists are fetched only while their tab is open.
+
 ### A web panel, and a join command that works
 
 `GET /` serves an admin panel: nodes with their pool, fingerprint and
