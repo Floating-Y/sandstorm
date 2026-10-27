@@ -9,6 +9,7 @@ own line and then pooled, so a reader sees the spread before the average.
 """
 
 import collections
+import gzip
 import json
 import sys
 from pathlib import Path
@@ -33,7 +34,7 @@ def ms(v):
 def load(paths):
     runs = []
     for p in paths:
-        rows = [json.loads(l) for l in open(p) if l.strip()]
+        rows = [json.loads(l) for l in (gzip.open(p, "rt") if str(p).endswith(".gz") else open(p)) if l.strip()]
         start = next((r for r in rows if r.get("kind") == "start"), {})
         runs.append((Path(p), start.get("cmd", "?"), rows))
     return runs

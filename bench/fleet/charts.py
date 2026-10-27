@@ -10,6 +10,7 @@ is missing from the directory is skipped, not faked.
 """
 
 import csv
+import gzip
 import itertools
 import json
 import math
@@ -208,7 +209,46 @@ def ms(v):
 
 
 def jsonl(path):
-    return [json.loads(l) for l in open(path)] if path.exists() else []
+    """Rows of a results file, gzipped or not; none if it is not there."""
+    for p in (path, path.with_name(path.name + ".gz")):
+        if p.exists():
+            with (gzip.open(p, "rt") if p.suffix == ".gz" else open(p)) as f:
+                return [json.loads(l) for l in f if l.strip()]
+    return []
+
+
+def runs(src, name, later=None):
+    """Every row of one kind of run.
+
+    Round 3 kept one file per kind (r3/sleep.jsonl). Later rounds keep each
+    node's runs apart (v6/<node>/sleep-1.jsonl.gz, ...): each row is tagged
+    with the run it came from, so times are never compared across runs.
+    """
+    rows = jsonl(src / "r3" / f"{name}.jsonl")
+    if rows:
+        return rows
+    out = []
+    stem = later or name
+    files = sorted(src.glob(f"v6/*/{stem}-*.jsonl.gz")) + sorted(src.glob(f"v6/*/{stem}.jsonl.gz"))
+    for i, f in enumerate(files):
+        out += [{**r, "_run": i} for r in jsonl(f)]
+    return out
+
+
+def walls(src, app):
+    """Sandboxes per node with every one kept in memory, for one template."""
+    p = src / "r3" / f"wall_{app}.json"
+    if p.exists():
+        return json.load(open(p))["settled"]["up"] / 6
+    ups = [json.load(open(f))["settled"]["up"] / 6 for f in sorted(src.glob(f"v7/walls/wall_{app}-*.json"))]
+    return sum(ups) / len(ups) if ups else None
+
+
+def baseline(src, runtime, app):
+    """Median instances per node a runtime kept in memory (baselines.py)."""
+    n = [r["instances"] for f in sorted((src / "baselines").glob("*-baselines-*.jsonl")) for r in jsonl(f)
+         if r.get("kind") == "density" and r["runtime"] == runtime and r["app"] == app]
+    return quantile(n, 0.5) if n else None
 
 
 # --- the charts ---------------------------------------------------------------
@@ -250,8 +290,43 @@ def running(src, theme, w, h):
     return c
 
 
+def held(src, theme, w, h):
+    """A fill's count of sandboxes over time, from the watcher's samples.
+
+    The dashed line is what the same six machines hold with every sandbox
+    kept in memory: Sandstorm's own wall, and Docker with gVisor's.
+    """
+    samples = [r for r in jsonl(src / "v7" / "fills" / "fill-5-samples.jsonl") if r.get("kind") == "sample"]
+    if not samples:
+        return None
+    t = THEMES[theme]
+    t0 = samples[0]["t"]
+    pts = [(r["t"] - t0, int(sum(r["tiers"].values()))) for r in samples]
+    peak = max(v for _, v in pts)
+    # stop a little after the fill reaches its peak
+    end = next(x for x, v in pts if v >= peak) + 120
+    pts = [(x, v) for x, v in pts if x <= end]
+    awake = round(walls(src, "web") * 6)
+    docker = round(baseline(src, "runsc", "web") * 6)
+    probes = [r for f in sorted(src.glob("v7/fills/probe-*/*.jsonl")) for r in jsonl(f) if r.get("kind") == "probe"]
+    ok = sum(r["status"] == 200 for r in probes)
+    c = Chart(theme, f"{peak:,} sandboxes on six 2-core, 2 GB machines",
+              f"Python HTTP servers created at 20/s. Afterwards {ok:,} of {len(probes):,} picked at random were called and answered.",
+              legend=[(t["series"][0], "sandboxes held", "line")], w=w, h=h)
+    ymax = math.ceil(peak * 1.12 / 4000) * 4000
+    c.xscale(0, end)
+    c.yscale(0, ymax)
+    c.ygrid(range(0, ymax + 1, 4000), lambda v: "0" if v == 0 else f"{v // 1000}k")
+    c.xticks(range(0, int(end) + 1, 300), lambda s: f"{s // 60} min")
+    c.hline(awake, f"{awake}, every sandbox kept in memory (Docker + gVisor: {docker})")
+    c.line(pts, t["series"][0], width=2.5, fill=True)
+    x, y = pts[-1]
+    c.text(c.sx(x) - 8, c.sy(y) - 10, f"{peak:,}", size=12, colour=t["ink"], anchor="end", weight=600)
+    return c
+
+
 def sleep(src, theme, w, h):
-    rows = [r for r in jsonl(src / "r3" / "sleep.jsonl") if r["kind"] == "wake" and r["status"] == 200]
+    rows = [r for r in runs(src, "sleep") if r["kind"] == "wake" and r["status"] == 200]
     if not rows:
         return None
     t = THEMES[theme]
@@ -289,7 +364,7 @@ def sleep(src, theme, w, h):
 
 
 def herd(src, theme):
-    rows = [r for r in jsonl(src / "r3" / "herd.jsonl") if r["kind"] == "herd"]
+    rows = [r for r in runs(src, "herd") if r["kind"] == "herd"]
     if not rows:
         return None
     t = THEMES[theme]
@@ -321,17 +396,24 @@ def herd(src, theme):
 
 
 def mixed(src, theme, w, h):
-    rows = [r for r in jsonl(src / "r3" / "mixed.jsonl") if r["kind"] == "req"]
+    rows = [r for r in runs(src, "mixed", "mixed40") if r["kind"] == "req"]
     if not rows:
         return None
     t = THEMES[theme]
     # Nodes started their traffic a few seconds apart: time each from its own start.
     start = {}
     for r in rows:
-        start[r["node"]] = min(start.get(r["node"], 1e18), r["t"] - r["latency_s"])
+        k = (r.get("_run"), r["node"])
+        start[k] = min(start.get(k, 1e18), r["t"] - r["latency_s"])
     for r in rows:
-        r["rel"] = r["t"] - r["latency_s"] - start[r["node"]]
-    nodes = len(start)
+        r["rel"] = r["t"] - r["latency_s"] - start[(r.get("_run"), r["node"])]
+    nodes = len({r["node"] for r in rows})
+    # The same measurement from round 3, before a wake could make room.
+    before = {}
+    if not (src / "r3").exists():
+        for r in jsonl(src.parent / "2026-10-26" / "r3" / "mixed.jsonl"):
+            if r["kind"] == "req":
+                before.setdefault(r["rate"], []).append(r["status"] != 200)
     win = 15
     buckets = {}
     for r in rows:
@@ -342,8 +424,8 @@ def mixed(src, theme, w, h):
     p99 = [((k + 0.5) * win, quantile(buckets[k], 0.99)) for k in keys if len(buckets[k]) >= 5]
     c = Chart(theme, "Under rising traffic",
               "40 per node, where about 12 fit awake. Zipf popularity.",
-              legend=[(t["series"][0], "median", "line"), (t["series"][1], "p99", "line")], top_pad=16,
-              w=w, h=h, compact=True, left=52, right=20, bottom=36)
+              legend=[(t["series"][0], "median", "line"), (t["series"][1], "p99", "line")],
+              top_pad=16 if (src / "r3").exists() else 36, w=w, h=h, compact=True, left=52, right=20, bottom=36)
     xmax = (keys[-1] + 1) * win
     hi = 10 ** math.ceil(math.log10(max(v for _, v in p99)))
     c.xscale(0, xmax)
@@ -357,8 +439,16 @@ def mixed(src, theme, w, h):
         mine = [r for r in rows if r["rate"] == p]
         refused = sum(r["status"] != 200 for r in mine) / len(mine)
         mid = (c.sx(s0) + c.sx(e)) / 2
-        c.text(mid, c.plot[1] - 6, f"{p * nodes:g} req/s", colour=t["ink2"], anchor="middle", weight=600)
-        c.text(mid, c.plot[1] + 14, f"{refused:.0%} refused", anchor="middle")
+        said = f"{refused:.1%} refused" if refused < 0.1 else f"{refused:.0%} refused"
+        if p in before:
+            # Three lines over the plot: the rate, what was refused, and what
+            # round 3 refused at the same rate per node.
+            c.text(mid, c.plot[1] - 34, f"{p:g}/s per node", colour=t["ink2"], anchor="middle", weight=600)
+            c.text(mid, c.plot[1] - 20, said, anchor="middle", colour=t["ink"])
+            c.text(mid, c.plot[1] - 6, f"was {sum(before[p]) / len(before[p]):.0%}", anchor="middle")
+        else:
+            c.text(mid, c.plot[1] - 6, f"{p * nodes:g} req/s", colour=t["ink2"], anchor="middle", weight=600)
+            c.text(mid, c.plot[1] + 14, said, anchor="middle")
     c.ygrid([10 ** k for k in range(0, int(math.log10(hi)) + 1)], ms)
     c.xticks(range(0, int(xmax) + 1, 120), lambda s: f"{s // 60} min")
     c.line(p99, t["series"][1], width=2, smooth=False, dot_end=False)
@@ -370,18 +460,17 @@ def heaps(src):
     """Per heap size: kept in memory as a sandbox and as a plain process, and restore times."""
     sandboxed = {}
     # In a gVisor sandbox, kept in memory: the hot walls for the three
-    # smaller apps (six nodes, so per node is the fleet figure over six);
-    # for 512 MiB and 1 GiB, the 2 and 1 per node that ran, a number more
-    # than memory would take.
+    # smaller apps; for 512 MiB and 1 GiB, the 2 and 1 per node that ran,
+    # a number more than memory would take.
     for h in (16, 64, 256):
-        p = src / "r3" / f"wall_app{h}.json"
-        if p.exists():
-            sandboxed[h] = json.load(open(p))["settled"]["up"] / 6
-    heavy = jsonl(src / "r3" / "heavy.jsonl")
+        v = walls(src, f"app{h}")
+        if v:
+            sandboxed[h] = v
+    heavy = runs(src, "heavy")
     for h in (512, 1024):
         ran = [r for r in heavy if r["kind"] == "first_request" and r["template"] == f"app{h}" and r["status"] == 200]
         if ran:
-            sandboxed[h] = len(ran) / len({r["node"] for r in ran})
+            sandboxed[h] = len(ran) / len({(r.get("_run"), r["node"]) for r in ran})
     # The same app as a plain process: no sandbox, no tiering. A node whose
     # memory was already under the floor when the count started reads 0;
     # those runs are dropped, not averaged in.
@@ -389,12 +478,16 @@ def heaps(src):
     for r in jsonl(src / "r3" / "bare.jsonl"):
         if r.get("heap_mib") and r["processes"]:
             bare.setdefault(r["heap_mib"], []).append(r["processes"])
+    bare = {h: quantile(v, 0.5) for h, v in bare.items()}
+    for h in (16, 64, 256):
+        v = baseline(src, "process", f"app{h}")
+        if h not in bare and v:
+            bare[h] = v
     restores = {}
-    for r in jsonl(src / "r3" / "sizes.jsonl") + heavy:
+    for r in runs(src, "sizes") + heavy:
         if r["kind"] == "restore" and r["status"] == 200:
             restores.setdefault(int(r["template"][3:]), []).append(r["latency_s"] * 1000)
     sizes = [h for h in (16, 64, 256, 512, 1024) if h in sandboxed and h in restores]
-    bare = {h: quantile(v, 0.5) for h, v in bare.items()}
     restores = {h: quantile(v, 0.5) for h, v in restores.items()}
     return sizes, sandboxed, bare, restores
 
@@ -449,7 +542,7 @@ def figure(src, theme):
     measurements two by two beneath it."""
     gap, top, rows = 16, 390, (300, 250)
     pw = (W - gap) // 2
-    head = running(src, theme, W, top)
+    head = running(src, theme, W, top) or held(src, theme, W, top)
     panels = [draw(src, theme, pw, rows[i // 2]) for i, draw in enumerate((sleep, mixed, kept, restore))]
     if not head or not all(panels):
         return None
@@ -469,10 +562,11 @@ def compare(src, theme):
     is two orders past the rest.
     """
     rows = [json.loads(l) for f in sorted((src / "baselines").glob("*-baselines-*.jsonl")) for l in open(f)]
-    ours = src / "sandstorm.json"
-    if not rows or not ours.exists():
+    awake, fills = walls(src, "web"), jsonl(src / "v7" / "fills" / "fill-5.jsonl")
+    if not rows or not awake or not fills:
         return None
-    ours = json.load(open(ours))
+    nodes = 6
+    ours = {"web_awake_per_node": awake, "web_held_per_node": sum(r.get("kind") == "created" for r in fills) / nodes}
     per = {}
     for r in rows:
         if r.get("kind") == "density" and r["app"] == "web":
