@@ -80,8 +80,8 @@ pub struct Wakeups {
     /// it is kept for the sandbox's life: it is how a wake that needs
     /// memory picks which idle sandbox to put away.
     used: Mutex<HashMap<String, Instant>>,
-    /// Sandboxes put to disk here to make room for a wake, not yet reported.
-    evicted: Mutex<HashSet<String>>,
+    /// Sandboxes put to disk here to make room for a wake, and when.
+    evicted: Mutex<HashMap<String, Instant>>,
     /// Restores read whole images from disk, so a burst of wakes for
     /// different sandboxes is queued rather than run all at once and left
     /// to fight over the same disk.
@@ -233,14 +233,34 @@ impl Wakeups {
     /// This node put a sandbox to disk to make room, which the master has
     /// to hear about.
     pub fn put_away(&self, id: &str) {
-        self.evicted.lock().insert(id.to_string());
+        self.evicted.lock().insert(id.to_string(), Instant::now());
     }
 
-    /// The sandboxes to report as put away, emptied as it is read.
-    pub fn take_evicted(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.evicted.lock().drain().collect();
+    /// The sandboxes to report as put away: every one inside its `GRACE`,
+    /// on every report, not just the next one.
+    ///
+    /// A report's observed tiers and this list are not read at the same
+    /// instant. Found on bm: a wake put a sandbox away between the two, so
+    /// the one report that listed it still observed it frozen, the master
+    /// ignored it as nothing new, and its next diff restored the sandbox
+    /// 0.3 s after it went to disk. Repeating the list until a report has
+    /// caught up with it is safe because the master only ever moves desired
+    /// state colder for it.
+    pub fn recently_evicted(&self, now: Instant) -> Vec<String> {
+        let mut all = self.evicted.lock();
+        all.retain(|_, at| now.saturating_duration_since(*at) < GRACE);
+        let mut ids: Vec<String> = all.keys().cloned().collect();
         ids.sort();
         ids
+    }
+
+    /// How much longer a master command that would bring this sandbox back
+    /// is put off, if at all: until the master has heard it was put away.
+    pub fn evicted_for(&self, id: &str, now: Instant) -> Option<Duration> {
+        let at = *self.evicted.lock().get(id)?;
+        GRACE
+            .checked_sub(now.saturating_duration_since(at))
+            .filter(|d| !d.is_zero())
     }
 
     /// A destroyed sandbox needs none of this any more.
@@ -375,13 +395,18 @@ mod tests {
         );
     }
 
+    /// Reported on every report for as long as it is protected, then not.
     #[test]
-    fn evictions_are_reported_once() {
+    fn evictions_are_reported_until_the_master_has_caught_up() {
         let w = Wakeups::new(|_, _| Ok(()));
         w.put_away("b");
         w.put_away("a");
-        assert_eq!(w.take_evicted(), ["a", "b"]);
-        assert!(w.take_evicted().is_empty());
+        let now = Instant::now();
+        assert_eq!(w.recently_evicted(now), ["a", "b"]);
+        assert_eq!(w.recently_evicted(now), ["a", "b"], "repeated, not drained");
+        assert!(w.evicted_for("a", now).is_some());
+        assert!(w.recently_evicted(now + GRACE).is_empty());
+        assert_eq!(w.evicted_for("a", now + GRACE), None);
     }
 
     #[test]

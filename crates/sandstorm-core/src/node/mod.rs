@@ -431,7 +431,7 @@ async fn report_wakes(
             hold_ms: None,
             failures: Vec::new(),
             traffic: wake.take_traffic(),
-            evicted: wake.take_evicted(),
+            evicted: wake.recently_evicted(Instant::now()),
             features: Vec::new(),
             tags: Vec::new(),
         };
@@ -564,7 +564,7 @@ async fn report(
         hold_ms: hold.map(|h| h.as_millis() as u64),
         failures,
         traffic: wake.take_traffic(),
-        evicted: wake.take_evicted(),
+        evicted: wake.recently_evicted(Instant::now()),
         features: cfg.features.clone(),
         tags: tags::held(&rt.tags_dir(), tags::REPORT_MIN_AGE),
     })
@@ -607,6 +607,15 @@ fn run_one(
         if !tier.is_serving() {
             if let Some(left) = wake.in_grace(&id, now) {
                 tracing::debug!(sandbox = %id, %tier, wait_ms = left.as_millis() as u64, "in use; demotion deferred");
+                return Step::Later(left);
+            }
+        }
+        // And the other way: a sandbox this node put to disk to make room
+        // is not brought back on a view of it that predates that. The
+        // master stops asking once a report has told it.
+        if *tier < Tier::Snapshot {
+            if let Some(left) = wake.evicted_for(&id, now) {
+                tracing::debug!(sandbox = %id, %tier, wait_ms = left.as_millis() as u64, "put away to make room; restore deferred");
                 return Step::Later(left);
             }
         }
