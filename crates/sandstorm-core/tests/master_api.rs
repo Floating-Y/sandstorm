@@ -2956,7 +2956,7 @@ async fn the_sandbox_list_filters_and_pages() {
     assert_eq!((total, rest.len()), (3, 1));
     let (total, disk) = list("?tier=snapshot".into()).await;
     assert_eq!((total, disk), (1, vec![ids[0].clone()]));
-    let (total, found) = list(format!("?q={}", &ids[1][3..15].to_uppercase())).await;
+    let (total, found) = list(format!("?q={}", ids[1][3..15].to_uppercase())).await;
     assert_eq!((total, found), (1, vec![ids[1].clone()]));
     let (total, _) = list("?node=bm-2".into()).await;
     assert_eq!(total, 0);
