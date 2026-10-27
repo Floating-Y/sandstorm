@@ -106,6 +106,11 @@ pub struct NodeConfig {
     /// signal that leads free memory: on bm the apparent cost per sandbox
     /// FELL while pressure climbed, because swap was absorbing it.
     pub admit_max_psi: f64,
+    /// The pressure ceiling for a wake. A wake is a caller waiting on a
+    /// sandbox that exists, and it has already made room under the floor;
+    /// whether it should also give way to pressure as readily as a create
+    /// is what this lets a node decide.
+    pub wake_max_psi: f64,
     /// Tags being fetched from other nodes, so one fetch serves every child
     /// of a tag that arrives while it runs.
     pub fetches: Arc<Fetches>,
@@ -170,7 +175,7 @@ fn holding_back_at(
 /// the same way, as one the master asks for.
 fn wakeups(cfg: &NodeConfig, rt: &Runtime) -> Arc<Wakeups> {
     let rt = rt.clone();
-    let (min_free, max_psi) = (cfg.admit_min_free_mib, cfg.admit_max_psi);
+    let (min_free, max_psi) = (cfg.admit_min_free_mib, cfg.wake_max_psi);
     Arc::new(Wakeups::new(move |w, id| {
         promote(min_free, max_psi, &rt, w, id)
     }))
@@ -696,7 +701,7 @@ fn run_one(
         tier: Tier::Hot,
     } = cmd
     {
-        promote(cfg.admit_min_free_mib, cfg.admit_max_psi, rt, wake, id)
+        promote(cfg.admit_min_free_mib, cfg.wake_max_psi, rt, wake, id)
     } else if let Some(why) = holding_back(cfg, cmd) {
         tracing::warn!(sandbox = %id, reason = %why, "refusing work");
         Err(anyhow::anyhow!(why))
@@ -1014,6 +1019,7 @@ mod wake_tests {
             hold: Duration::from_secs(25),
             admit_min_free_mib: 0,
             admit_max_psi: f64::MAX,
+            wake_max_psi: f64::MAX,
             features: Vec::new(),
             fetches: Default::default(),
         };
