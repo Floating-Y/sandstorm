@@ -187,6 +187,25 @@ table.tbl td.r, table.tbl th.r { text-align: right; }
 .acts button:hover { color: var(--ink); border-color: var(--ink-2); }
 .acts button.danger:hover, .acts button.armed { color: #fff; background: var(--bad); border-color: var(--bad); }
 .acts button:disabled { opacity: .5; cursor: progress; }
+table.tbl td.ck, table.tbl th.ck { width: 28px; padding-right: 0; }
+table.tbl input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.kebab { font: inherit; font-size: 16px; line-height: 1; padding: 2px 8px 6px; border-radius: 7px; border: 1px solid transparent; background: none; color: var(--muted); cursor: pointer; }
+.kebab:hover, .kebab[aria-expanded="true"] { color: var(--ink); border-color: var(--line); background: var(--card-2); }
+.menu { position: fixed; z-index: 90; min-width: 150px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 4px; box-shadow: 0 12px 30px rgba(0,0,0,.35); }
+.menu[hidden] { display: none; }
+.menu button { display: block; width: 100%; text-align: left; font: inherit; font-size: 13px; padding: 7px 10px; border: 0; border-radius: 7px; background: none; color: var(--ink); cursor: pointer; }
+.menu button:hover { background: var(--card-2); }
+.menu button.danger { color: var(--bad); }
+.menu button.danger.armed { background: var(--bad); color: #fff; }
+.menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; }
+.selbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 8px 10px; margin-bottom: 8px; border: 1px solid var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 8%, transparent); font-size: 13px; }
+.selbar[hidden] { display: none; }
+.selbar b { margin-right: 6px; }
+.selbar button { font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+.selbar button.danger { color: var(--bad); }
+.selbar button.danger.armed { background: var(--bad); color: #fff; border-color: var(--bad); }
+.selbar button.link { border: 0; background: none; color: var(--muted); margin-left: auto; }
 .pager { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; font-size: 12.5px; color: var(--muted); }
 .pager button { font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 7px; border: 1px solid var(--line); background: none; color: var(--ink-2); cursor: pointer; }
 .pager button:disabled { opacity: .4; cursor: default; }
@@ -255,7 +274,13 @@ table.tbl td.r, table.tbl th.r { text-align: right; }
       <select id="sbNode"><option value="">All nodes</option></select>
       <span class="flash" id="sbFlash"></span>
     </div>
+    <div class="selbar" id="sbSel" hidden>
+      <b id="sbSelN"></b>
+      <button type="button" data-bulk="hot">Wake</button><button type="button" data-bulk="frozen">Freeze</button><button type="button" data-bulk="snapshot">To disk</button><button type="button" data-bulk="retry">Retry</button><button type="button" data-bulk="delete" class="danger">Delete</button>
+      <button type="button" class="link" id="sbSelClear">Clear</button>
+    </div>
     <div class="tbl-wrap"><table class="tbl" id="sbTable"></table></div>
+    <div class="menu" id="sbMenu" role="menu" hidden></div>
     <div class="pager"><span id="sbRange"></span><span><button id="sbPrev" type="button">Previous</button> <button id="sbNext" type="button">Next</button></span></div>
   </section>
 
@@ -910,13 +935,13 @@ const SB_CHIPS = [["", "All"], ...TIERS.map((t) => [t, TIER_LABEL[t]]), ["failin
 $("sbTiers").innerHTML = SB_CHIPS.map(([t, l]) => `<button type="button" data-t="${t}" aria-pressed="${t === "" }">${t && t !== "failing" ? `<i class="swatch" style="background:var(--${t})"></i>` : ""}${l}</button>`).join("");
 $("sbTiers").addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b) return;
-  sb.tier = b.dataset.t; sb.offset = 0;
+  sb.tier = b.dataset.t; sb.offset = 0; sel.clear();
   for (const x of $("sbTiers").children) x.setAttribute("aria-pressed", String(x === b));
   loadSandboxes();
 });
 let sbTyping;
-$("sbQ").addEventListener("input", () => { clearTimeout(sbTyping); sbTyping = setTimeout(() => { sb.q = $("sbQ").value.trim(); sb.offset = 0; loadSandboxes(); }, 250); });
-$("sbNode").addEventListener("change", () => { sb.node = $("sbNode").value; sb.offset = 0; loadSandboxes(); });
+$("sbQ").addEventListener("input", () => { clearTimeout(sbTyping); sbTyping = setTimeout(() => { sb.q = $("sbQ").value.trim(); sb.offset = 0; sel.clear(); loadSandboxes(); }, 250); });
+$("sbNode").addEventListener("change", () => { sb.node = $("sbNode").value; sb.offset = 0; sel.clear(); loadSandboxes(); });
 $("sbPrev").onclick = () => { sb.offset = Math.max(0, sb.offset - SB_PAGE); loadSandboxes(); };
 $("sbNext").onclick = () => { if (sb.offset + SB_PAGE < sb.total) { sb.offset += SB_PAGE; loadSandboxes(); } };
 
@@ -942,63 +967,132 @@ async function loadSandboxes() {
   finally { sb.busy = false; }
 }
 function tierPill(t) { return `<span class="tierpill"><i style="background:var(--${t})"></i>${TIER_LABEL[t] || t}</span>`; }
+// What can be done to a sandbox in the tier it is in. One list, for the row
+// menu and, across a selection, for the bar above the table.
 function sbActions(b) {
   const a = [];
-  if (b.last_error) a.push(["retry", "Retry"]);
   if (b.tier !== "hot") a.push(["hot", "Wake"]);
   if (b.tier === "hot") a.push(["frozen", "Freeze"]);
-  if (b.tier === "hot" || b.tier === "frozen") a.push(["snapshot", "To disk"]);
+  if (b.tier === "hot" || b.tier === "frozen") a.push(["snapshot", "Put to disk"]);
+  if (b.last_error) a.push(["retry", "Retry now"]);
   a.push(["delete", "Delete"]);
-  return a.map(([act, label]) => `<button type="button" data-act="${act}" data-id="${escapeHtml(b.id)}"${act === "delete" ? ' class="danger"' : ""}>${label}</button>`).join("");
+  return a;
 }
+const sel = new Set();
 function renderSandboxes() {
   const nowS = Date.now() / 1000;
-  $("sbTable").innerHTML = `<thead><tr><th>Sandbox</th><th>Node</th><th>Tier</th><th>Reachable on</th><th class="r">Last active</th><th class="r"></th></tr></thead><tbody>` +
-    (sb.rows.length ? sb.rows.map((b) => `<tr>
+  const allSel = sb.rows.length > 0 && sb.rows.every((b) => sel.has(b.id));
+  $("sbTable").innerHTML = `<thead><tr><th class="ck"><input type="checkbox" id="sbAll" aria-label="Select this page"${allSel ? " checked" : ""}></th><th>Sandbox</th><th>Node</th><th>Tier</th><th>Reachable on</th><th class="r">Last active</th><th class="r"></th></tr></thead><tbody>` +
+    (sb.rows.length ? sb.rows.map((b) => `<tr${sel.has(b.id) ? ' class="sel"' : ""}>
+      <td class="ck"><input type="checkbox" data-sel="${escapeHtml(b.id)}" aria-label="Select ${escapeHtml(b.id)}"${sel.has(b.id) ? " checked" : ""}></td>
       <td><div class="id" title="${escapeHtml(b.id)}">${escapeHtml(b.id.length > 19 ? b.id.slice(0, 18) + "…" : b.id)}</div><div class="sub">${escapeHtml(b.template)}${b.snapshot_tag ? " · from " + escapeHtml(b.snapshot_tag) : ""}</div></td>
       <td>${escapeHtml(b.node_id)}</td>
       <td>${tierPill(b.tier)}${b.last_error ? `<div class="sub bad wrap">${escapeHtml(b.last_error)}${b.error_attempts ? ` (${b.error_attempts} tries)` : ""}</div>` : ""}</td>
       <td>${b.gateway_port ? `<span class="id" title="${escapeHtml(b.ip || "")}:${b.port || ""} inside">:${b.gateway_port}</span>` : '<span class="sub">node-local</span>'}</td>
       <td class="r">${ago(Math.max(0, nowS - b.last_active_at))}</td>
-      <td class="r"><div class="acts">${sbActions(b)}</div></td></tr>`).join("")
-    : `<tr><td colspan="6"><div class="empty">${sb.total === 0 && !sb.q && !sb.tier && !sb.node ? "No sandboxes yet. Use “+ New sandbox”, or POST /v1/sandboxes." : "Nothing matches."}</div></td></tr>`) + "</tbody>";
+      <td class="r"><button type="button" class="kebab" data-menu="${escapeHtml(b.id)}" aria-haspopup="menu" aria-label="Actions for ${escapeHtml(b.id)}">⋯</button></td></tr>`).join("")
+    : `<tr><td colspan="7"><div class="empty">${sb.total === 0 && !sb.q && !sb.tier && !sb.node ? "No sandboxes yet. Use “+ New sandbox”, or POST /v1/sandboxes." : "Nothing matches."}</div></td></tr>`) + "</tbody>";
   const end = Math.min(sb.total, sb.offset + sb.rows.length);
   $("sbRange").textContent = sb.total ? `${fmt(sb.offset + 1)}–${fmt(end)} of ${fmt(sb.total)}` : "";
   $("sbPrev").disabled = sb.offset === 0; $("sbNext").disabled = end >= sb.total;
+  renderSelBar();
+}
+function renderSelBar() {
+  $("sbSel").hidden = sel.size === 0;
+  $("sbSelN").textContent = `${fmt(sel.size)} selected`;
 }
 let flashTimer;
 function flash(msg, bad) {
   $("sbFlash").textContent = msg; $("sbFlash").style.color = bad ? "var(--bad)" : "var(--good)";
   clearTimeout(flashTimer); flashTimer = setTimeout(() => { $("sbFlash").textContent = ""; }, 5000);
 }
-// Delete asks twice: the first click arms the button for three seconds.
-$("sbTable").addEventListener("click", async (e) => {
-  const b = e.target.closest("button[data-act]"); if (!b) return;
-  const id = b.dataset.id, act = b.dataset.act;
-  if (act === "delete" && !b.classList.contains("armed")) {
-    b.classList.add("armed"); b.textContent = "Sure?";
-    setTimeout(() => { b.classList.remove("armed"); b.textContent = "Delete"; }, 3000);
+// One action on one sandbox. Returns what to say about it.
+async function sbDo(id, act) {
+  const path = "/v1/sandboxes/" + encodeURIComponent(id);
+  if (act === "delete") {
+    const r = await fetch(path, { method: "DELETE", headers: { authorization: "Bearer " + token } });
+    if (!r.ok) { let m = await r.text(); try { m = JSON.parse(m).error || m; } catch (x) {} throw new Error(m || r.status); }
+  } else if (act === "retry") await api(path + "/retry", {});
+  else await api(path + "/tier", { tier: act });
+}
+const ACT_DONE = { hot: "Waking", frozen: "Freezing", snapshot: "Putting to disk", retry: "Retrying", delete: "Deleting" };
+
+// Delete asks twice, in the menu and in the bar: the first click arms it.
+function arm(btn, label) {
+  if (btn.classList.contains("armed")) return true;
+  btn.classList.add("armed"); btn.textContent = "Click again to delete";
+  setTimeout(() => { btn.classList.remove("armed"); btn.textContent = label; }, 3000);
+  return false;
+}
+
+// The row menu.
+let menuFor = null;
+function closeMenu() {
+  $("sbMenu").hidden = true;
+  if (menuFor) menuFor.setAttribute("aria-expanded", "false");
+  menuFor = null;
+}
+$("sbTable").addEventListener("click", (e) => {
+  const k = e.target.closest("button[data-menu]");
+  if (k) {
+    e.stopPropagation();
+    if (menuFor === k) return closeMenu();
+    closeMenu();
+    const b = sb.rows.find((x) => x.id === k.dataset.menu); if (!b) return;
+    const acts = sbActions(b);
+    $("sbMenu").innerHTML = acts.map(([act, label]) => (act === "delete" ? "<hr>" : "") +
+      `<button type="button" role="menuitem" data-act="${act}"${act === "delete" ? ' class="danger"' : ""}>${label}</button>`).join("");
+    $("sbMenu").dataset.id = b.id;
+    $("sbMenu").hidden = false;
+    const r = k.getBoundingClientRect(), m = $("sbMenu").getBoundingClientRect();
+    $("sbMenu").style.left = Math.max(8, r.right - m.width) + "px";
+    $("sbMenu").style.top = (r.bottom + m.height + 8 > innerHeight ? r.top - m.height - 4 : r.bottom + 4) + "px";
+    k.setAttribute("aria-expanded", "true"); menuFor = k;
     return;
   }
-  b.disabled = true;
-  try {
-    const path = "/v1/sandboxes/" + encodeURIComponent(id);
-    if (act === "delete") {
-      const r = await fetch(path, { method: "DELETE", headers: { authorization: "Bearer " + token } });
-      if (!r.ok) throw new Error((await r.text()) || r.status);
-      flash(`Deleting ${id}`);
-    } else if (act === "retry") {
-      await api(path + "/retry", {}); flash(`Retrying ${id}`);
-    } else {
-      await api(path + "/tier", { tier: act });
-      flash(`${{ hot: "Waking", frozen: "Freezing", snapshot: "Putting to disk" }[act]} ${id}`);
-    }
-    loadSandboxes();
-  } catch (err) {
-    let msg = String(err.message || err); try { msg = JSON.parse(msg).error || msg; } catch (x) {}
-    flash(msg, true); b.disabled = false;
-  }
+  const c = e.target.closest("input[data-sel]");
+  if (c) { c.checked ? sel.add(c.dataset.sel) : sel.delete(c.dataset.sel); c.closest("tr").classList.toggle("sel", c.checked); renderSelBar(); return; }
+  if (e.target.id === "sbAll") { for (const b of sb.rows) e.target.checked ? sel.add(b.id) : sel.delete(b.id); renderSandboxes(); }
 });
+$("sbMenu").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-act]"); if (!btn) return;
+  e.stopPropagation();
+  const id = $("sbMenu").dataset.id, act = btn.dataset.act;
+  if (act === "delete" && !arm(btn, "Delete")) return;
+  closeMenu();
+  try { await sbDo(id, act); flash(`${ACT_DONE[act]} ${id}`); if (act === "delete") sel.delete(id); loadSandboxes(); }
+  catch (err) { flash(String(err.message || err), true); }
+});
+addEventListener("click", (e) => { if (menuFor && !e.target.closest("#sbMenu")) closeMenu(); });
+addEventListener("scroll", closeMenu, { passive: true });
+
+// The bar over a selection: the same actions, to every selected sandbox
+// they apply to, four at a time.
+$("sbSel").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-bulk]"); if (!btn) return;
+  const act = btn.dataset.bulk;
+  if (act === "delete" && !arm(btn, "Delete")) return;
+  const ids = [...sel];
+  const byId = new Map(sb.rows.map((b) => [b.id, b]));
+  // Only where it applies, judged on what this page knows; the rest go to
+  // the master, which says no to what it cannot do.
+  const todo = ids.filter((id) => !byId.has(id) || sbActions(byId.get(id)).some(([a]) => a === act));
+  const skipped = ids.length - todo.length;
+  for (const b of $("sbSel").querySelectorAll("button")) b.disabled = true;
+  let ok = 0; const failed = [];
+  const queue = todo.slice();
+  await Promise.all([0, 1, 2, 3].map(async () => {
+    while (queue.length) {
+      const id = queue.shift();
+      try { await sbDo(id, act); ok++; } catch (err) { failed.push(`${id}: ${err.message || err}`); }
+    }
+  }));
+  for (const b of $("sbSel").querySelectorAll("button")) b.disabled = false;
+  if (act === "delete") for (const id of todo) sel.delete(id);
+  flash(`${ACT_DONE[act]} ${ok}` + (skipped ? `, ${skipped} skipped (not applicable)` : "") + (failed.length ? `, ${failed.length} failed: ${failed[0]}` : ""), failed.length > 0);
+  loadSandboxes();
+});
+$("sbSelClear").onclick = () => { sel.clear(); renderSandboxes(); };
 
 // ---- snapshots ----------------------------------------------------------------
 const mib = (b) => b >= 2 ** 30 ? (b / 2 ** 30).toFixed(1) + " GiB" : (b / 2 ** 20).toFixed(b < 10 * 2 ** 20 ? 1 : 0) + " MiB";
@@ -1086,7 +1180,7 @@ $("addNode").onclick = () => {
 };
 $("addClose").onclick = () => { $("addDlg").hidden = true; };
 $("addDlg").addEventListener("click", (e) => { if (e.target === $("addDlg")) $("addDlg").hidden = true; });
-addEventListener("keydown", (e) => { if (e.key === "Escape") { $("addDlg").hidden = true; $("newDlg").hidden = true; } });
+addEventListener("keydown", (e) => { if (e.key === "Escape") { $("addDlg").hidden = true; $("newDlg").hidden = true; closeMenu(); } });
 $("tabDial").onclick = () => addTab(false);
 $("tabListen").onclick = () => addTab(true);
 $("mint").onclick = async () => {
