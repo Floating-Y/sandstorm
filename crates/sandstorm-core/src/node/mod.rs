@@ -197,9 +197,22 @@ fn wakeups(cfg: &NodeConfig, rt: &Runtime) -> Arc<Wakeups> {
     let rt = rt.clone();
     let (min_free, max_psi) = (cfg.admit_min_free_mib, cfg.wake_max_psi);
     Arc::new(Wakeups::new(move |w, id| {
-        promote(min_free, max_psi, &rt, w, id)
+        promote(min_free, max_psi, &rt, w, id, WAKE_PATIENCE)
     }))
 }
+
+/// How long a wake from the gateway waits for memory pressure to ease
+/// before it is refused.
+///
+/// Pressure is a 10-second average, and the node's own restores raise it:
+/// on 2026-10-28, four requests at once to a full node's snapshots took
+/// one node over its ceiling for a few seconds, and 8 of 600 were refused
+/// for nothing but that. A caller waiting a few seconds more is better
+/// served than one turned away. The wait holds the restore permit, so the
+/// wakes behind it queue rather than adding to the pressure.
+const WAKE_PATIENCE: Duration = Duration::from_secs(8);
+/// How often a waiting wake reads the pressure again.
+const PRESSURE_POLL: Duration = Duration::from_millis(250);
 
 /// How many idle sandboxes one promotion may put to disk to make room.
 /// Each is a checkpoint, a few hundred milliseconds on a 2-vCPU node, and a
@@ -219,23 +232,59 @@ const MAX_EVICTIONS: usize = 4;
 /// Only the floor is made room for. Memory pressure is a 10-second
 /// average that does not move when a checkpoint finishes, so evicting
 /// until it did would empty the node.
-fn promote(min_free: u64, max_psi: f64, rt: &Runtime, wake: &Wakeups, id: &str) -> Result<()> {
+fn promote(
+    min_free: u64,
+    max_psi: f64,
+    rt: &Runtime,
+    wake: &Wakeups,
+    id: &str,
+    patience: Duration,
+) -> Result<()> {
+    promote_reading(
+        min_free,
+        max_psi,
+        rt,
+        wake,
+        id,
+        patience,
+        &runtime::host_pressure,
+    )
+}
+
+/// `promote`, with the pressure reading passed in so a test can state it.
+fn promote_reading(
+    min_free: u64,
+    max_psi: f64,
+    rt: &Runtime,
+    wake: &Wakeups,
+    id: &str,
+    patience: Duration,
+    read: &dyn Fn() -> (u64, f64),
+) -> Result<()> {
     let hot = Command::SetTier {
         id: id.to_string(),
         tier: Tier::Hot,
     };
+    let deadline = Instant::now() + patience;
     let mut evicted = 0;
     loop {
-        let (free, psi) = runtime::host_pressure();
+        let (free, psi) = read();
         let Some(why) = holding_back_at(min_free, max_psi, &hot, (free, psi)) else {
             return rt.set_tier(id, Tier::Hot);
         };
         let under_floor = free > 0 && free < min_free;
-        if !under_floor || evicted == MAX_EVICTIONS || !evict_one(rt, wake, id)? {
-            tracing::warn!(sandbox = %id, reason = %why, evicted, "refusing work");
-            return Err(HeldBack(why).into());
+        if under_floor && evicted < MAX_EVICTIONS && evict_one(rt, wake, id)? {
+            evicted += 1;
+            continue;
         }
-        evicted += 1;
+        // Pressure passes on its own; a floor nothing more can be put away
+        // for does not.
+        if !under_floor && Instant::now() < deadline {
+            std::thread::sleep(PRESSURE_POLL);
+            continue;
+        }
+        tracing::warn!(sandbox = %id, reason = %why, evicted, "refusing work");
+        return Err(HeldBack(why).into());
     }
 }
 
@@ -722,7 +771,16 @@ fn run_one(
         tier: Tier::Hot,
     } = cmd
     {
-        promote(cfg.admit_min_free_mib, cfg.wake_max_psi, rt, wake, id)
+        // No waiting here: this runs on the loop that applies every
+        // command, and a held-back command is retried on its own.
+        promote(
+            cfg.admit_min_free_mib,
+            cfg.wake_max_psi,
+            rt,
+            wake,
+            id,
+            Duration::ZERO,
+        )
     } else if let Some(why) = holding_back(cfg, cmd) {
         tracing::warn!(sandbox = %id, reason = %why, "refusing work");
         Err(HeldBack(why).into())
@@ -1110,6 +1168,45 @@ mod wake_tests {
             later,
         );
         assert!(failing.contains_key("sb"));
+    }
+
+    /// A wake waits out memory pressure rather than being refused for it,
+    /// and gives up only once its patience is spent.
+    #[test]
+    fn a_wake_waits_for_pressure_to_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, rt) = node(dir.path());
+        let w = Wakeups::new(|_, _| Ok(()));
+        let held = |r: &Result<()>| {
+            r.as_ref()
+                .err()
+                .is_some_and(|e| e.downcast_ref::<HeldBack>().is_some())
+        };
+
+        // Over the ceiling for three readings, then under it: the wake goes
+        // ahead, as far as the runtime -- which has no such sandbox.
+        let reads = std::cell::Cell::new(0);
+        let easing = || {
+            reads.set(reads.get() + 1);
+            (2000, if reads.get() <= 3 { 20.0 } else { 1.0 })
+        };
+        let r = promote_reading(512, 8.0, &rt, &w, "sb", Duration::from_secs(5), &easing);
+        assert!(!held(&r), "refused a wake the pressure let through: {r:?}");
+        assert_eq!(reads.get(), 4);
+
+        // Pressure that never eases is refused once patience runs out.
+        let t0 = Instant::now();
+        let r = promote_reading(512, 8.0, &rt, &w, "sb", Duration::from_millis(400), &|| {
+            (2000, 20.0)
+        });
+        assert!(held(&r), "{r:?}");
+        assert!(t0.elapsed() >= Duration::from_millis(400));
+
+        // And with no patience at all, at once.
+        let t0 = Instant::now();
+        let r = promote_reading(512, 8.0, &rt, &w, "sb", Duration::ZERO, &|| (2000, 20.0));
+        assert!(held(&r));
+        assert!(t0.elapsed() < Duration::from_millis(200));
     }
 
     /// A create the node holds back for want of memory is waiting, not

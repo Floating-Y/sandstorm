@@ -55,7 +55,12 @@ node is back over its floor. A sandbox that answered a request in the last
 2 s is never chosen, nor is one whose tier is already changing. At most four
 go per wake; past that, or with nothing left to choose, the wake is refused
 as before. Memory pressure (PSI) is not made room for: it is a 10-second
-average that a checkpoint does not move.
+average that a checkpoint does not move. A wake from the gateway waits for it
+instead, up to 8 s, holding its restore permit so the wakes behind it queue
+rather than add to it; with four requests at once to a full node's
+snapshots, 8 of 600 had been refused for a few seconds of pressure their own
+restores caused. `--wake-max-psi` sets the ceiling a wake is held to,
+separately from creates.
 
 The node lists what it put away in its reports (`evicted`), and the master
 moves desired state there rather than asking for the sandbox back -- which
