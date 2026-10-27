@@ -55,10 +55,30 @@ struct Failing {
     attempts: u32,
     retry_at: Instant,
     error: String,
+    /// The last attempt was held back for want of memory, not failed.
+    held_back: bool,
 }
 
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// The longest a held-back command waits before the node looks again.
+/// Looking is a read of /proc, and memory comes back as soon as something
+/// idle goes to disk, so a minute's backoff only delays the start.
+const HELD_BACK_RETRY: Duration = Duration::from_secs(5);
+
+/// A command this node would not run for want of memory. Distinct from a
+/// failure so that it can be reported as one that will go ahead once there
+/// is room, rather than counted towards giving up on the sandbox.
+#[derive(Debug)]
+pub struct HeldBack(pub String);
+
+impl std::fmt::Display for HeldBack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for HeldBack {}
 
 fn backoff_for(attempts: u32) -> Duration {
     BACKOFF_MIN
@@ -213,7 +233,7 @@ fn promote(min_free: u64, max_psi: f64, rt: &Runtime, wake: &Wakeups, id: &str) 
         let under_floor = free > 0 && free < min_free;
         if !under_floor || evicted == MAX_EVICTIONS || !evict_one(rt, wake, id)? {
             tracing::warn!(sandbox = %id, reason = %why, evicted, "refusing work");
-            bail!(why);
+            return Err(HeldBack(why).into());
         }
         evicted += 1;
     }
@@ -558,6 +578,7 @@ async fn report(
             id: id.clone(),
             error: f.error.clone(),
             attempts: f.attempts,
+            held_back: f.held_back,
         })
         .collect();
 
@@ -704,7 +725,7 @@ fn run_one(
         promote(cfg.admit_min_free_mib, cfg.wake_max_psi, rt, wake, id)
     } else if let Some(why) = holding_back(cfg, cmd) {
         tracing::warn!(sandbox = %id, reason = %why, "refusing work");
-        Err(anyhow::anyhow!(why))
+        Err(HeldBack(why).into())
     } else {
         match cmd {
             Command::Create {
@@ -769,16 +790,24 @@ fn run_one(
                 attempts: 0,
                 retry_at: now,
                 error: String::new(),
+                held_back: false,
             });
             entry.attempts += 1;
             entry.error = format!("{e:#}");
-            let wait = backoff_for(entry.attempts);
+            entry.held_back = e.downcast_ref::<HeldBack>().is_some();
+            let wait = if entry.held_back {
+                backoff_for(entry.attempts).min(HELD_BACK_RETRY)
+            } else {
+                backoff_for(entry.attempts)
+            };
             entry.retry_at = now + wait;
-            tracing::warn!(
-                sandbox = %id, attempts = entry.attempts,
-                retry_in_ms = wait.as_millis(), error = %entry.error,
-                "command failed, backing off"
-            );
+            if !entry.held_back {
+                tracing::warn!(
+                    sandbox = %id, attempts = entry.attempts,
+                    retry_in_ms = wait.as_millis(), error = %entry.error,
+                    "command failed, backing off"
+                );
+            }
             Step::Later(wait)
         }
     }
@@ -1081,6 +1110,39 @@ mod wake_tests {
             later,
         );
         assert!(failing.contains_key("sb"));
+    }
+
+    /// A create the node holds back for want of memory is waiting, not
+    /// failing: it is reported as held back, and however many times it is
+    /// held back the node looks again within HELD_BACK_RETRY rather than
+    /// backing off towards a minute.
+    #[test]
+    fn a_held_back_create_is_waiting_not_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut cfg, rt) = node(dir.path());
+        // Any pressure reading, 0 included, is over this.
+        cfg.admit_max_psi = -1.0;
+        let w = Wakeups::new(|_, _| Ok(()));
+        let mut failing = HashMap::new();
+        let mut create = fork_from_elsewhere("sb", "127.0.0.1:1");
+        if let Command::Create {
+            fetch, from_tag, ..
+        } = &mut create
+        {
+            *fetch = None;
+            *from_tag = None;
+        }
+        let mut now = Instant::now();
+        for _ in 0..10 {
+            match run_one(&cfg, &rt, &mut failing, &w, &create, now) {
+                Step::Later(d) => assert!(d <= HELD_BACK_RETRY, "waited {d:?}"),
+                _ => panic!("a held-back create went ahead"),
+            }
+            now += HELD_BACK_RETRY;
+        }
+        let f = &failing["sb"];
+        assert!(f.held_back, "{}", f.error);
+        assert!(f.error.contains("held it back"), "{}", f.error);
     }
 
     fn fork_from_elsewhere(id: &str, address: &str) -> Command {

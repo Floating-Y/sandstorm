@@ -141,6 +141,13 @@ pub struct CommandFailure {
     /// How many times in a row this sandbox has failed. The node backs off
     /// on its own; this tells the master how bad it is.
     pub attempts: u32,
+    /// Not a failure: the node held the command back for want of memory,
+    /// and will start it once there is room. The master shows the reason
+    /// but does not count it towards quarantine -- on 2026-10-27, 1,246 of
+    /// 20,000 creates at 20/s were quarantined this way and never started,
+    /// on nodes that had room for them minutes later.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held_back: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

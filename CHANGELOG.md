@@ -28,6 +28,20 @@ reached and its gateway answers 502. Take the old node down with forkd's own
     sudo iptables -D OUTPUT -j FORKD-COLD
     sudo iptables -F FORKD-COLD && sudo iptables -X FORKD-COLD
 
+### A create a node holds back is no longer given up on
+
+A node short of memory holds a create back and retries it, and reported each
+hold-back as a failure. Five of them and the master quarantined the sandbox:
+it stopped asking, and nothing started it until someone called `/retry`. At
+20 creates a second, 1,246 of 20,000 ended that way, on nodes that had room
+for them minutes later. A hold-back is now reported as one (`held_back`), kept
+as the reason the sandbox is not up yet, never counted towards quarantine,
+and looked at again within 5 s rather than backing off towards a minute.
+
+And a sandbox's error now clears as soon as a report shows it up with nothing
+failing. It used to stay until `/retry`, so sandboxes that were running fine
+still read as failed.
+
 ### A wake makes room instead of refusing
 
 A request that reached a sandbox on disk while its node was under its

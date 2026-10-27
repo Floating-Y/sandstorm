@@ -1952,16 +1952,35 @@ async fn delete_snapshot(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Keep the reason a sandbox is not coming up where an operator can see it.
+/// Keep the reason a sandbox is not coming up where an operator can see it,
+/// and drop it once the sandbox is up.
+///
+/// A command the node held back for want of memory is kept as the reason
+/// but counted as no attempts at all: the node will start it once there is
+/// room, and quarantining it would mean nothing ever does.
+///
+/// And a sandbox this report observes, with no failure against it, has
+/// come up: whatever was wrong is over. Before this the error stayed until
+/// someone called /retry, and a load test read 5,836 sandboxes that were
+/// running fine as failed.
 pub(super) fn record_failures(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
-    if req.failures.is_empty() {
-        return Ok(());
-    }
+    let ise = |e: anyhow::Error| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     let store = st.store();
+    let failing: std::collections::HashSet<&str> =
+        req.failures.iter().map(|f| f.id.as_str()).collect();
+    for id in store.errored_on_node(&req.node_id).map_err(ise)? {
+        if !failing.contains(id.as_str()) && req.observed.iter().any(|o| o.id == id) {
+            store.clear_sandbox_error(&id).map_err(ise)?;
+        }
+    }
     for f in &req.failures {
+        if f.held_back {
+            store.set_sandbox_error(&f.id, &f.error, 0).map_err(ise)?;
+            continue;
+        }
         store
             .set_sandbox_error(&f.id, &f.error, f.attempts)
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(ise)?;
         if f.attempts >= MAX_FAILURES {
             tracing::error!(
                 sandbox = %f.id, node = %req.node_id, attempts = f.attempts,
