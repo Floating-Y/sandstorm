@@ -1486,7 +1486,7 @@ mod exec {
 mod api_auth {
     use super::*;
 
-    /// The console page is public, like the panel; what it shows is not.
+    /// The console page is public, at / and /console; what it shows is not.
     /// Its data routes sit behind the token, and a master that is not
     /// recording history says so rather than answering with nothing.
     #[tokio::test]
@@ -1494,9 +1494,14 @@ mod api_auth {
         let (h, token) = guarded().await;
         let c = reqwest::Client::new();
 
-        let page = c.get(format!("{}/console", h.base)).send().await.unwrap();
-        assert_eq!(page.status(), 200);
-        assert!(page.text().await.unwrap().contains("sandstorm console"));
+        for path in ["/", "/console"] {
+            let page = c.get(format!("{}{path}", h.base)).send().await.unwrap();
+            assert_eq!(page.status(), 200, "{path}");
+            assert!(
+                page.text().await.unwrap().contains("Sandstorm console"),
+                "{path}"
+            );
+        }
 
         for path in [
             "/v1/console/now",

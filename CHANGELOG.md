@@ -18,6 +18,15 @@ paths (`/var/lib/sandstorm`, `/etc/sandstorm`), systemd units, HTTP headers
 `sandstorm`) and `sandstorm-mcp`. Entries below this one describe forkd and
 keep its names.
 
+### One console, at `/`
+
+The console is now the only web page: `/` serves it as well as `/console`,
+and the older panel is gone. It gains **Add a node**, with both ways a node
+joins -- a single-use command for a machine that dials in, and an address and
+pairing code for one the master connects to -- the Sandstorm mark and a
+favicon in place of forkd's bolt, and sparklines that draw in once instead of
+replaying the sweep on every refresh.
+
 ### A web panel, and a join command that works
 
 `GET /` serves an admin panel: nodes with their pool, fingerprint and

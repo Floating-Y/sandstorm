@@ -130,7 +130,7 @@ impl Admission {
     /// Why this node cannot take another sandbox, if it cannot.
     ///
     /// `load` is how many sandboxes it is already carrying. It is passed in
-    /// rather than read here so that the scheduler and the panel answer
+    /// rather than read here so that the scheduler and the console answer
     /// from the same number: the scheduler needs the count anyway, and two
     /// separate reads could disagree across a concurrent create.
     pub fn refuse(&self, n: &Node, load: u32) -> Option<String> {
@@ -309,7 +309,7 @@ pub fn router(st: St) -> Router {
     let open = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/node/register", post(register))
-        .route("/", get(panel))
+        .route("/", get(console_page))
         // The page only: everything it shows comes from the guarded
         // routes below, with the token the operator types into it.
         .route("/console", get(console_page))
@@ -429,6 +429,16 @@ async fn metrics_endpoint(State(st): State<St>) -> Result<impl IntoResponse, Api
 
 // ---- console ---------------------------------------------------------------
 
+/// The console: one file, served from this binary at `/` and `/console`.
+///
+/// Open, like any login page -- it holds no secrets. The API token is typed
+/// into it and kept in that tab's sessionStorage, so it never reaches disk
+/// through the page and is gone when the tab closes. Every call the page
+/// makes goes through the same guarded API as any other client.
+///
+/// Built into the binary rather than shipped separately so the console is
+/// always the version of the master it is talking to, and so a single-box
+/// deployment stays a single file.
 async fn console_page() -> impl IntoResponse {
     (
         [("content-type", "text/html; charset=utf-8")],
@@ -676,23 +686,6 @@ fn require_sandbox_token(st: &St, id: &str, headers: &axum::http::HeaderMap) -> 
     ))
 }
 
-/// The admin panel: one file, served from this binary.
-///
-/// Open, like any login page -- it holds no secrets. The API token is typed
-/// into it and kept in that tab's sessionStorage, so it never reaches disk
-/// through the panel and is gone when the tab closes. Every call the page
-/// makes goes through the same guarded API as any other client.
-///
-/// Built into the binary rather than shipped separately so the panel is
-/// always the version of the master it is talking to, and so a single-box
-/// deployment stays a single file.
-async fn panel() -> impl IntoResponse {
-    (
-        [("content-type", "text/html; charset=utf-8")],
-        include_str!("panel.html"),
-    )
-}
-
 /// The join script, with this master's address filled in.
 ///
 /// `POST /v1/node-bootstrap` hands out a one-liner that fetches this. It
@@ -867,7 +860,7 @@ struct NodeView {
 }
 
 async fn list_nodes(State(st): State<St>) -> Result<Json<Vec<NodeView>>, ApiErr> {
-    // Nodes and their loads are read under one lock, so the panel cannot
+    // Nodes and their loads are read under one lock, so the console cannot
     // show a node refused against a count taken after someone else's delete.
     let nodes = {
         let store = st.store();
@@ -1129,7 +1122,7 @@ struct BootstrapView {
     token: String,
     pool: String,
     expires_at: i64,
-    /// What the panel shows for "add a machine". It is a command, not a
+    /// What the console shows for "add a node". It is a command, not a
     /// machine: the master cannot reach a host that has never dialled in,
     /// so one line has to be run over there. Same shape as k3s, Tailscale
     /// or an Actions runner, and for the same reason.
@@ -2224,7 +2217,7 @@ struct SandboxView {
     ip: Option<String>,
     created_at: i64,
     last_active_at: i64,
-    /// Why it is not up, when it is not. The panel shows this instead of
+    /// Why it is not up, when it is not. The console shows this instead of
     /// leaving an operator to guess from a node's log.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error: Option<String>,
