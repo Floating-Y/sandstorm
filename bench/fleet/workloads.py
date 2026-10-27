@@ -11,6 +11,8 @@ master -- and the gateway wakes whatever it finds cold.
     workloads.py herd   --template app64 --sizes 6,24,60,120,240
     workloads.py mixed  --template app64 --count 1200 --rates 5,10,20,40 --phase-secs 180
     workloads.py sizes  --templates idle,app16,app64,app256
+    workloads.py fill   --template web --count 3400 --rate 3.4 --tokens t.jsonl
+    workloads.py probe  --count 100 --tokens t.jsonl   # call a sample of them
     workloads.py watch  --duration 1200      # samples only, beside loadtest.py
 
 Each writes one JSON line per event to --out, plus a `sample` line every
@@ -323,6 +325,56 @@ def cmd_mixed(fleet, out, a):
         cleanup(fleet, sbs)
 
 
+# --- fill and probe: are the sandboxes a node holds still callable? --------
+
+def cmd_fill(fleet, out, a):
+    """Create sandboxes at a steady rate and keep what calling them takes.
+
+    The ceiling runs count sandboxes created. `probe` afterwards is what
+    says they are sandboxes and not just files, and it needs each one's
+    token, which the master hands out once, at create. So they go to
+    --tokens -- a file of secrets, kept out of the results.
+    """
+    keep = open(a.tokens, "a", buffering=1)
+    made, nxt = 0, time.time()
+    while made < a.count:
+        sb, st, err, took = fleet.create(a.template)
+        if sb is None:
+            # Every node under its floor: the master says so rather than
+            # placing. Come back shortly, as loadtest.py --through-refusals does.
+            out.write("create_refused", status=st, error=str(err)[:160])
+            time.sleep(1)
+            nxt = time.time()
+            continue
+        keep.write(json.dumps({k: sb.get(k) for k in ("id", "token", "node_id", "gateway_port")}) + "\n")
+        made += 1
+        out.write("created", id=sb["id"], n=made, accepted_s=round(took, 4))
+        nxt += 1.0 / a.rate
+        time.sleep(max(0.0, nxt - time.time()))
+
+
+def cmd_probe(fleet, out, a):
+    """Call a random sample of the sandboxes `fill` made on this node.
+
+    Run with the node full and the sample idle long enough to be on disk:
+    each request then has to wake one, among thousands that are not.
+    """
+    mine = [json.loads(l) for l in open(a.tokens)]
+    mine = [s for s in mine if s.get("node_id") in fleet.nodes and s.get("gateway_port")]
+    pick = random.sample(mine, min(a.count, len(mine)))
+    out.write("population", size=len(mine), sample=len(pick))
+
+    def fire(sb):
+        st, v, _ = fleet.c.call("GET", f"/v1/sandboxes/{sb['id']}")
+        tier = v.get("tier") if st == 200 and isinstance(v, dict) else None
+        st, secs, woke = request(fleet, sb)
+        out.write("probe", id=sb["id"], node=sb["node_id"], tier=tier, status=st,
+                  latency_s=round(secs, 4), woke_ms=woke)
+
+    with cf.ThreadPoolExecutor(a.create_workers) as ex:
+        list(ex.map(fire, pick))
+
+
 # --- watch: only the fleet's own picture, for a run something else drives --
 
 def cmd_watch(fleet, out, a):
@@ -355,7 +407,7 @@ def cmd_sizes(fleet, out, a):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["sleep", "herd", "mixed", "sizes", "watch"])
+    ap.add_argument("cmd", choices=["sleep", "herd", "mixed", "sizes", "fill", "probe", "watch"])
     ap.add_argument("--master", required=True)
     ap.add_argument("--ca")
     ap.add_argument("--token-file", required=True)
@@ -378,12 +430,14 @@ def main():
     ap.add_argument("--runsc-root", default="/var/run/sandstorm-runsc")
     ap.add_argument("--ready-secs", type=float, default=900)
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--rate", type=float, default=3.0, help="fill: creates per second")
+    ap.add_argument("--tokens", help="fill: where to keep each sandbox's token; probe: where to read them")
     a = ap.parse_args()
     fleet = Fleet(a)
     out = Out(a.out)
     out.write("start", cmd=a.cmd, args=vars(a), nodes=fleet.nodes)
     {"sleep": cmd_sleep, "herd": cmd_herd, "mixed": cmd_mixed, "sizes": cmd_sizes,
-     "watch": cmd_watch}[a.cmd](fleet, out, a)
+     "fill": cmd_fill, "probe": cmd_probe, "watch": cmd_watch}[a.cmd](fleet, out, a)
     out.write("end")
 
 

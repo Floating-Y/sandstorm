@@ -18,6 +18,36 @@ paths (`/var/lib/sandstorm`, `/etc/sandstorm`), systemd units, HTTP headers
 `sandstorm`) and `sandstorm-mcp`. Entries below this one describe forkd and
 keep its names.
 
+A machine that ran a forkd node keeps forkd's iptables rules until they are
+removed: an `OUTPUT -j FORKD-COLD` jump and a chain that rejects TCP to the
+sandbox addresses forkd had parked. Sandstorm hands out addresses from the
+same 10.86.0.0/16, so a new sandbox that lands on one of them cannot be
+reached and its gateway answers 502. Take the old node down with forkd's own
+`scripts/fleet.sh down`, or remove the rules by hand:
+
+    sudo iptables -D OUTPUT -j FORKD-COLD
+    sudo iptables -F FORKD-COLD && sudo iptables -X FORKD-COLD
+
+### A wake makes room instead of refusing
+
+A request that reached a sandbox on disk while its node was under its
+memory floor was answered 503. With 40 sandboxes per node where about 12 fit
+awake, that was 13% of requests at 5 req/s and a third at 40, while frozen
+sandboxes nobody had called for minutes held the memory.
+
+A wake -- from the gateway or from the master -- now puts the longest-idle
+sandboxes on the node to disk first, frozen ones before hot ones, until the
+node is back over its floor. A sandbox that answered a request in the last
+2 s is never chosen, nor is one whose tier is already changing. At most four
+go per wake; past that, or with nothing left to choose, the wake is refused
+as before. Memory pressure (PSI) is not made room for: it is a 10-second
+average that a checkpoint does not move.
+
+The node lists what it put away in its reports (`evicted`), and the master
+moves desired state there rather than asking for the sandbox back -- which
+would make the node evict something else to make room for it. The panel's
+counters show the total as `evicted`.
+
 ### A web panel, and a join command that works
 
 `GET /` serves an admin panel: nodes with their pool, fingerprint and

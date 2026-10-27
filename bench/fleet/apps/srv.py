@@ -7,6 +7,8 @@ import sys
 import numpy as np
 
 mib = int(sys.argv[1])
+# A second argument is the port, for running many on one host network.
+port = int(sys.argv[2]) if len(sys.argv) > 2 else 8000
 heap = np.ones(mib * 1024 * 1024 // 8) if mib else np.ones(1)
 
 
@@ -22,4 +24,4 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 
 
-http.server.ThreadingHTTPServer(("0.0.0.0", 8000), H).serve_forever()
+http.server.ThreadingHTTPServer(("0.0.0.0", port), H).serve_forever()
