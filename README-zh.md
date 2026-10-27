@@ -16,6 +16,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/deeplethe/sandstorm/ci.yml?branch=dev&style=flat-square&label=CI&labelColor=161B22)](https://github.com/deeplethe/sandstorm/actions)
 [![License](https://img.shields.io/badge/LICENSE-APACHE%202.0-3FB950?style=flat-square&labelColor=161B22)](LICENSE)
 [![Rust](https://img.shields.io/badge/BUILT%20WITH-RUST-F74C00?style=flat-square&labelColor=161B22&logo=rust&logoColor=FFFFFF)](https://www.rust-lang.org)
+[![DeepLethe](https://img.shields.io/badge/BUILT%20BY-DeepLethe-CC7420?style=flat-square&labelColor=161B22)](https://github.com/deeplethe)
 [![gVisor](https://img.shields.io/badge/ISOLATION-GVISOR-2D333B?style=flat-square&labelColor=161B22)](https://gvisor.dev)
 [![English](https://img.shields.io/badge/LANG-ENGLISH-2D333B?style=flat-square&labelColor=161B22)](README.md)
 
@@ -50,44 +51,20 @@
 - **节点会保护自己。** 内存不够时，节点会拒绝新任务，不会把自己撑爆，ssh 也一直能连上。
 - **只有一个二进制。** `sandstormd` 既是 master，也是节点，还带 web 面板。
 
-## 一个请求要等多久
-
-在节点本机上测，不经过网络。沙箱是热的时候，3.5 ms 就有响应。冻结的沙箱，解冻只要 10 ms，其余时间主要花在把堆内存从 zswap 读回来。已落盘的沙箱，64 MiB 的堆恢复约 200 ms。
+## 延迟和开销
 
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-sleep-dark.svg">
-  <img alt="按闲置时长看请求延迟：热的 3.5 ms，冻结的约 95 ms，落盘的约 210 ms" src="docs/assets/charts/fleet-sleep-light.svg" width="800">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-measured-dark.svg">
+  <img alt="四张小图：按闲置时长看请求延迟；流量加大时的延迟和拒绝比例；按堆大小看每个节点能常驻的沙箱数；按堆大小看从磁盘唤醒的时间" src="docs/assets/charts/fleet-measured-light.svg" width="800">
 </picture>
 
 </div>
 
-## 有流量的时候
-
-每个节点放 40 个沙箱，但只装得下约 12 个同时醒着。请求按真实使用的分布打过去：少数几个沙箱拿走大部分请求。请求的中位数一直保持在热沙箱的 3.4 ms。**撑不住的是长尾：** 唤醒一个沙箱需要内存，节点内存不够时会直接拒绝这次唤醒，而不是先把一个闲着的沙箱落盘腾出位置。每秒 5 个请求时有 13% 被拒绝，每秒 40 个时达到三分之一。
-
-<div align="center">
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-mixed-dark.svg">
-  <img alt="流量逐步加大时的中位数和 p99 延迟，以及每个阶段被拒绝的比例" src="docs/assets/charts/fleet-mixed-light.svg" width="800">
-</picture>
-
-</div>
-
-## 更重的沙箱
-
-堆内存大的时候，一个沙箱的开销和同一个程序直接作为普通进程跑差不多。堆小的时候，gVisor 自身的开销占大头：一个闲置的 Python，作为普通进程每个节点能放 314 个，作为沙箱只能放 72 个，分档正是用来弥补这个差距的。随堆大小增长的是从磁盘恢复的时间：64 MiB 要 0.2 s，512 MiB 要 2.6 s，1 GiB 要 3.9 s。
-
-<div align="center">
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-sizes-dark.svg">
-  <img alt="堆从 16 MiB 到 1 GiB：每个节点能常驻的沙箱数，以及从磁盘唤醒的时间" src="docs/assets/charts/fleet-sizes-light.svg" width="800">
-</picture>
-
-</div>
+- **唤醒。** 在节点本机上测，不经过网络。沙箱是热的时候，3.5 ms 就有响应。冻结的沙箱，解冻只要 10 ms，其余时间主要花在把堆内存从 zswap 读回来。已落盘的沙箱，64 MiB 的堆恢复约 200 ms。
+- **有流量的时候。** 每个节点放 40 个沙箱，只装得下约 12 个同时醒着，少数几个沙箱拿走大部分请求。请求的中位数一直保持在热沙箱的 3.4 ms。**撑不住的是长尾：** 唤醒一个沙箱需要内存，节点内存不够时会直接拒绝这次唤醒，而不是先把一个闲着的沙箱落盘腾出位置。每秒 5 个请求时有 13% 被拒绝，每秒 40 个时达到三分之一。
+- **更重的沙箱。** 堆内存大的时候，一个沙箱的开销和同一个程序直接作为普通进程跑差不多。堆小的时候，gVisor 自身的开销占大头：一个闲置的 Python，作为普通进程每个节点能放 314 个，作为沙箱只能放 72 个，分档正是用来弥补这个差距的。从磁盘恢复的时间随堆增长：64 MiB 要 0.2 s，512 MiB 要 2.6 s，1 GiB 要 3.9 s。
 
 ## 实测数据
 

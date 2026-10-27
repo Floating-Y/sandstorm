@@ -16,6 +16,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/deeplethe/sandstorm/ci.yml?branch=dev&style=flat-square&label=CI&labelColor=161B22)](https://github.com/deeplethe/sandstorm/actions)
 [![License](https://img.shields.io/badge/LICENSE-APACHE%202.0-3FB950?style=flat-square&labelColor=161B22)](LICENSE)
 [![Rust](https://img.shields.io/badge/BUILT%20WITH-RUST-F74C00?style=flat-square&labelColor=161B22&logo=rust&logoColor=FFFFFF)](https://www.rust-lang.org)
+[![DeepLethe](https://img.shields.io/badge/BUILT%20BY-DeepLethe-CC7420?style=flat-square&labelColor=161B22)](https://github.com/deeplethe)
 [![gVisor](https://img.shields.io/badge/ISOLATION-GVISOR-2D333B?style=flat-square&labelColor=161B22)](https://gvisor.dev)
 [![中文](https://img.shields.io/badge/LANG-%E4%B8%AD%E6%96%87-DA3633?style=flat-square&labelColor=161B22)](README-zh.md)
 
@@ -50,44 +51,20 @@ Every sandbox is in one of four tiers. It drops a tier at a time as it stays idl
 - **Nodes protect themselves.** A node short on memory turns work away instead of running out, and still answers ssh.
 - **One binary.** `sandstormd` is the master, the node and the web panel.
 
-## What a request waits
-
-Measured on the node, so no network is in the path. A sandbox that is hot answers in 3.5 ms. Frozen, the thaw takes 10 ms and reading its heap back from zswap takes most of the rest. On disk, the restore is about 200 ms for a 64 MiB heap.
+## Latency and cost
 
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-sleep-dark.svg">
-  <img alt="Request latency by idle time: 3.5 ms hot, about 95 ms frozen, about 210 ms from disk" src="docs/assets/charts/fleet-sleep-light.svg" width="800">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-measured-dark.svg">
+  <img alt="Four panels: request latency by idle time, latency and refusals under rising traffic, sandboxes kept in memory per node by heap size, and wake time from disk by heap size" src="docs/assets/charts/fleet-measured-light.svg" width="800">
 </picture>
 
 </div>
 
-## Under traffic
-
-40 sandboxes per node, where about 12 fit awake, with requests spread the way real use is: a few sandboxes get most of them. The median request stays at a hot sandbox's 3.4 ms. **What does not hold up is the tail:** waking a sandbox needs memory, and when the node has none to spare it refuses the wake rather than putting an idle sandbox to sleep to make room. 13% of requests were refused at 5 req/s, a third at 40.
-
-<div align="center">
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-mixed-dark.svg">
-  <img alt="Median and p99 latency under rising traffic, with the share of requests refused per phase" src="docs/assets/charts/fleet-mixed-light.svg" width="800">
-</picture>
-
-</div>
-
-## Heavier sandboxes
-
-With a large heap, a sandbox costs about what the same program does as a plain process. With a small one, gVisor's own overhead dominates: an idle Python fits 314 times per node as plain processes and 72 times as sandboxes, which is what tiering makes up for. What grows with the heap is the time to bring a sandbox back from disk: 0.2 s at 64 MiB, 2.6 s at 512 MiB, 3.9 s at 1 GiB.
-
-<div align="center">
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-sizes-dark.svg">
-  <img alt="Sandboxes kept in memory per node, and wake time from disk, for heaps from 16 MiB to 1 GiB" src="docs/assets/charts/fleet-sizes-light.svg" width="800">
-</picture>
-
-</div>
+- **Waking.** Timed on the node, so no network is in the path. A hot sandbox answers in 3.5 ms. Frozen, the thaw takes 10 ms and reading its heap back from zswap takes most of the rest. On disk, the restore is about 200 ms for a 64 MiB heap.
+- **Under traffic.** 40 sandboxes per node, where about 12 fit awake, with a few of them getting most requests. The median stays at a hot sandbox's 3.4 ms. **What does not hold up is the tail:** waking a sandbox needs memory, and when the node has none to spare it refuses the wake rather than putting an idle sandbox to sleep to make room. 13% of requests were refused at 5 req/s, a third at 40.
+- **Heavier sandboxes.** With a large heap, a sandbox costs about what the same program does as a plain process. With a small one, gVisor's own overhead dominates: an idle Python fits 314 times per node as plain processes and 72 times as sandboxes, which is what tiering makes up for. Waking from disk grows with the heap: 0.2 s at 64 MiB, 2.6 s at 512 MiB, 3.9 s at 1 GiB.
 
 ## Numbers
 
