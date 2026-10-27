@@ -159,6 +159,14 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
   white-space: pre-wrap; word-break: break-all; margin: 10px 0 0; }
 .gate .note { color: var(--ink-2); font-size: 12.5px; margin-top: 8px; line-height: 1.5; }
 .gate .ok { color: var(--good); font-size: 13px; margin-top: 8px; }
+.gate input.invalid { border-color: var(--bad); }
+.gate .hint { color: var(--bad); font-size: 12px; margin-top: 4px; line-height: 1.45; }
+.gate .hint[hidden] { display: none; }
+.gate .err b { font-weight: 600; }
+.gate .err .why { display: block; color: var(--ink-2); margin-top: 3px; }
+.gate .err details { margin-top: 4px; color: var(--muted); }
+.gate .err summary { cursor: pointer; font-size: 12px; }
+.gate .err details code { display: block; margin-top: 4px; white-space: pre-wrap; word-break: break-all; font-size: 11.5px; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 </style>
 </head>
@@ -261,7 +269,9 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
       <pre id="listenCmd"></pre>
       <div class="note">The install prints where the pairing code is: <code>sudo cat /var/lib/sandstorm/pki/node/pairing-code</code></div>
       <label for="addAddr">Address the master can reach</label><input id="addAddr" placeholder="10.0.0.5 or 10.0.0.5:80">
+      <div class="hint" id="addAddrHint" hidden></div>
       <label for="addCode">Pairing code</label><input id="addCode" type="password" placeholder="64 hex characters, a dot, then the secret">
+      <div class="hint" id="addCodeHint" hidden></div>
       <label for="addPool">Pool</label><input id="addPool" value="default">
       <button type="submit" id="addGo">Add it</button>
       <div class="ok" id="addOk" hidden></div>
@@ -292,7 +302,14 @@ async function api(path, body) {
   const opts = body === undefined ? { headers } : { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body) };
   const r = await fetch(path, opts);
   if (r.status === 401) { showGate("That token was refused."); throw new Error("401"); }
-  if (!r.ok) throw new Error(r.status + " " + (await r.text()));
+  if (!r.ok) {
+    // The API answers {"error": "..."}; say that, not the JSON around it.
+    const text = await r.text();
+    let msg = text;
+    try { msg = JSON.parse(text).error || text; } catch (e) {}
+    const e = new Error(msg || `${r.status} ${r.statusText}`); e.status = r.status;
+    throw e;
+  }
   return r.json();
 }
 
@@ -841,18 +858,54 @@ $("mint").onclick = async () => {
     $("mintNote").innerHTML = `Single use, valid until ${escapeHtml(new Date(r.expires_at * 1000).toLocaleTimeString())}. The node appears below once it has run.` +
       (r.first_fetch_is_unverified ? ` The first download is not verified (<code>-k</code>); everything after it is checked against the CA fingerprint inside the command.` : "");
     $("mintNote").hidden = false;
-  } catch (e) { $("addErr").textContent = String(e.message || e); }
+  } catch (e) { $("addErr").innerHTML = `<b>Could not make a command.</b><details><summary>Details</summary><code>${escapeHtml(String(e.message || e))}</code></details>`; }
 };
+// Field problems are said under the field, before anything is sent; what
+// only the master can tell -- it could not reach the node, the node is
+// already someone else's -- is said once, with what to try.
+const PAIRING = /^[0-9a-f]{64}\.\S+$/i;
+function fieldHint(input, hint, msg) {
+  $(input).classList.toggle("invalid", !!msg);
+  $(hint).hidden = !msg; $(hint).textContent = msg || "";
+  return !msg;
+}
+for (const [input, hint] of [["addAddr", "addAddrHint"], ["addCode", "addCodeHint"]]) {
+  $(input).addEventListener("input", () => fieldHint(input, hint, ""));
+}
+function addError(e) {
+  const msg = String(e.message || e);
+  let title = "The master could not add it.", why = "";
+  if (e.status === 502 || /could not take over/.test(msg)) {
+    title = "The master could not reach the node.";
+    why = "Check it was installed with SANDSTORM_LISTEN, that it is running (systemctl status sandstorm-node), and that the address and port are open from the master.";
+  } else if (e.status === 409) {
+    title = "That node already belongs to a fleet.";
+  } else if (/pairing_code/.test(msg)) {
+    title = "The master did not accept that pairing code.";
+    why = "Copy it again, whole, from /var/lib/sandstorm/pki/node/pairing-code on the node.";
+  }
+  $("addErr").innerHTML = `<b>${escapeHtml(title)}</b>` + (why ? `<span class="why">${escapeHtml(why)}</span>` : "") +
+    `<details><summary>Details</summary><code>${escapeHtml(msg)}</code></details>`;
+}
 $("addForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   $("addErr").textContent = ""; $("addOk").hidden = true;
+  const address = $("addAddr").value.trim(), code = $("addCode").value.trim();
+  const okAddr = fieldHint("addAddr", "addAddrHint", address ? "" : "Where the master can reach the node: a host or IP, with :port if it is not 80.");
+  const okCode = fieldHint("addCode", "addCodeHint", !code
+    ? "Run sudo cat /var/lib/sandstorm/pki/node/pairing-code on the node and paste what it prints."
+    : PAIRING.test(code) ? ""
+    : "That is not a pairing code. It is 64 hex characters, a dot, then a secret, all on one line -- the whole of /var/lib/sandstorm/pki/node/pairing-code.");
+  if (!okAddr || !okCode) return;
+  $("addGo").disabled = true; $("addGo").textContent = "Adding…";
   try {
-    const r = await api("/v1/nodes", { address: $("addAddr").value.trim(), pairing_code: $("addCode").value.trim(), pool: $("addPool").value.trim() || "default" });
+    const r = await api("/v1/nodes", { address, pairing_code: code, pool: $("addPool").value.trim() || "default" });
     $("addCode").value = "";
     $("addOk").textContent = `Added ${r.id} at ${r.address}, pool ${r.pool}, room for ${fmt(r.max_sandboxes)} sandboxes.`;
     $("addOk").hidden = false;
     refresh(false);
-  } catch (e) { $("addErr").textContent = String(e.message || e); }
+  } catch (e) { addError(e); }
+  finally { $("addGo").disabled = false; $("addGo").textContent = "Add it"; }
 });
 
 if (!token) showGate(); else refresh(true);
