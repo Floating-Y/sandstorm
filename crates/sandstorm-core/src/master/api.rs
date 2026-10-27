@@ -585,6 +585,7 @@ async fn console_now(State(st): State<St>) -> Result<Json<ConsoleNow>, ApiErr> {
         ("creates_refused", m.creates_refused.load(Relaxed)),
         ("deletes", m.deletes.load(Relaxed)),
         ("woken", m.woken.load(Relaxed)),
+        ("evicted", m.evicted.load(Relaxed)),
         ("to_frozen", demoted[1]),
         ("to_snapshot", demoted[2]),
         ("to_detached", demoted[3]),
@@ -1319,6 +1320,7 @@ async fn poll(
     // without the node listening on anything.
     record_failures(&st, &req)?;
     apply_traffic(&st, &req)?;
+    apply_evictions(&st, &req)?;
 
     let mut commands = diff(&st, &req)?;
     commands.extend(take_execs(&st, &req.node_id));
@@ -1359,6 +1361,7 @@ async fn node_traffic(
         ));
     }
     apply_traffic(&st, &req)?;
+    apply_evictions(&st, &req)?;
     // The parked poll diffs against the report it arrived with, from before
     // the wake. Wake it so the node comes back with a current one.
     st.wake_node(&req.node_id);
@@ -2018,6 +2021,37 @@ pub(super) fn apply_traffic(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
             tracing::info!(sandbox = %id, node = %req.node_id, was = %sb.tier, "woken by traffic at its gateway");
             store.set_tier(id, Tier::Hot).map_err(ise)?;
             st.metrics.woken.fetch_add(1, Relaxed);
+        }
+    }
+    Ok(())
+}
+
+/// Accept the demotions a node made on its own to make room for a wake.
+///
+/// Desired state moves to the tier the same report observes, and only ever
+/// colder: an eviction that a later request has already undone is not
+/// written back over it. Like traffic, only the node holding the sandbox is
+/// believed.
+pub(super) fn apply_evictions(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
+    if req.evicted.is_empty() {
+        return Ok(());
+    }
+    let store = st.store();
+    let ise = |e: anyhow::Error| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    for id in &req.evicted {
+        let Some(sb) = store.get_sandbox(id).map_err(ise)? else {
+            continue;
+        };
+        if sb.node_id != req.node_id {
+            continue;
+        }
+        let Some(seen) = req.observed.iter().find(|o| &o.id == id) else {
+            continue;
+        };
+        if seen.tier > sb.tier {
+            tracing::info!(sandbox = %id, node = %req.node_id, was = %sb.tier, now = %seen.tier, "put to disk by its node to make room for a wake");
+            store.set_tier(id, seen.tier).map_err(ise)?;
+            st.metrics.evicted.fetch_add(1, Relaxed);
         }
     }
     Ok(())

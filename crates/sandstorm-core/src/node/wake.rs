@@ -22,13 +22,18 @@
 //!   stale view is deferred rather than undoing the wake.
 //!
 //! The node is the one that pays for a wake, so it is subject to the same
-//! admission check as a promotion the master asks for.
+//! admission check as a promotion the master asks for -- and, when the
+//! node is under its memory floor, it makes room by putting the
+//! longest-idle sandboxes here to disk (`victims`) rather than refusing.
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use crate::proto::ObservedSandbox;
+use crate::tier::Tier;
 
 /// How long after a request a sandbox is safe from demotion.
 ///
@@ -61,7 +66,7 @@ pub mod predict {
     pub const LEAD: Duration = Duration::from_secs(20);
 }
 
-type WakeFn = dyn Fn(&str) -> Result<()> + Send + Sync;
+type WakeFn = dyn Fn(&Wakeups, &str) -> Result<()> + Send + Sync;
 
 pub struct Wakeups {
     /// One per sandbox, held across any tier change -- a wake, or a command
@@ -71,6 +76,12 @@ pub struct Wakeups {
     seen: Mutex<HashMap<String, Instant>>,
     /// Requests the master has not been told about yet.
     unreported: Mutex<HashSet<String>>,
+    /// When each sandbox last served a request, or came up. Unlike `seen`
+    /// it is kept for the sandbox's life: it is how a wake that needs
+    /// memory picks which idle sandbox to put away.
+    used: Mutex<HashMap<String, Instant>>,
+    /// Sandboxes put to disk here to make room for a wake, not yet reported.
+    evicted: Mutex<HashSet<String>>,
     /// Restores read whole images from disk, so a burst of wakes for
     /// different sandboxes is queued rather than run all at once and left
     /// to fight over the same disk.
@@ -89,7 +100,7 @@ pub struct Wakeups {
 impl Wakeups {
     /// `wake` brings a sandbox to Hot and returns when it is serving. It
     /// blocks, and is called with that sandbox's lock held.
-    pub fn new(wake: impl Fn(&str) -> Result<()> + Send + Sync + 'static) -> Self {
+    pub fn new(wake: impl Fn(&Wakeups, &str) -> Result<()> + Send + Sync + 'static) -> Self {
         let parallel = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(2)
@@ -98,6 +109,8 @@ impl Wakeups {
             locks: Mutex::default(),
             seen: Mutex::default(),
             unreported: Mutex::default(),
+            used: Mutex::default(),
+            evicted: Mutex::default(),
             restores: tokio::sync::Semaphore::new(parallel),
             wake: Box::new(wake),
             woke: tokio::sync::Notify::new(),
@@ -115,6 +128,7 @@ impl Wakeups {
     pub fn saw(&self, id: &str) {
         let now = Instant::now();
         let prev = self.seen.lock().insert(id.to_string(), now);
+        self.used.lock().insert(id.to_string(), now);
         self.unreported.lock().insert(id.to_string());
         // `seen` forgets anything older than GRACE, so no entry also means
         // a quiet spell.
@@ -188,10 +202,53 @@ impl Wakeups {
         ids
     }
 
+    /// A sandbox came up here. It counts as used from now, so one that has
+    /// just started is not the first to be put away.
+    pub fn started(&self, id: &str) {
+        self.used.lock().insert(id.to_string(), Instant::now());
+    }
+
+    /// Which sandboxes a wake may put to disk to make room, best first.
+    ///
+    /// Frozen before Hot -- a frozen one has already been idle long enough
+    /// for the master to say so -- and within each, the one used longest
+    /// ago; one with no record (adopted across a restart) counts as oldest.
+    /// Never `except`, the sandbox being woken, and never one inside its
+    /// `GRACE`, which is serving requests now.
+    pub fn victims(&self, observed: &[ObservedSandbox], except: &str, now: Instant) -> Vec<String> {
+        let used = self.used.lock();
+        let mut ranked: Vec<(bool, Option<Instant>, &str)> = observed
+            .iter()
+            .filter(|o| o.id != except && matches!(o.tier, Tier::Hot | Tier::Frozen))
+            .filter(|o| self.in_grace(&o.id, now).is_none())
+            .map(|o| (o.tier == Tier::Hot, used.get(&o.id).copied(), o.id.as_str()))
+            .collect();
+        ranked.sort();
+        ranked
+            .into_iter()
+            .map(|(_, _, id)| id.to_string())
+            .collect()
+    }
+
+    /// This node put a sandbox to disk to make room, which the master has
+    /// to hear about.
+    pub fn put_away(&self, id: &str) {
+        self.evicted.lock().insert(id.to_string());
+    }
+
+    /// The sandboxes to report as put away, emptied as it is read.
+    pub fn take_evicted(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.evicted.lock().drain().collect();
+        ids.sort();
+        ids
+    }
+
     /// A destroyed sandbox needs none of this any more.
     pub fn forget(&self, id: &str) {
         self.locks.lock().remove(id);
         self.seen.lock().remove(id);
+        self.used.lock().remove(id);
+        self.evicted.lock().remove(id);
         self.unreported.lock().remove(id);
         self.arrivals.lock().remove(id);
         self.prefetched.lock().remove(id);
@@ -210,7 +267,7 @@ impl Wakeups {
             let lock = me.lock(&id);
             let _held = lock.lock();
             let t0 = Instant::now();
-            (me.wake)(&id)?;
+            (me.wake)(&me, &id)?;
             Ok::<_, anyhow::Error>(t0.elapsed())
         })
         .await
@@ -227,7 +284,7 @@ mod tests {
 
     #[test]
     fn traffic_is_reported_once() {
-        let w = Wakeups::new(|_| Ok(()));
+        let w = Wakeups::new(|_, _| Ok(()));
         w.saw("a");
         w.saw("b");
         w.saw("a");
@@ -237,7 +294,7 @@ mod tests {
 
     #[test]
     fn grace_runs_out() {
-        let w = Wakeups::new(|_| Ok(()));
+        let w = Wakeups::new(|_, _| Ok(()));
         assert_eq!(w.in_grace("a", Instant::now()), None, "never seen");
         w.saw("a");
         let left = w.in_grace("a", Instant::now()).expect("just seen");
@@ -249,7 +306,7 @@ mod tests {
     /// its next call; an irregular one never is.
     #[test]
     fn a_periodic_sandbox_is_prefetched_ahead_of_its_next_call() {
-        let w = Wakeups::new(|_| Ok(()));
+        let w = Wakeups::new(|_, _| Ok(()));
         let t0 = Instant::now();
         let s = Duration::from_secs;
         for k in 0..4 {
@@ -270,7 +327,7 @@ mod tests {
 
     #[test]
     fn too_short_a_period_is_not_worth_predicting() {
-        let w = Wakeups::new(|_| Ok(()));
+        let w = Wakeups::new(|_, _| Ok(()));
         let t0 = Instant::now();
         for k in 0..4 {
             w.arrived("busy", t0 + Duration::from_secs(20 * k));
@@ -278,9 +335,58 @@ mod tests {
         assert!(w.due_prefetch(t0 + Duration::from_secs(75)).is_empty());
     }
 
+    fn seen(id: &str, tier: Tier) -> ObservedSandbox {
+        ObservedSandbox {
+            id: id.into(),
+            tier,
+            serving: tier.is_serving(),
+            ip: None,
+            net_index: None,
+        }
+    }
+
+    /// Frozen goes before Hot, the longest unused first within each, and
+    /// neither the sandbox being woken, one serving requests now, nor one
+    /// already on disk is ever chosen.
+    #[test]
+    fn a_wake_puts_away_the_longest_idle_first() {
+        let w = Wakeups::new(|_, _| Ok(()));
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        w.used.lock().insert("hot-old".into(), t0);
+        w.used.lock().insert("hot-new".into(), t0 + s(100));
+        w.used.lock().insert("frozen-new".into(), t0 + s(90));
+        w.used.lock().insert("frozen-old".into(), t0 + s(10));
+        w.started("busy");
+        w.saw("busy");
+        let observed = [
+            seen("hot-new", Tier::Hot),
+            seen("frozen-new", Tier::Frozen),
+            seen("busy", Tier::Hot),
+            seen("target", Tier::Frozen),
+            seen("hot-old", Tier::Hot),
+            seen("on-disk", Tier::Snapshot),
+            seen("frozen-old", Tier::Frozen),
+            seen("adopted", Tier::Hot),
+        ];
+        assert_eq!(
+            w.victims(&observed, "target", Instant::now()),
+            ["frozen-old", "frozen-new", "adopted", "hot-old", "hot-new"]
+        );
+    }
+
+    #[test]
+    fn evictions_are_reported_once() {
+        let w = Wakeups::new(|_, _| Ok(()));
+        w.put_away("b");
+        w.put_away("a");
+        assert_eq!(w.take_evicted(), ["a", "b"]);
+        assert!(w.take_evicted().is_empty());
+    }
+
     #[test]
     fn forgetting_drops_everything() {
-        let w = Wakeups::new(|_| Ok(()));
+        let w = Wakeups::new(|_, _| Ok(()));
         w.saw("a");
         w.forget("a");
         assert_eq!(w.in_grace("a", Instant::now()), None);
@@ -294,7 +400,7 @@ mod tests {
         let running = Arc::new(AtomicUsize::new(0));
         let overlapped = Arc::new(AtomicUsize::new(0));
         let (r, o) = (running.clone(), overlapped.clone());
-        let w = Arc::new(Wakeups::new(move |_| {
+        let w = Arc::new(Wakeups::new(move |_, _| {
             if r.fetch_add(1, Ordering::SeqCst) > 0 {
                 o.fetch_add(1, Ordering::SeqCst);
             }

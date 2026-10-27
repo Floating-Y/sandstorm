@@ -492,7 +492,7 @@ mod tests {
         let woken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let w = {
             let woken = woken.clone();
-            Arc::new(Wakeups::new(move |_| {
+            Arc::new(Wakeups::new(move |_, _| {
                 // Nothing listens until the first wake, which is how a
                 // frozen sandbox behind #327's REJECT looks from here.
                 if woken.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
@@ -530,7 +530,7 @@ mod tests {
     #[tokio::test]
     async fn a_wake_the_node_refuses_is_a_503_with_the_reason() {
         let gw_port = 28463u16;
-        let w = Arc::new(Wakeups::new(|_| {
+        let w = Arc::new(Wakeups::new(|_, _| {
             anyhow::bail!("node held it back: 100 MiB free, below its own 512 MiB floor")
         }));
         let mut g = Gateway::waking(w);

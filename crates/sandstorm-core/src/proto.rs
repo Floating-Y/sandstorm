@@ -110,6 +110,14 @@ pub struct PollRequest {
     /// does not put it straight back to sleep.
     #[serde(default)]
     pub traffic: Vec<String>,
+    /// Sandboxes this node put to disk on its own, to make room for a wake.
+    ///
+    /// The master takes the node's word for these and moves desired state
+    /// to the tier observed. If it asked for them back instead, the node
+    /// would make room for that by putting away something else, and the
+    /// two would take turns for ever.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evicted: Vec<String>,
     /// The density levers this node has on (`snapshot-compression`,
     /// `reclaim-hot`, `swap:zswap`, ...). Each node decides for itself from
     /// what its machine can do, so nodes in one pool can differ, and this is

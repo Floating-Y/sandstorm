@@ -42,6 +42,7 @@ use crate::proto::{
     Command, CommandFailure, CommandResult, ObservedSandbox, PollRequest, PollResponse,
     RegisterRequest, RegisterResponse,
 };
+use crate::tier::Tier;
 
 /// A sandbox whose command keeps failing.
 ///
@@ -165,21 +166,83 @@ fn holding_back_at(
     None
 }
 
-/// What the gateway calls to wake a sandbox: the same admission check and
-/// the same tier change a promotion from the master would get.
+/// What the gateway calls to wake a sandbox: the same promotion, room made
+/// the same way, as one the master asks for.
 fn wakeups(cfg: &NodeConfig, rt: &Runtime) -> Arc<Wakeups> {
     let rt = rt.clone();
     let (min_free, max_psi) = (cfg.admit_min_free_mib, cfg.admit_max_psi);
-    Arc::new(Wakeups::new(move |id| {
-        let hot = Command::SetTier {
-            id: id.to_string(),
-            tier: crate::tier::Tier::Hot,
+    Arc::new(Wakeups::new(move |w, id| {
+        promote(min_free, max_psi, &rt, w, id)
+    }))
+}
+
+/// How many idle sandboxes one promotion may put to disk to make room.
+/// Each is a checkpoint, a few hundred milliseconds on a 2-vCPU node, and a
+/// caller is waiting on all of them.
+const MAX_EVICTIONS: usize = 4;
+
+/// Bring a sandbox to Hot. If the node is under its memory floor, put the
+/// longest-idle sandboxes here to disk first, until it is not.
+///
+/// Before this a wake under the floor was refused. Measured on 2026-10-26,
+/// six 2-vCPU nodes with 40 sandboxes each where about 12 fit awake: 13% of
+/// requests were refused at 5 req/s and a third at 40, every one of them
+/// "below its own 512 MiB floor", while frozen sandboxes nobody had called
+/// for minutes held the memory. A wake that waits for a checkpoint is
+/// slow; a 503 is a failure.
+///
+/// Only the floor is made room for. Memory pressure is a 10-second
+/// average that does not move when a checkpoint finishes, so evicting
+/// until it did would empty the node.
+fn promote(min_free: u64, max_psi: f64, rt: &Runtime, wake: &Wakeups, id: &str) -> Result<()> {
+    let hot = Command::SetTier {
+        id: id.to_string(),
+        tier: Tier::Hot,
+    };
+    let mut evicted = 0;
+    loop {
+        let (free, psi) = runtime::host_pressure();
+        let Some(why) = holding_back_at(min_free, max_psi, &hot, (free, psi)) else {
+            return rt.set_tier(id, Tier::Hot);
         };
-        if let Some(why) = holding_back_at(min_free, max_psi, &hot, runtime::host_pressure()) {
+        let under_floor = free > 0 && free < min_free;
+        if !under_floor || evicted == MAX_EVICTIONS || !evict_one(rt, wake, id)? {
+            tracing::warn!(sandbox = %id, reason = %why, evicted, "refusing work");
             bail!(why);
         }
-        rt.set_tier(id, crate::tier::Tier::Hot)
-    }))
+        evicted += 1;
+    }
+}
+
+/// Put the longest-idle sandbox here other than `except` to disk. False
+/// when there is none that can go.
+fn evict_one(rt: &Runtime, wake: &Wakeups, except: &str) -> Result<bool> {
+    for victim in wake.victims(&rt.observe()?, except, Instant::now()) {
+        // One whose tier is already changing -- being woken, or demoted by
+        // the master -- is skipped, not waited for: two wakes each holding
+        // their own sandbox's lock and waiting on the other's would never
+        // finish.
+        let lock = wake.lock(&victim);
+        let Some(_held) = lock.try_lock() else {
+            continue;
+        };
+        let t0 = Instant::now();
+        match rt.set_tier(&victim, Tier::Snapshot) {
+            Ok(()) => {
+                wake.put_away(&victim);
+                tracing::info!(
+                    sandbox = %victim, waking = %except, ms = t0.elapsed().as_millis() as u64,
+                    "put an idle sandbox to disk to make room for a wake"
+                );
+                return Ok(true);
+            }
+            Err(e) => tracing::warn!(
+                sandbox = %victim, error = %format!("{e:#}"),
+                "could not put an idle sandbox away to make room; trying the next"
+            ),
+        }
+    }
+    Ok(false)
 }
 
 pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
@@ -368,6 +431,7 @@ async fn report_wakes(
             hold_ms: None,
             failures: Vec::new(),
             traffic: wake.take_traffic(),
+            evicted: wake.take_evicted(),
             features: Vec::new(),
             tags: Vec::new(),
         };
@@ -500,6 +564,7 @@ async fn report(
         hold_ms: hold.map(|h| h.as_millis() as u64),
         failures,
         traffic: wake.take_traffic(),
+        evicted: wake.take_evicted(),
         features: cfg.features.clone(),
         tags: tags::held(&rt.tags_dir(), tags::REPORT_MIN_AGE),
     })
@@ -617,7 +682,13 @@ fn run_one(
     // runsc on this sandbox at the same time.
     let lock = wake.lock(&id);
     let _held = lock.lock();
-    let out = if let Some(why) = holding_back(cfg, cmd) {
+    let out = if let Command::SetTier {
+        id,
+        tier: Tier::Hot,
+    } = cmd
+    {
+        promote(cfg.admit_min_free_mib, cfg.admit_max_psi, rt, wake, id)
+    } else if let Some(why) = holding_back(cfg, cmd) {
         tracing::warn!(sandbox = %id, reason = %why, "refusing work");
         Err(anyhow::anyhow!(why))
     } else {
@@ -668,6 +739,9 @@ fn run_one(
     match out {
         Ok(()) => {
             failing.remove(&id);
+            if matches!(cmd, Command::Create { .. }) {
+                wake.started(&id);
+            }
             if matches!(cmd, Command::Destroy { .. }) {
                 drop(_held);
                 wake.forget(&id);
@@ -952,7 +1026,7 @@ mod wake_tests {
     fn a_sandbox_in_use_is_not_demoted() {
         let dir = tempfile::tempdir().unwrap();
         let (cfg, rt) = node(dir.path());
-        let w = Wakeups::new(|_| Ok(()));
+        let w = Wakeups::new(|_, _| Ok(()));
         let mut failing = HashMap::new();
         w.saw("sb");
 
@@ -1022,7 +1096,7 @@ mod wake_tests {
     async fn a_fork_waits_for_its_image_and_a_failed_fetch_counts() {
         let dir = tempfile::tempdir().unwrap();
         let (cfg, rt) = node(dir.path());
-        let w = Wakeups::new(|_| Ok(()));
+        let w = Wakeups::new(|_, _| Ok(()));
         let mut failing = HashMap::new();
         // Nothing listens on port 1, so the fetch fails.
         let cmd = fork_from_elsewhere("sb", "127.0.0.1:1");
@@ -1050,7 +1124,7 @@ mod wake_tests {
     fn a_dropped_tag_leaves_the_disk() {
         let dir = tempfile::tempdir().unwrap();
         let (cfg, rt) = node(dir.path());
-        let w = Wakeups::new(|_| Ok(()));
+        let w = Wakeups::new(|_, _| Ok(()));
         let mut failing = HashMap::new();
         std::fs::create_dir_all(rt.tags_dir().join("old")).unwrap();
         std::fs::write(rt.tags_dir().join("old/pages.img"), b"x").unwrap();
