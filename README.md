@@ -29,8 +29,8 @@ On six cloud machines with 2 cores and 2 GB each, which hold **431** sandboxes k
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-running-dark.svg">
-  <img alt="18,290 sandboxes running on six 2-core, 2 GB machines that hold 431 kept in memory" src="docs/assets/charts/fleet-running-light.svg" width="800">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-overview-dark.svg">
+  <img alt="18,290 sandboxes running on six 2-core, 2 GB machines that hold 431 kept in memory; below it, request latency by idle time, latency and refusals under rising traffic, sandboxes kept in memory by heap size, and wake time from disk by heap size" src="docs/assets/charts/fleet-overview-light.svg" width="800">
 </picture>
 
 </div>
@@ -53,14 +53,7 @@ Every sandbox is in one of four tiers. It drops a tier at a time as it stays idl
 
 ## Latency and cost
 
-<div align="center">
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-measured-dark.svg">
-  <img alt="Four panels: request latency by idle time, latency and refusals under rising traffic, sandboxes kept in memory per node by heap size, and wake time from disk by heap size" src="docs/assets/charts/fleet-measured-light.svg" width="800">
-</picture>
-
-</div>
+The four smaller panels in the figure at the top, in order:
 
 - **Waking.** Timed on the node, so no network is in the path. A hot sandbox answers in 3.5 ms. Frozen, the thaw takes 10 ms and reading its heap back from zswap takes most of the rest. On disk, the restore is about 200 ms for a 64 MiB heap.
 - **Under traffic.** 40 sandboxes per node, where about 12 fit awake, with a few of them getting most requests. The median stays at a hot sandbox's 3.4 ms. **What does not hold up is the tail:** waking a sandbox needs memory, and when the node has none to spare it refuses the wake rather than putting an idle sandbox to sleep to make room. 13% of requests were refused at 5 req/s, a third at 40.

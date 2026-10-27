@@ -212,7 +212,7 @@ def jsonl(path):
 
 # --- the charts ---------------------------------------------------------------
 
-def running(src, theme):
+def running(src, theme, w, h):
     """The running count over a ramp: before #351, after it, and after the FD fix."""
     t = THEMES[theme]
 
@@ -226,12 +226,14 @@ def running(src, theme):
         (load("running-r3a.csv"), t["series"][2], "netns released, open-file limit left at 1024"),
     ]
     runs = [r for r in runs if r[0]]
+    if not runs:
+        return None
     peak = max(max(v for _, v in pts) for pts, _, _ in runs)
     ymax = math.ceil(peak * 1.12 / 4000) * 4000
     xmax = 19 * 60
     c = Chart(theme, f"{peak:,} sandboxes running on six 2-core, 2 GB machines",
               "Idle Python sandboxes created at 15-20/s. The dashed line is what the same machines hold kept in memory.",
-              legend=[(colour, label, "line") for _, colour, label in runs], h=430)
+              legend=[(colour, label, "line") for _, colour, label in runs], w=w, h=h)
     # Three legend entries do not fit on one row; give the third its own.
     c.xscale(0, xmax)
     c.yscale(0, ymax)
@@ -244,7 +246,7 @@ def running(src, theme):
         x, y = pts[-1]
         below = colour == t["series"][2]
         c.text(c.sx(x) - 8, c.sy(y) + (20 if below else -10), f"{max(v for _, v in pts):,}", size=12, colour=t["ink"], anchor="end", weight=600)
-    return c.svg(f"{peak:,} sandboxes running on six 2-core, 2 GB machines")
+    return c
 
 
 def sleep(src, theme, w, h):
@@ -442,20 +444,20 @@ def restore(src, theme, w, h):
 
 
 def figure(src, theme):
-    """Four measurements as one set of panels, two by two."""
-    gap, rows = 16, (300, 250)
+    """The README's lead image: the running count across the top, four
+    measurements two by two beneath it."""
+    gap, top, rows = 16, 390, (300, 250)
     pw = (W - gap) // 2
+    head = running(src, theme, W, top)
     panels = [draw(src, theme, pw, rows[i // 2]) for i, draw in enumerate((sleep, mixed, kept, restore))]
-    if not all(panels):
+    if not head or not all(panels):
         return None
-    out = []
-    for i, c in enumerate(panels):
-        x, y = (i % 2) * (pw + gap), (rows[0] + gap) * (i // 2)
-        out.append(f'<g transform="translate({x},{y})">\n' + "\n".join(c.out) + "\n</g>")
-    return svg(W, sum(rows) + gap, "What a request waits, under traffic, and what a heavier sandbox costs", "\n".join(out))
+    place = [(head, 0, 0)] + [(c, (i % 2) * (pw + gap), top + gap + (rows[0] + gap) * (i // 2)) for i, c in enumerate(panels)]
+    out = [f'<g transform="translate({x},{y})">\n' + "\n".join(c.out) + "\n</g>" for c, x, y in place]
+    return svg(W, top + gap + sum(rows) + gap, "Sandboxes running across six machines, with latency by idle time, under traffic, and by heap size", "\n".join(out))
 
 
-CHARTS = {"running": running, "herd": herd, "measured": figure}
+CHARTS = {"overview": figure, "herd": herd}
 
 
 def main():

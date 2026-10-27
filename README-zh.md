@@ -29,8 +29,8 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-running-dark.svg">
-  <img alt="六台 2 核 2 GB 机器，全部常驻只能放 431 个，实际跑到 18,290 个沙箱" src="docs/assets/charts/fleet-running-light.svg" width="800">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-overview-dark.svg">
+  <img alt="六台 2 核 2 GB 机器，全部常驻只能放 431 个，实际跑到 18,290 个沙箱；下面四张小图分别是按闲置时长看请求延迟、流量加大时的延迟和拒绝比例、按堆大小看每个节点能常驻的沙箱数、按堆大小看从磁盘唤醒的时间" src="docs/assets/charts/fleet-overview-light.svg" width="800">
 </picture>
 
 </div>
@@ -53,14 +53,7 @@
 
 ## 延迟和开销
 
-<div align="center">
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-measured-dark.svg">
-  <img alt="四张小图：按闲置时长看请求延迟；流量加大时的延迟和拒绝比例；按堆大小看每个节点能常驻的沙箱数；按堆大小看从磁盘唤醒的时间" src="docs/assets/charts/fleet-measured-light.svg" width="800">
-</picture>
-
-</div>
+开头总览图下面的四张小图，依次是：
 
 - **唤醒。** 在节点本机上测，不经过网络。沙箱是热的时候，3.5 ms 就有响应。冻结的沙箱，解冻只要 10 ms，其余时间主要花在把堆内存从 zswap 读回来。已落盘的沙箱，64 MiB 的堆恢复约 200 ms。
 - **有流量的时候。** 每个节点放 40 个沙箱，只装得下约 12 个同时醒着，少数几个沙箱拿走大部分请求。请求的中位数一直保持在热沙箱的 3.4 ms。**撑不住的是长尾：** 唤醒一个沙箱需要内存，节点内存不够时会直接拒绝这次唤醒，而不是先把一个闲着的沙箱落盘腾出位置。每秒 5 个请求时有 13% 被拒绝，每秒 40 个时达到三分之一。
