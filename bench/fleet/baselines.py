@@ -170,8 +170,14 @@ class Container:
         return cid, f"http://{ip}:8000/"
 
     def stop_all(self):
+        # `-t` is Podman's; Docker's rm refuses it and removes nothing,
+        # which left a first round's containers holding the memory every
+        # later measurement was taken against.
         if self.ids:
-            subprocess.run([self.cli, "rm", "-f", "-t", "0"] + self.ids, capture_output=True)
+            rm = [self.cli, "rm", "-f"] + (["-t", "0"] if self.cli == "podman" else [])
+            r = subprocess.run(rm + self.ids, capture_output=True, text=True)
+            if r.returncode != 0:
+                raise RuntimeError(f"{self.cli} rm failed: {r.stderr.strip()[-300:]}")
         self.ids = []
 
 
@@ -224,8 +230,15 @@ def fill(rt, app, out, cap):
     return started
 
 
+# A measurement only counts against a machine that starts out clean. Every
+# node in the 2026-10-28 runs had 1.3 GB or more available when idle.
+CLEAN_MIB = 1100
+
+
 def density(rt, app, out, cap):
     base = avail_mib()
+    if base < CLEAN_MIB:
+        out.write("not_clean", runtime=rt.name, app=app, avail_mib=base)
     started = fill(rt, app, out, cap)
     lat = sorted(once(u)[1] for _, u in started)
     out.write("density", runtime=rt.name, app=app, instances=len(started), avail_before_mib=base,
