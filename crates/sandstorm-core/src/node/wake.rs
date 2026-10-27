@@ -35,6 +35,18 @@ use std::time::{Duration, Instant};
 use crate::proto::ObservedSandbox;
 use crate::tier::Tier;
 
+/// How recently a sandbox must have served a request for a wake not to put
+/// it away to make room: one that answered in the last moment is likely
+/// part of a conversation still going on.
+///
+/// Much shorter than `GRACE`, which guards against something else -- the
+/// master demoting on a view that predates a request. Measured on bm with
+/// `GRACE` here instead: at 4 req/s over 40 app64 sandboxes, most hot ones
+/// had served something in the last 15 s, so a wake under the floor found
+/// nothing it was allowed to put away and 7.5% of requests were refused,
+/// with sandboxes idle for 5 to 15 s holding the memory.
+pub const KEEP_IF_USED_WITHIN: Duration = Duration::from_secs(2);
+
 /// How long after a request a sandbox is safe from demotion.
 ///
 /// Long enough to cover the master hearing about the request: a listening
@@ -213,14 +225,18 @@ impl Wakeups {
     /// Frozen before Hot -- a frozen one has already been idle long enough
     /// for the master to say so -- and within each, the one used longest
     /// ago; one with no record (adopted across a restart) counts as oldest.
-    /// Never `except`, the sandbox being woken, and never one inside its
-    /// `GRACE`, which is serving requests now.
+    /// Never `except`, the sandbox being woken, and never one that served a
+    /// request in the last `KEEP_IF_USED_WITHIN`.
     pub fn victims(&self, observed: &[ObservedSandbox], except: &str, now: Instant) -> Vec<String> {
         let used = self.used.lock();
+        let recent = |id: &str| {
+            used.get(id)
+                .is_some_and(|at| now.saturating_duration_since(*at) < KEEP_IF_USED_WITHIN)
+        };
         let mut ranked: Vec<(bool, Option<Instant>, &str)> = observed
             .iter()
             .filter(|o| o.id != except && matches!(o.tier, Tier::Hot | Tier::Frozen))
-            .filter(|o| self.in_grace(&o.id, now).is_none())
+            .filter(|o| !recent(&o.id))
             .map(|o| (o.tier == Tier::Hot, used.get(&o.id).copied(), o.id.as_str()))
             .collect();
         ranked.sort();
@@ -366,23 +382,30 @@ mod tests {
     }
 
     /// Frozen goes before Hot, the longest unused first within each, and
-    /// neither the sandbox being woken, one serving requests now, nor one
-    /// already on disk is ever chosen.
+    /// neither the sandbox being woken, one that answered a moment ago, nor
+    /// one already on disk is ever chosen. One that answered 5 s ago is:
+    /// that is inside the master's `GRACE`, but not a conversation.
     #[test]
     fn a_wake_puts_away_the_longest_idle_first() {
         let w = Wakeups::new(|_, _| Ok(()));
         let t0 = Instant::now();
         let s = Duration::from_secs;
-        w.used.lock().insert("hot-old".into(), t0);
-        w.used.lock().insert("hot-new".into(), t0 + s(100));
-        w.used.lock().insert("frozen-new".into(), t0 + s(90));
-        w.used.lock().insert("frozen-old".into(), t0 + s(10));
-        w.started("busy");
-        w.saw("busy");
+        let now = t0 + s(200);
+        for (id, at) in [
+            ("hot-old", t0),
+            ("hot-new", t0 + s(100)),
+            ("frozen-new", t0 + s(90)),
+            ("frozen-old", t0 + s(10)),
+            ("quiet", t0 + s(195)),
+            ("busy", t0 + s(199)),
+        ] {
+            w.used.lock().insert(id.into(), at);
+        }
         let observed = [
             seen("hot-new", Tier::Hot),
             seen("frozen-new", Tier::Frozen),
             seen("busy", Tier::Hot),
+            seen("quiet", Tier::Hot),
             seen("target", Tier::Frozen),
             seen("hot-old", Tier::Hot),
             seen("on-disk", Tier::Snapshot),
@@ -390,8 +413,15 @@ mod tests {
             seen("adopted", Tier::Hot),
         ];
         assert_eq!(
-            w.victims(&observed, "target", Instant::now()),
-            ["frozen-old", "frozen-new", "adopted", "hot-old", "hot-new"]
+            w.victims(&observed, "target", now),
+            [
+                "frozen-old",
+                "frozen-new",
+                "adopted",
+                "hot-old",
+                "hot-new",
+                "quiet"
+            ]
         );
     }
 
