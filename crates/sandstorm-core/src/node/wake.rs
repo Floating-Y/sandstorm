@@ -96,8 +96,9 @@ pub struct Wakeups {
     evicted: Mutex<HashMap<String, Instant>>,
     /// Restores read whole images from disk, so a burst of wakes for
     /// different sandboxes is queued rather than run all at once and left
-    /// to fight over the same disk.
-    restores: tokio::sync::Semaphore,
+    /// to fight over the same disk. A permit belongs to the wake, not to
+    /// whoever asked for it; see `wake`.
+    restores: Arc<tokio::sync::Semaphore>,
     wake: Box<WakeFn>,
     /// Signalled after every wake, so a polling node can tell the master at
     /// once rather than on its next poll.
@@ -123,7 +124,7 @@ impl Wakeups {
             unreported: Mutex::default(),
             used: Mutex::default(),
             evicted: Mutex::default(),
-            restores: tokio::sync::Semaphore::new(parallel),
+            restores: Arc::new(tokio::sync::Semaphore::new(parallel)),
             wake: Box::new(wake),
             woke: tokio::sync::Notify::new(),
             arrivals: Mutex::default(),
@@ -294,12 +295,23 @@ impl Wakeups {
     /// already hot costs one observe: `set_tier` returns at once when the
     /// tier already matches, which is also what makes a burst of requests
     /// for one cold sandbox wake it once rather than once each.
+    ///
+    /// A caller can give up -- the gateway's handler is dropped when its
+    /// client disconnects -- but the blocking work cannot be called back,
+    /// so the permit goes with the work and is released when it ends. A
+    /// caller that gives up while still queued never starts anything.
     pub async fn wake(self: &Arc<Self>, id: &str) -> Result<Duration> {
-        let _permit = self.restores.acquire().await.context("shutting down")?;
+        let permit = self
+            .restores
+            .clone()
+            .acquire_owned()
+            .await
+            .context("shutting down")?;
         let me = self.clone();
         let id = id.to_string();
         let me2 = self.clone();
         let took = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             let lock = me.lock(&id);
             let _held = lock.lock();
             let t0 = Instant::now();
@@ -492,5 +504,69 @@ mod tests {
             h.await.unwrap().unwrap();
         }
         assert_eq!(overlapped.load(Ordering::SeqCst), 0);
+    }
+
+    /// A caller that hangs up does not take its restore permit with it.
+    ///
+    /// The gateway's handler is dropped when its client disconnects, but
+    /// the wake it started runs on a blocking thread and carries on. On
+    /// 2026-10-28 the permit went with the handler: a load generator giving
+    /// up after 60 s let wake after wake past the limit, each then waiting
+    /// out memory pressure on its own thread, and when the pressure eased
+    /// 24 restores started in the same second on a 2-vCPU node.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_caller_hanging_up_does_not_free_its_permit() {
+        let running = Arc::new(AtomicUsize::new(0));
+        let most = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new((parking_lot::Mutex::new(false), parking_lot::Condvar::new()));
+        let (r, m, g) = (running.clone(), most.clone(), gate.clone());
+        let w = Arc::new(Wakeups::new(move |_, _| {
+            let now = r.fetch_add(1, Ordering::SeqCst) + 1;
+            m.fetch_max(now, Ordering::SeqCst);
+            let (open, cv) = &*g;
+            let mut open = open.lock();
+            while !*open {
+                cv.wait(&mut open);
+            }
+            drop(open);
+            r.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        let parallel = w.restores.available_permits();
+
+        // Three times as many sandboxes as permits, every caller giving up
+        // long before its wake could finish.
+        for i in 0..parallel * 3 {
+            let w = w.clone();
+            let id = format!("sb-{i}");
+            let _ =
+                tokio::time::timeout(Duration::from_millis(20), async move { w.wake(&id).await })
+                    .await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let at_once = running.load(Ordering::SeqCst);
+
+        // Opened before asserting: the runtime waits for its blocking
+        // threads when it shuts down, so a failure with the gate closed
+        // would hang rather than fail.
+        let (open, cv) = &*gate;
+        *open.lock() = true;
+        cv.notify_all();
+        assert!(
+            at_once <= parallel,
+            "{at_once} wakes running past {parallel} permits"
+        );
+        // The wakes that were running finish and hand their permits back.
+        // Those whose callers hung up while still queued never started.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while w.restores.available_permits() < parallel && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            w.restores.available_permits(),
+            parallel,
+            "a permit was lost"
+        );
+        assert!(most.load(Ordering::SeqCst) <= parallel);
     }
 }

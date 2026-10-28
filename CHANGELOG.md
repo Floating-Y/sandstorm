@@ -74,6 +74,17 @@ snapshots, 8 of 600 had been refused for a few seconds of pressure their own
 restores caused. `--wake-max-psi` sets the ceiling a wake is held to,
 separately from creates.
 
+The restore permit belongs to the wake, not to the request that started it.
+It used to go with the request: a client that gave up while its wake waited
+out pressure handed the permit on, the wake carried on regardless, and the
+next one did the same. With 80 sandboxes per node at 8 req/s and a client
+timeout of 60 s, 24 restores started in the same second on a 2-vCPU node
+once the pressure eased; together they ran it out of memory and swap, and it
+stopped answering for an hour and a half until the kernel's OOM killer
+caught up. A wake now holds its permit until it ends, and one whose caller
+gives up while still queued never starts. Reproduced on bm with 12
+sandboxes: 12 restores at once before, 2 after.
+
 The node lists what it put away in its reports (`evicted`), and the master
 moves desired state there rather than asking for the sandbox back -- which
 would make the node evict something else to make room for it. The panel's
