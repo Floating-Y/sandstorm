@@ -40,7 +40,7 @@ gVisor is the default for availability, not preference: Firecracker needs
 it cannot be the default for the machines operators actually have. Where KVM
 does exist, Firecracker is the stronger isolation boundary —
 `docs/SECURITY.md` states what each one gives you. A Firecracker backend for
-`sandstormd` is still planned (`DESIGN-v0.6.md` section 2); a
+`sandstormd` is still planned ([ADR 2](docs/adr/0002-gvisor-runtime-no-kvm.md)); a
 `backend:firecracker` issue is about the v0.5 code or about that plan.
 
 **If you pick up a `backend:firecracker` issue, you need a KVM host of your
