@@ -350,9 +350,9 @@ fn evict_one(rt: &Runtime, wake: &Wakeups, except: &str) -> Result<bool> {
         let Some(_held) = lock.try_lock() else {
             continue;
         };
-        // The list was drawn before the lock was had: a request may have
-        // reached this one, or a wake brought it up, in between.
-        if wake.protected(&victim, Instant::now()) {
+        // The list was drawn before the lock was had: a wake may have
+        // brought this one up, and marked it used, in between.
+        if wake.recently_used(&victim, Instant::now()) {
             continue;
         }
         let t0 = Instant::now();
