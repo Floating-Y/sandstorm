@@ -18,6 +18,89 @@ paths (`/var/lib/sandstorm`, `/etc/sandstorm`), systemd units, HTTP headers
 `sandstorm`) and `sandstorm-mcp`. Entries below this one describe forkd and
 keep its names.
 
+A machine that ran a forkd node keeps forkd's iptables rules until they are
+removed: an `OUTPUT -j FORKD-COLD` jump and a chain that rejects TCP to the
+sandbox addresses forkd had parked. Sandstorm hands out addresses from the
+same 10.86.0.0/16, so a new sandbox that lands on one of them cannot be
+reached and its gateway answers 502. Take the old node down with forkd's own
+`scripts/fleet.sh down`, or remove the rules by hand:
+
+    sudo iptables -D OUTPUT -j FORKD-COLD
+    sudo iptables -F FORKD-COLD && sudo iptables -X FORKD-COLD
+
+### A create a node holds back is no longer given up on
+
+A node short of memory holds a create back and retries it, and reported each
+hold-back as a failure. Five of them and the master quarantined the sandbox:
+it stopped asking, and nothing started it until someone called `/retry`. At
+20 creates a second, 1,246 of 20,000 ended that way, on nodes that had room
+for them minutes later. A hold-back is now reported as one (`held_back`), kept
+as the reason the sandbox is not up yet, never counted towards quarantine,
+and looked at again within 5 s rather than backing off towards a minute.
+
+And a sandbox's error now clears as soon as a report shows it up with nothing
+failing. It used to stay until `/retry`, so sandboxes that were running fine
+still read as failed.
+
+### A sandbox that dies is cleared away, and its slot is not shared
+
+A sandbox whose processes died -- killed by the OOM killer, say -- left a
+bundle with nothing running in it. The node does not report one of those,
+so the master never asked for it to be destroyed: its network namespace and
+veth stayed, while the master handed its slot to a new sandbox. Both host
+ends then held the same address, the route went to the dead one, and the
+new sandbox, running, could not be reached. The node now clears away a
+sandbox that has had nothing running for a minute, network included -- one
+the master still wants is then created again, so a crash restarts it -- and
+setting up a slot removes any other veth still holding its address.
+
+### A wake makes room instead of refusing
+
+A request that reached a sandbox on disk while its node was under its
+memory floor was answered 503. With 40 sandboxes per node where about 12 fit
+awake, that was 13% of requests at 5 req/s and a third at 40, while frozen
+sandboxes nobody had called for minutes held the memory.
+
+A wake -- from the gateway or from the master -- now puts the longest-idle
+sandboxes on the node to disk first, frozen ones before hot ones, until the
+node is back over its floor. A sandbox that answered a request in the last
+2 s is never chosen, nor is one whose tier is already changing. At most four
+go per wake; past that, or with nothing left to choose, the wake is refused
+as before. Memory pressure (PSI) is not made room for: it is a 10-second
+average that a checkpoint does not move. A wake from the gateway waits for it
+instead, up to 8 s, holding its restore permit so the wakes behind it queue
+rather than add to it; with four requests at once to a full node's
+snapshots, 8 of 600 had been refused for a few seconds of pressure their own
+restores caused. `--wake-max-psi` sets the ceiling a wake is held to,
+separately from creates.
+
+The restore permit belongs to the wake, not to the request that started it.
+It used to go with the request: a client that gave up while its wake waited
+out pressure handed the permit on, the wake carried on regardless, and the
+next one did the same. With 80 sandboxes per node at 8 req/s and a client
+timeout of 60 s, 24 restores started in the same second on a 2-vCPU node
+once the pressure eased; together they ran it out of memory and swap, and it
+stopped answering for an hour and a half until the kernel's OOM killer
+caught up. A wake now holds its permit until it ends, and one whose caller
+gives up while still queued never starts. Reproduced on bm with 12
+sandboxes: 12 restores at once before, 2 after.
+
+A sandbox a wake brings up counts as used from then, and so does one that
+has just answered. It counted from when the request arrived, which at 80
+per node and 8 req/s was 24 s (p50) before its wake: it came up looking
+like the longest-idle hot sandbox, the next wake put it to disk 0.24 s
+later, and the request that woke it got a 502 -- 98% of the 502s, 7% of
+all requests. The same stale time let the master's idle demotion through
+its grace period. A restore the master asks for counts as a start, and a
+wake making room checks again, once it holds a sandbox's lock, that the
+sandbox has not just been used. Every 502 the gateway answers is logged
+with the reason.
+
+The node lists what it put away in its reports (`evicted`), and the master
+moves desired state there rather than asking for the sandbox back -- which
+would make the node evict something else to make room for it. The panel's
+counters show the total as `evicted`.
+
 ### A web panel, and a join command that works
 
 `GET /` serves an admin panel: nodes with their pool, fingerprint and

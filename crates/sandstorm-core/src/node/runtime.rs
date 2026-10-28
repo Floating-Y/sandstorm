@@ -86,6 +86,11 @@ pub struct RuntimeConfig {
     /// Turn zswap writeback off for reclaimed sandboxes. Right when swap is
     /// zswap over a disk, wrong over zram; `host::pin_in_zswap` decides.
     pub pin_in_zswap: bool,
+    /// Reclaim, frozen or hot, stops while swap is under the floor a node
+    /// with this memory floor keeps (`HostReading::swap_floor_mib`): every
+    /// page it squeezes out takes a swap slot. The admission floor; 0
+    /// squeezes whatever is left.
+    pub reclaim_floor_mib: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -102,6 +107,7 @@ impl Default for RuntimeConfig {
             reclaim_hot: false,
             prefetch_snapshots: false,
             pin_in_zswap: true,
+            reclaim_floor_mib: 0,
         }
     }
 }
@@ -113,25 +119,25 @@ impl Default for RuntimeConfig {
 /// wave of idle demotions should not turn into a wave of threads. In 64 MiB
 /// steps, so a sandbox thawed partway through -- woken by a request -- stops
 /// being squeezed at once.
-fn reclaim_later(id: &str, cg: PathBuf, pin: bool) {
+fn reclaim_later(id: &str, cg: PathBuf, pin: bool, floor_mib: u64) {
     use std::sync::mpsc::{channel, Sender};
     use std::sync::{Mutex, OnceLock};
-    type Job = (String, PathBuf, bool);
+    type Job = (String, PathBuf, bool, u64);
     static QUEUE: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
     let q = QUEUE.get_or_init(|| {
         let (tx, rx) = channel::<Job>();
         std::thread::Builder::new()
             .name("sandstorm-reclaim".into())
             .spawn(move || {
-                for (id, cg, pin) in rx {
-                    reclaim_frozen(&id, &cg, pin);
+                for (id, cg, pin, floor_mib) in rx {
+                    reclaim_frozen(&id, &cg, pin, floor_mib);
                 }
             })
             .expect("spawning the reclaim worker");
         Mutex::new(tx)
     });
     if let Ok(tx) = q.lock() {
-        let _ = tx.send((id.to_string(), cg, pin));
+        let _ = tx.send((id.to_string(), cg, pin, floor_mib));
     }
 }
 
@@ -147,7 +153,7 @@ pub(super) fn route_reclaim(cg: &Path, pin_in_zswap: bool) {
     }
 }
 
-fn reclaim_frozen(id: &str, cg: &Path, pin: bool) {
+fn reclaim_frozen(id: &str, cg: &Path, pin: bool, floor_mib: u64) {
     let frozen = || {
         std::fs::read_to_string(cg.join("cgroup.freeze"))
             .map(|s| s.trim() == "1")
@@ -174,6 +180,10 @@ fn reclaim_frozen(id: &str, cg: &Path, pin: bool) {
     let mut ask = 64u64;
     for _ in 0..(before / 4 + 16) {
         if !frozen() {
+            break;
+        }
+        if host_reading().swap_short(floor_mib) {
+            tracing::debug!(%id, "swap under its floor; frozen reclaim stops");
             break;
         }
         if std::fs::write(cg.join("memory.reclaim"), format!("{ask}M")).is_err() {
@@ -401,6 +411,39 @@ impl Runtime {
         Ok(found)
     }
 
+    /// Sandboxes that have died: a bundle, nothing in the cgroup, no
+    /// snapshot, for longer than `min_age`.
+    ///
+    /// `observe` leaves these out -- reporting one as present would stop the
+    /// master retrying a failed start -- so the master never asks for them to
+    /// be destroyed either, and their network outlives them. On f9 one killed
+    /// by the OOM killer kept its veth while the master handed its slot to a
+    /// new sandbox, whose address then routed to the dead one.
+    pub fn dead(&self, min_age: Duration) -> Vec<String> {
+        let Ok(rd) = std::fs::read_dir(self.cfg.work_dir.join("bundles")) else {
+            return Vec::new();
+        };
+        rd.flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
+            .filter(|(id, _)| !id.starts_with(WARM_SEED_PREFIX))
+            .filter(|(id, _)| !self.cfg.work_dir.join("snapshots").join(id).is_dir())
+            .filter(|(id, _)| {
+                std::fs::read_to_string(self.cgroup_path(id).join("cgroup.procs"))
+                    .map(|s| s.trim().is_empty())
+                    .unwrap_or(true)
+            })
+            .filter(|(_, path)| {
+                std::fs::metadata(path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age >= min_age)
+            })
+            .map(|(id, _)| id)
+            .collect()
+    }
+
     fn cgroup_path(&self, id: &str) -> PathBuf {
         PathBuf::from("/sys/fs/cgroup/sandstorm").join(id)
     }
@@ -434,6 +477,10 @@ impl Runtime {
 
     pub(super) fn pins_in_zswap(&self) -> bool {
         self.cfg.pin_in_zswap
+    }
+
+    pub(super) fn reclaim_floor_mib(&self) -> u64 {
+        self.cfg.reclaim_floor_mib
     }
 
     /// The sandbox's cgroup, for the node's other workers.
@@ -934,7 +981,12 @@ impl Runtime {
             // passes through Frozen, and squeezing a sandbox that is about
             // to be checkpointed only makes the checkpoint page it back in.
             if want == Tier::Frozen && rt.cfg.reclaim_frozen {
-                reclaim_later(id, rt.cgroup_path(id), rt.cfg.pin_in_zswap);
+                reclaim_later(
+                    id,
+                    rt.cgroup_path(id),
+                    rt.cfg.pin_in_zswap,
+                    rt.cfg.reclaim_floor_mib,
+                );
             }
         };
         for _ in 0..Tier::ORDER.len() {
@@ -1446,6 +1498,71 @@ pub fn host_pressure() -> (u64, f64) {
         .unwrap_or(0.0);
 
     (free_mib, psi)
+}
+
+/// What admission reads off the host: `host_pressure`, and the swap left.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HostReading {
+    /// MemAvailable. 0 when /proc/meminfo could not be read.
+    pub free_mib: u64,
+    pub swap_free_mib: u64,
+    /// 0 with no swap at all, or none that could be read.
+    pub swap_total_mib: u64,
+    pub psi: f64,
+}
+
+impl From<(u64, f64)> for HostReading {
+    /// A reading with no swap, which is what every test before swap was
+    /// read stated.
+    fn from((free_mib, psi): (u64, f64)) -> Self {
+        Self {
+            free_mib,
+            swap_free_mib: 0,
+            swap_total_mib: 0,
+            psi,
+        }
+    }
+}
+
+impl HostReading {
+    /// The swap a node keeps back: its memory floor, or a quarter of its
+    /// swap where that is less, so a small swap file does not leave a node
+    /// permanently short. `None` with no swap.
+    pub fn swap_floor_mib(&self, min_free_mib: u64) -> Option<u64> {
+        (self.swap_total_mib > 0).then(|| min_free_mib.min(self.swap_total_mib / 4))
+    }
+
+    pub fn swap_short(&self, min_free_mib: u64) -> bool {
+        self.swap_floor_mib(min_free_mib)
+            .is_some_and(|floor| self.swap_free_mib < floor)
+    }
+}
+
+/// Swap is a floor of its own, beside free memory.
+///
+/// Where swap is zswap, a page squeezed out of a sandbox costs little RAM
+/// but a whole swap slot -- with writeback off it never leaves RAM, but it
+/// still holds its slot. Pages that compress well use the slots up while
+/// MemAvailable looks healthy: on 2026-10-28 f8's heaps were `numpy.ones`,
+/// its 2 GiB of swap ran out with 678 MiB "available", nothing anonymous
+/// could be reclaimed any more, and the kernel thrashed on page cache until
+/// the node stopped answering ssh for an hour and a half.
+pub fn host_reading() -> HostReading {
+    let (free_mib, psi) = host_pressure();
+    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let field = |name: &str| {
+        meminfo
+            .lines()
+            .find(|l| l.starts_with(name))
+            .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
+            .map_or(0, |kb| kb / 1024)
+    };
+    HostReading {
+        free_mib,
+        swap_free_mib: field("SwapFree:"),
+        swap_total_mib: field("SwapTotal:"),
+        psi,
+    }
 }
 
 #[cfg(test)]

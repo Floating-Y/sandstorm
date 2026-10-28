@@ -149,6 +149,10 @@ struct ServeArgs {
     /// the machine off the network.
     #[arg(long, default_value_t = 8.0)]
     admit_max_psi: f64,
+    /// The same ceiling for waking a sandbox that already exists, when it
+    /// should differ. Defaults to --admit-max-psi.
+    #[arg(long)]
+    wake_max_psi: Option<f64>,
 
     /// Squeeze a frozen sandbox's memory into compressed swap: auto, on or
     /// off. Auto turns it on where swap is zswap or zram, which on bm took
@@ -436,12 +440,14 @@ async fn serve(a: ServeArgs) -> Result<()> {
                 reclaim_hot,
                 prefetch_snapshots: a.prefetch_snapshots != node::Lever::Off,
                 pin_in_zswap: node::pin_in_zswap(),
+                reclaim_floor_mib: a.admit_min_free_mib,
             },
             hold: Duration::from_secs(a.hold_secs),
             // The same two numbers the master places with, applied here
             // against a reading taken now rather than one up to a hold old.
             admit_min_free_mib: a.admit_min_free_mib,
             admit_max_psi: a.admit_max_psi,
+            wake_max_psi: a.wake_max_psi.unwrap_or(a.admit_max_psi),
             features,
             fetches: Default::default(),
         };
