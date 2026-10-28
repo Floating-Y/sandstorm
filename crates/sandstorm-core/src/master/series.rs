@@ -221,6 +221,7 @@ struct Previous {
     refused: u64,
     deletes: u64,
     woken: u64,
+    woken_from: [u64; 4],
     demotions: [u64; 4],
     api: HistSnap,
     api_errors: u64,
@@ -346,6 +347,7 @@ fn take(st: &MasterState, prev: &mut Previous) -> Result<(Rows, Events)> {
     let refused = m.creates_refused.load(Relaxed);
     let deletes = m.deletes.load(Relaxed);
     let woken = m.woken.load(Relaxed);
+    let woken_from = m.woken_from_total();
     let demotions = m.demotions_total();
     let (api, api_errors) = m.api_snap();
     let create = m.route_snap("POST", "/v1/sandboxes").unwrap_or_default();
@@ -362,6 +364,16 @@ fn take(st: &MasterState, prev: &mut Previous) -> Result<(Rows, Events)> {
         ));
         rows.push(("rate.deletes", String::new(), rate(deletes, prev.deletes)));
         rows.push(("rate.wakes", String::new(), rate(woken, prev.woken)));
+        // and by the tier each was woken from, keyed like the demotions
+        for (i, t) in Tier::ORDER.iter().enumerate() {
+            if *t != Tier::Hot {
+                rows.push((
+                    "rate.wakes",
+                    t.as_str().into(),
+                    rate(woken_from[i], prev.woken_from[i]),
+                ));
+            }
+        }
         for (i, t) in Tier::ORDER.iter().enumerate() {
             if *t != Tier::Hot {
                 rows.push((
@@ -441,6 +453,7 @@ fn take(st: &MasterState, prev: &mut Previous) -> Result<(Rows, Events)> {
         refused,
         deletes,
         woken,
+        woken_from,
         demotions,
         api,
         api_errors,

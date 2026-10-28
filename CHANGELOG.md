@@ -52,8 +52,11 @@ the cards share the height under the header, and the charts draw to the box
 they get. Smaller, it scrolls as before. Its tier flow is a map: the four
 tiers in a square, each with its count, share of the fleet, how long idle
 puts a sandbox there and its count over the range; idle carries sandboxes
-clockwise round it -- freeze, to disk, detach -- and wakes come back across
-the middle to awake, every line written with its measured rate. It takes the
+clockwise round it -- freeze, to disk, detach -- and a request wakes one
+straight back to awake from wherever it is, a line from each tier, every
+line written with its measured rate. For this the master now counts wakes by
+the tier they come from: `rate.wakes` has a series for each of frozen,
+snapshot and detached beside the total. It takes the
 left half of the overview; beside it are sandboxes by tier, lifecycle rates,
 latency, and a new **Node headroom**: free memory on each node now, tightest
 first, against the floor. It replaces an animation of random particles,

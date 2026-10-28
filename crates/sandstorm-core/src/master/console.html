@@ -150,7 +150,7 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
   gap: 64px 132px; padding-top: 46px; margin-top: 4px; }
 .topo svg.edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
 .tnode { position: relative; z-index: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; cursor: default;
-  border: 1px solid var(--line); border-radius: var(--r-ctl); padding: 12px 14px 0; }
+  border: 1px solid var(--line); border-radius: var(--r-ctl); padding: 12px 14px; background: var(--page); }
 .tnode .th { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; white-space: nowrap; }
 .tnode .th i { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .tnode .th .ti { margin-left: auto; color: var(--muted); font-weight: 400; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
@@ -159,7 +159,7 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .tnode .track { flex: 1; height: 4px; border-radius: 2px; background: var(--grid); overflow: hidden; }
 .tnode .track i { display: block; height: 100%; width: 0; border-radius: 2px; transition: width .8s cubic-bezier(.2,.8,.2,1); }
 .tnode .tp { font-size: 12px; color: var(--muted); min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
-.tnode svg.tsp { flex: 1 1 0; min-height: 22px; width: calc(100% + 28px); margin: 8px -14px 0; display: block; }
+.tnode svg.tsp { flex: 1 1 0; min-height: 22px; width: 100%; margin-top: 10px; display: block; }
 .elab { position: absolute; z-index: 2; transform: translate(-50%, -50%); font-size: 12px; color: var(--muted); white-space: nowrap; cursor: default;
   background: var(--page); border: 1px solid var(--line); border-radius: var(--r-tag); padding: 1px 7px; }
 .elab b, .flowfoot b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -862,10 +862,9 @@ function hideTip() { $("tip").classList.remove("on"); }
 
 // ---- the tier flow ------------------------------------------------------------
 // A map of the tiers: idle carries a sandbox clockwise round the square --
-// awake, frozen, on disk, detached -- and a request wakes it back across the
-// middle to awake. Every rate is measured over the last half-minute. The
-// master counts wakes, not where they came from, so the three wake lines
-// meet in the middle and carry one rate on to awake. Deletes leave from any
+// awake, frozen, on disk, detached -- and a request wakes it straight back
+// to awake from wherever it is, a line from each tier with its own rate.
+// Every rate is measured over the last half-minute. Deletes leave from any
 // tier, so they are a footnote rather than a line.
 const flow = { counts: { hot: 0, frozen: 0, snapshot: 0, detached: 0 }, rates: {} };
 // [rate key, the tier it goes to, verb, what it means]
@@ -873,7 +872,9 @@ const FLOW_MOVES = [["create", "hot", "new", "Sandboxes start awake when they ar
   ["frozen", "frozen", "freeze", "Awake sandboxes left idle are frozen: paused in memory."],
   ["snapshot", "snapshot", "to disk", "Frozen sandboxes left idle longer are checkpointed to disk and leave memory."],
   ["detached", "detached", "detach", "Sandboxes on disk left idle longest are detached from their node."],
-  ["wake", "hot", "wake", "A request to a frozen, on-disk or detached sandbox wakes it."]];
+  ["wake_frozen", "hot", "wake", "A request to a frozen sandbox resumes it in memory."],
+  ["wake_snapshot", "hot", "wake", "A request to a sandbox on disk restores it on its node."],
+  ["wake_detached", "hot", "wake", "A request to a detached sandbox places it on a node with room and restores it."]];
 function dur(s) { return s < 120 ? s + " s" : s < 7200 ? Math.round(s / 60) + " min" : Math.round(s / 3600) + " h"; }
 const perSec = (v) => v >= 1 ? fmt(v, 1) + "/s" : v > 0 ? fmt(v * 60, v * 60 < 10 ? 1 : 0) + "/min" : "none";
 function flowBuild() {
@@ -891,12 +892,16 @@ function flowBuild() {
       const id = t.dataset.t, idle = NOW ? NOW.idle : null, i = TIERS.indexOf(id);
       const rows = [["sandboxes", tierColor(id), fmt(c[id] || 0)], ["of the fleet", tierColor(id), total ? fmt(100 * (c[id] || 0) / total, 1) + "%" : "–"]];
       if (id === "hot") rows.push(["created", tierColor("hot"), perSec(r.create || 0)], ["woken by a request", tierColor("hot"), perSec(r.wake || 0)]);
-      else if (idle) rows.push(["after idle", css("--muted"), dur(idle[i - 1])]);
+      else {
+        if (idle) rows.push(["after idle", css("--muted"), dur(idle[i - 1])]);
+        rows.push(["woken from here", tierColor("hot"), perSec(r["wake_" + id] || 0)]);
+      }
       return showTip(e, TIER_LABEL[id], rows);
     }
     if (m) {
       const [k, to, verb, what] = FLOW_MOVES.find((x) => x[0] === m.dataset.k);
-      return showTip(e, `${verb} · ${what}`, [["now", tierColor(to), perSec(r[k] || 0)]]);
+      const from = k.startsWith("wake_") ? ` from ${TIER_LABEL[k.slice(5)].toLowerCase()}` : "";
+      return showTip(e, `${verb}${from} · ${what}`, [["now", tierColor(to), perSec(r[k] || 0)]]);
     }
     hideTip();
   });
@@ -914,24 +919,28 @@ function flowEdges() {
     const b = box.querySelector(`.tnode[data-t="${t}"]`).getBoundingClientRect();
     return { l: b.left - o.left, r: b.right - o.left, t: b.top - o.top, b: b.bottom - o.top, cx: (b.left + b.right) / 2 - o.left, cy: (b.top + b.bottom) / 2 - o.top };
   };
-  const A = R("hot"), B = R("frozen"), C = R("detached"), D = R("snapshot"), r = flow.rates, g = 5;
-  const H = [(A.r + B.l) / 2, (A.b + C.t) / 2];
-  const line = (p, q, k, head = true) => {
+  const A = R("hot"), B = R("frozen"), C = R("detached"), D = R("snapshot"), r = flow.rates, g = 5, off = 13;
+  const mx = (A.r + B.l) / 2, my = (A.b + C.t) / 2;
+  const line = (p, q, k) => {
     const on = r[k] > 0, color = on ? tierColor(FLOW_MOVES.find((x) => x[0] === k)[1]) : css("--axis");
     const L = Math.hypot(q[0] - p[0], q[1] - p[1]) || 1, ux = (q[0] - p[0]) / L, uy = (q[1] - p[1]) / L;
-    let d = `M${p[0]},${p[1]}L${q[0]},${q[1]}`;
-    if (head) d += `M${q[0] - 7 * ux - 4 * uy},${q[1] - 7 * uy + 4 * ux}L${q[0]},${q[1]}L${q[0] - 7 * ux + 4 * uy},${q[1] - 7 * uy - 4 * ux}`;
+    const d = `M${p[0]},${p[1]}L${q[0]},${q[1]}` +
+      `M${q[0] - 7 * ux - 4 * uy},${q[1] - 7 * uy + 4 * ux}L${q[0]},${q[1]}L${q[0] - 7 * ux + 4 * uy},${q[1] - 7 * uy - 4 * ux}`;
     const a = { d, fill: "none", stroke: color, "stroke-width": 1.5, "stroke-linecap": "round", "stroke-linejoin": "round" };
     if (!on) a["stroke-dasharray"] = "3 4";
     el("path", a, svg);
   };
   const at = (k, x, y) => { const l = $("f-l-" + k); l.style.left = x + "px"; l.style.top = y + "px"; };
+  // in, at the top
   line([A.cx, 12], [A.cx, A.t - g], "create"); at("create", A.cx, 12);
-  line([A.r + g, A.cy], [B.l - g, B.cy], "frozen"); at("frozen", H[0], A.cy);
-  line([B.cx, B.b + g], [D.cx, D.t - g], "snapshot"); at("snapshot", B.cx, H[1]);
-  line([D.l - g, D.cy], [C.r + g, C.cy], "detached"); at("detached", H[0], D.cy);
-  for (const p of [[B.l - 3, B.b + 3], [D.l - 3, D.t - 3], [C.r + 3, C.t - 3]]) line(p, H, "wake", false);
-  line(H, [A.r + 3, A.b + 3], "wake"); at("wake", H[0], H[1]);
+  // idle, clockwise round the outside
+  line([A.r + g, A.cy - off], [B.l - g, B.cy - off], "frozen"); at("frozen", mx, A.cy - off);
+  line([B.cx, B.b + g], [D.cx, D.t - g], "snapshot"); at("snapshot", B.cx, my);
+  line([D.l - g, D.cy], [C.r + g, C.cy], "detached"); at("detached", mx, D.cy);
+  // woken, straight back to awake from each tier
+  line([B.l - g, B.cy + off], [A.r + g, A.cy + off], "wake_frozen"); at("wake_frozen", mx, A.cy + off);
+  line([D.l - 2, D.t - 2], [A.r + 2, A.b + 2], "wake_snapshot"); at("wake_snapshot", mx, my);
+  line([C.cx, C.t - g], [A.cx, A.b + g], "wake_detached"); at("wake_detached", A.cx, my);
 }
 function drawFlow() {
   const c = flow.counts, r = flow.rates, idle = NOW ? NOW.idle : null;
@@ -943,7 +952,9 @@ function drawFlow() {
     $("f-hint-" + t).textContent = hint[t];
     $("f-pct-" + t).textContent = total ? `${fmt(100 * share, share > 0 && share < 0.01 ? 1 : 0)}%` : "";
     $("f-bar-" + t).style.width = (share > 0 ? Math.max(1.5, 100 * share) : 0) + "%";
-    spark($("f-sp-" + t), line("fleet.sandboxes", t), tierColor(t), true);
+    // smoothed to the box's width: a long range's 5 s jitter is noise here
+    const pts = line("fleet.sandboxes", t);
+    spark($("f-sp-" + t), smooth(pts, Math.max(1, Math.round(pts.length / 40))), tierColor(t), true);
   }
   for (const [k] of FLOW_MOVES) {
     $("f-r-" + k).textContent = perSec(r[k] || 0);
@@ -952,7 +963,7 @@ function drawFlow() {
   flowEdges();
   $("flowFoot").innerHTML = `deleted <b>${perSec(r.delete || 0)}</b> · from any tier`;
   $("flow").setAttribute("aria-label", TIERS.map((t) => `${TIER_LABEL[t]} ${fmt(c[t] || 0)}`).join(", ") +
-    `; new ${perSec(r.create || 0)}, freezing ${perSec(r.frozen || 0)}, to disk ${perSec(r.snapshot || 0)}, detaching ${perSec(r.detached || 0)}, woken ${perSec(r.wake || 0)}`);
+    `; new ${perSec(r.create || 0)}, freezing ${perSec(r.frozen || 0)}, to disk ${perSec(r.snapshot || 0)}, detaching ${perSec(r.detached || 0)}; woken from frozen ${perSec(r.wake_frozen || 0)}, from disk ${perSec(r.wake_snapshot || 0)}, from detached ${perSec(r.wake_detached || 0)}`);
 }
 
 // ---- node headroom ------------------------------------------------------------
@@ -1295,6 +1306,9 @@ async function refresh(first = false) {
       snapshot: recent(line("rate.demotions", "snapshot")),
       detached: recent(line("rate.demotions", "detached")),
       wake: recent(line("rate.wakes")),
+      wake_frozen: recent(line("rate.wakes", "frozen")),
+      wake_snapshot: recent(line("rate.wakes", "snapshot")),
+      wake_detached: recent(line("rate.wakes", "detached")),
       delete: recent(line("rate.deletes")),
     };
     redrawAll(first || firstDraw); firstDraw = false;

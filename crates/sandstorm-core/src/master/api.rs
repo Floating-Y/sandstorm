@@ -2038,7 +2038,7 @@ pub(super) fn apply_traffic(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
         if serving && sb.tier != Tier::Hot {
             tracing::info!(sandbox = %id, node = %req.node_id, was = %sb.tier, "woken by traffic at its gateway");
             store.set_tier(id, Tier::Hot).map_err(ise)?;
-            st.metrics.woken.fetch_add(1, Relaxed);
+            st.metrics.woke(sb.tier);
         }
     }
     Ok(())
