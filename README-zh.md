@@ -72,15 +72,28 @@
 
 同一个 Python HTTP 服务，同样六个节点，每种运行时都全部放在内存里，一直加到只剩 512 MiB，每个节点测两遍（[`baselines.py`](bench/fleet/baselines.py)）。同样是 gVisor 隔离，Sandstorm 全部常驻时比 Docker + gVisor 多放一半，因为它没有守护进程，也不需要每个容器一个 shim；闲置的分档落盘之后，比任何全部常驻的方式都多出两个数量级。
 
-| 每节点，2 vCPU，1.9 GB | HTTP 服务常驻数 | 64 MiB 堆 | 启动到首次响应 |
-|---|---:|---:|---:|
-| 普通进程 | 96 | 11 | 52 ms |
-| bubblewrap | 94 | 11 | 52 ms |
-| Podman (crun) | 88 | 12 | 238 ms |
-| Docker (runc) | 60 | 10 | 264 ms |
-| Docker + gVisor | 32 | 9 | 349 ms |
-| **Sandstorm，全部常驻** | **48** | **13** | 1.4 s（64 MiB 应用） |
-| **Sandstorm，闲置的分档** | **3,333** | | |
+| 每节点，2 vCPU，1.9 GB | HTTP 服务常驻数 | 64 MiB 堆 |
+|---|---:|---:|
+| 普通进程 | 96 | 11 |
+| bubblewrap | 94 | 11 |
+| Podman (crun) | 88 | 12 |
+| Docker (runc) | 60 | 10 |
+| Docker + gVisor | 32 | 9 |
+| **Sandstorm，全部常驻** | **48** | **13** |
+| **Sandstorm，闲置的分档** | **3,333** | |
+
+启动速度在同一台机器上测（bm：AMD EPYC 9K65，2 vCPU，3.6 GB），方法和基线一样：一次启动一个，每 50 ms 请求一次，直到它响应（[`starttime.py`](bench/fleet/starttime.py)）。Sandstorm 的时间包括 master 调度和节点建网络。
+
+| 启动到首次响应，p50 | web | 64 MiB 应用 |
+|---|---:|---:|
+| 普通进程 | 52 ms | 103 ms |
+| bubblewrap | 52 ms | 103 ms |
+| Docker (runc) | 192 ms | 244 ms |
+| Docker + gVisor | 217 ms | 333 ms |
+| **Sandstorm** | **167 ms** | **289 ms** |
+| **Sandstorm，预热模板** | **159 ms** | **168 ms** |
+
+Sandstorm 启动 64 MiB 应用的 289 ms 里，master 和建网络 37 ms，准备 bundle 5 ms，runsc 55 ms，剩下 189 ms 是 Python 导入 numpy、填充堆。预热模板直接恢复一个已经启动好的应用镜像，省掉了最后这段；它需要手动开启，因为每个沙箱都从同一份内存开始，模板要说明怎么重新播种随机数。50 ms 的轮询间隔是下限。
 
 Podman 下的 CRIU checkpoint/restore 是标准工具里最接近落盘档位的做法：64 MiB 应用落盘 0.3 s，恢复到首次响应 0.24 s；Sandstorm 恢复同一个应用要 0.2 s。E2B、CubeSandbox、microsandbox 都基于 Firecracker，需要 KVM，这几台云主机没有，所以没法在这里跑；同类项目的对比见 [docs/COMPARISON.md](docs/COMPARISON.md)。
 
@@ -94,7 +107,7 @@ Podman 下的 CRIU checkpoint/restore 是标准工具里最接近落盘档位的
 | 每个节点随机抽 100 个去请求 | 1,200 个里 1,198 个响应；p50 1.3 s，p99 2.8–5.5 s |
 | 唤醒：冻结的 / 从磁盘，64 MiB 应用 | 11 ms / 200 ms（Sandstorm 自身耗时） |
 | 一个节点同时唤醒 20 / 40 个 | 全部醒来；最慢 6 s / 13 s |
-| 64 MiB 应用从创建到首次响应 | p50 1.4 s |
+| 64 MiB 应用从创建到首次响应 | 一个节点同时启动 5 个、每 0.25 s 查一次时 p50 1.4 s；一次一个时 0.29 s（见上文） |
 
 几点说明：为了让一轮测试在几分钟内跑完，闲置计时被调短了。测试用的堆是 `numpy.ones`，在 zswap 里压缩率异常高。20,000 是这次测试停下来的地方，不是上限。方法、原始数据、每一遍运行，以及测试中发现的 bug，都在 [bench/fleet/results/2026-10-28](bench/fleet/results/2026-10-28/README.md)；上一轮见 [2026-10-26](bench/fleet/results/2026-10-26/README.md)。
 

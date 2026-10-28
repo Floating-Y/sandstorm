@@ -72,15 +72,28 @@ The four smaller panels in the figure at the top, in order:
 
 The same Python HTTP server on the same six nodes, each runtime kept in memory until 512 MiB is left, twice on every node ([`baselines.py`](bench/fleet/baselines.py)). Sandstorm with every sandbox awake holds half again as many as Docker with gVisor, the same isolation, because it runs no daemon and no shim per container; with idle ones tiered it holds two orders of magnitude more than anything that keeps them in memory.
 
-| Per node, 2 vCPU, 1.9 GB | HTTP server kept in memory | 64 MiB heap | Start to first answer |
-|---|---:|---:|---:|
-| plain process | 96 | 11 | 52 ms |
-| bubblewrap | 94 | 11 | 52 ms |
-| Podman (crun) | 88 | 12 | 238 ms |
-| Docker (runc) | 60 | 10 | 264 ms |
-| Docker + gVisor | 32 | 9 | 349 ms |
-| **Sandstorm, all awake** | **48** | **13** | 1.4 s (64 MiB app) |
-| **Sandstorm, idle ones tiered** | **3,333** | | |
+| Per node, 2 vCPU, 1.9 GB | HTTP server kept in memory | 64 MiB heap |
+|---|---:|---:|
+| plain process | 96 | 11 |
+| bubblewrap | 94 | 11 |
+| Podman (crun) | 88 | 12 |
+| Docker (runc) | 60 | 10 |
+| Docker + gVisor | 32 | 9 |
+| **Sandstorm, all awake** | **48** | **13** |
+| **Sandstorm, idle ones tiered** | **3,333** | |
+
+Starting, timed on one machine (bm: AMD EPYC 9K65, 2 vCPU, 3.6 GB) the way the baselines are: one at a time, polled every 50 ms until it answers ([`starttime.py`](bench/fleet/starttime.py)). Sandstorm's time includes the master placing the sandbox and the node setting up its network.
+
+| Start to first answer, p50 | web | 64 MiB app |
+|---|---:|---:|
+| plain process | 52 ms | 103 ms |
+| bubblewrap | 52 ms | 103 ms |
+| Docker (runc) | 192 ms | 244 ms |
+| Docker + gVisor | 217 ms | 333 ms |
+| **Sandstorm** | **167 ms** | **289 ms** |
+| **Sandstorm, warm template** | **159 ms** | **168 ms** |
+
+Of Sandstorm's 289 ms for the 64 MiB app, 37 ms is the master and the network, 5 ms the bundle, 55 ms runsc and 189 ms Python importing numpy and filling its heap. A warm template restores an image of the app already started, so it skips that last part; it is opt-in, because every sandbox starts from the same memory and the template has to say how to reseed. The 50 ms poll is the floor.
 
 Checkpoint and restore with CRIU under Podman, the nearest standard counterpart to the snapshot tier, takes 0.3 s to checkpoint a 64 MiB app and 0.24 s from restore to first answer; Sandstorm restores the same app in 0.2 s. E2B, CubeSandbox and microsandbox are built on Firecracker and need KVM, which these VMs do not have, so they could not be run here; [docs/COMPARISON.md](docs/COMPARISON.md) covers the field.
 
@@ -94,7 +107,7 @@ Six nodes (AMD EPYC, 2 vCPU, 1.9 GB each) and one master (2 vCPU), runsc `releas
 | 100 of them per node, picked at random, called | 1,198 of 1,200 answered; p50 1.3 s, p99 2.8–5.5 s |
 | Wake: frozen / from disk, 64 MiB app | 11 ms / 200 ms (Sandstorm's own time) |
 | Wake 20 / 40 at once on one node | all of them; slowest 6 s / 13 s |
-| Create to first answer, 64 MiB app | p50 1.4 s |
+| Create to first answer, 64 MiB app | p50 1.4 s with five starting at once on a node, polled every 0.25 s; 0.29 s one at a time (above) |
 
 Some caveats. The idle timers were shortened so a run fits in minutes. The test heap is `numpy.ones`, which compresses unusually well in zswap. 20,000 is where the fill stopped, not a ceiling. Method, raw data, every run, and the bugs the runs turned up are in [bench/fleet/results/2026-10-28](bench/fleet/results/2026-10-28/README.md); the earlier round is [2026-10-26](bench/fleet/results/2026-10-26/README.md).
 

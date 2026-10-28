@@ -74,7 +74,7 @@ The two that failed in fill 5 waited out the pressure for 8 s, but it stayed at 
 | Every sandbox kept in memory, per node (v7, two runs) | web 47.7, app16 23.4, app64 12.6, app256 5.7 |
 | Wake by idle time, 64 MiB app (v6) | hot 3.8 ms; frozen 103 ms, of which 11 ms is the thaw; from disk 230 ms |
 | Restore p50 by heap (v6) | 16 MiB 178 ms, 64 MiB 198 ms, 256 MiB 974 ms, 512 MiB 1.1 s, 1 GiB 3.6 s |
-| Create to first answer, p50 (v6) | app16 1.7 s, app64 1.4 s, app256 1.7 s |
+| Create to first answer, p50 (v6) | app16 1.7 s, app64 1.4 s, app256 1.7 s: five at once per node, status and app each polled every 0.25 s. One at a time, see below |
 | Herds: N woken at once per node (v6) | 20: 240 of 240, slowest 6.1 s; 40: 478 of 478, slowest 12.7 s. Round 3 woke about 11 of either and refused the rest |
 
 ### The same apps without Sandstorm
@@ -89,6 +89,21 @@ The two that failed in fill 5 waited out the pressure for 8 s, but it stayed at 
 | Docker (runc) | 60 | 23 | 10 | 3 | 264 ms |
 | Docker + gVisor | 32 | 17 | 9 | 3 | 349 ms |
 | Sandstorm, all kept in memory | 48 | 23 | 13 | 6 | |
+
+### Start to first answer, one machine
+
+The create times above are not comparable with the baselines' start times: those start one instance at a time and poll every 50 ms, while `sizes` starts five at once per node and polls every 0.25 s, twice over. [`starttime.py`](../../starttime.py) times Sandstorm the baselines' way, and `baselines.py` ran again beside it, on bm (AMD EPYC 9K65, 2 vCPU, 3.6 GB; a faster CPU than the fleet nodes, so these are not the fleet's numbers). Twenty of each, p50, in `starttime/`:
+
+| | web | app64 |
+|---|---:|---:|
+| plain process | 52 ms | 103 ms |
+| bubblewrap | 52 ms | 103 ms |
+| Docker (runc) | 192 ms | 244 ms |
+| Docker + gVisor | 217 ms | 333 ms |
+| Sandstorm, master and node on bm | 167 ms | 289 ms |
+| Sandstorm, warm template | 159 ms | 168 ms |
+
+Sandstorm's time, from the node's log: master and network 36–37 ms, bundle 5 ms, `runsc create` and `start` 55–61 ms, then the app: 67 ms for web, 189 ms for app64, most of it importing numpy and filling the heap. A warm template restores the seed's image in 67–89 ms instead and answers 34–43 ms later. The warm runs did not reseed (`after_restore` empty), which a real template must.
 
 CRIU under Podman, ten app64 per node: checkpoint 0.29–0.33 s p50, restore to first answer 0.24 s.
 
