@@ -127,31 +127,33 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 #flow .pulse { fill: none; stroke: #fff; stroke-opacity: .32; stroke-linecap: round; stroke-dasharray: 12 48; animation: flowdash 1s linear infinite; }
 @keyframes flowdash { to { stroke-dashoffset: -60; } }
 #flow .rate.none { fill: var(--muted); font-weight: 500; }
-.nodes { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 12px; }
-.node { background: var(--card-2); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; position: relative;
-  transition: opacity .4s, filter .4s, transform .25s; }
-.node:hover { transform: translateY(-2px); }
-.node.down { opacity: .55; filter: grayscale(.7); animation: shake .5s; }
-@keyframes shake { 20%, 60% { transform: translateX(-3px); } 40%, 80% { transform: translateX(3px); } }
-.node .top { display: flex; align-items: center; gap: 8px; }
-.node .name { font-weight: 600; }
-.node .pool { color: var(--muted); font-size: 11.5px; margin-left: auto; }
-.node .mid { display: flex; align-items: center; gap: 12px; margin: 10px 0 8px; }
-.ring { width: 64px; height: 64px; flex: none; }
-.ring .track { stroke: var(--grid); }
-.ring .fill { transition: stroke-dashoffset 1s cubic-bezier(.2,.8,.2,1), stroke .4s; }
-.ring text { font-size: 13px; font-weight: 700; fill: var(--ink); }
-.ring text.s { font-size: 9px; font-weight: 500; fill: var(--muted); }
-.node .facts { font-size: 12px; color: var(--ink-2); display: grid; gap: 2px; }
-.node .facts b { color: var(--ink); font-weight: 600; }
-.stack { display: flex; height: 7px; border-radius: 4px; overflow: hidden; gap: 2px; background: transparent; }
-.stack i { display: block; height: 100%; transition: flex-grow .8s cubic-bezier(.2,.8,.2,1); min-width: 0; }
-.psi { height: 4px; background: var(--grid); border-radius: 3px; position: relative; margin-top: 8px; }
-.psi i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; transition: width .8s, background .4s; }
-.psi u { position: absolute; top: -3px; bottom: -3px; width: 1px; background: var(--ink-2); }
-.feats { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+/* Nodes: one row each, and its free memory over the range as a strip on a
+   scale shared by every row, so a column read down is one moment across
+   the fleet. */
+table.nodes-tbl td { vertical-align: middle; }
+table.nodes-tbl th.hist, table.nodes-tbl td.hist { width: 38%; min-width: 240px; }
+table.nodes-tbl tr.down td { opacity: .6; }
+.ndname { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.ndname .dot { flex: none; }
+.ndname .dot::after { display: none; }
+.feats { display: inline-flex; gap: 4px; flex-wrap: wrap; }
 .feats span { font-size: 10.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; }
-#heat { width: 100%; display: block; }
+.stack { display: flex; height: 6px; border-radius: 3px; overflow: hidden; gap: 2px; width: 140px; margin-top: 5px; }
+.stack i { display: block; height: 100%; min-width: 0; }
+.meter { position: relative; width: 84px; height: 5px; border-radius: 3px; background: var(--grid); margin-top: 6px; }
+.meter i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; }
+.meter u { position: absolute; top: -3px; bottom: -3px; width: 1px; background: var(--ink-2); }
+canvas.strip { display: block; width: 100%; height: 20px; border-radius: 4px; cursor: crosshair; }
+.heatlegend { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin: 0 0 10px; font-size: 12px; color: var(--ink-2); }
+.heatlegend .scale { display: grid; gap: 4px; width: 260px; }
+.heatlegend .ramp { height: 8px; border-radius: 4px; position: relative; }
+.heatlegend .ramp u { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--ink); }
+.heatlegend .ticks { position: relative; height: 14px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.heatlegend .ticks span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+.heatlegend .ticks span:first-child { transform: none; }
+.heatlegend .ticks span:last-child { transform: translateX(-100%); }
+.heatlegend .key { display: inline-flex; align-items: center; gap: 6px; }
+.heatlegend .key i { width: 14px; height: 8px; border-radius: 2px; display: inline-block; }
 /* Sandboxes that will not start: a line above the table and a count on the
    Failing filter, rather than a second list of the same rows. */
 .notice { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 12px; margin: 0 0 10px; font-size: 13px; color: var(--ink);
@@ -354,7 +356,8 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
       <input id="ndQ" type="search" placeholder="Search by node or pool">
       <div class="chips" id="ndState"></div>
     </div>
-    <div class="nodes" id="nodes"></div>
+    <div class="heatlegend" id="ndLegend"></div>
+    <div class="tbl-wrap"><table class="tbl nodes-tbl" id="ndTable"></table></div>
     <div class="pager" id="ndPager"></div>
   </section>
 
@@ -416,10 +419,6 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
     <div class="tbl-wrap"><table class="tbl" id="snapTable"></table></div>
   </section>
 
-  <section data-tab="nodes" class="card span-12" style="animation-delay:.46s">
-    <h2>Free memory by node</h2><div class="sub">The nodes above, a row each, over the selected range. Darker is fuller; grey is a node that was silent.</div>
-    <canvas id="heat"></canvas>
-  </section>
   <section data-tab="overview" class="card span-3" style="animation-delay:.5s">
     <h2>Latency</h2><div class="sub">Milliseconds, log scale. The API, creates, and waiting for the store lock.</div>
     <div class="legend" id="latLegend"></div>
@@ -551,6 +550,9 @@ $("theme").onclick = () => {
   redrawAll();
 };
 try { const t = localStorage.getItem("sandstorm-console-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+// Canvases and charts take their colours when drawn, so a change of the
+// system's theme redraws them rather than waiting for the next refresh.
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => redrawAll());
 for (const b of $("range").querySelectorAll("button")) {
   b.classList.toggle("on", Number(b.dataset.s) === range);
   b.onclick = () => {
@@ -829,99 +831,96 @@ $("ndState").addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b) return;
   nd.state = b.dataset.v; nd.offset = 0;
   for (const x of $("ndState").children) x.setAttribute("aria-pressed", String(x === b));
-  if (NOW) nodeCards(NOW.nodes);
+  if (NOW) nodeTable(NOW.nodes);
 });
 let ndTyping;
-$("ndQ").addEventListener("input", () => { clearTimeout(ndTyping); ndTyping = setTimeout(() => { nd.q = $("ndQ").value.trim().toLowerCase(); nd.offset = 0; if (NOW) nodeCards(NOW.nodes); }, 150); });
-function nodeCards(all) {
-  const box = $("nodes");
-  const up = all.filter((n) => n.connected).length;
-  $("nodesSub").textContent = `${up} of ${all.length} answering. Ring: free memory. Bar: memory pressure against the 8.0 the master refuses at.`;
+$("ndQ").addEventListener("input", () => { clearTimeout(ndTyping); ndTyping = setTimeout(() => { nd.q = $("ndQ").value.trim().toLowerCase(); nd.offset = 0; if (NOW) nodeTable(NOW.nodes); }, 150); });
+// The admission thresholds the master refuses at, from the master. A floor
+// of 0 is none, and a ceiling past any real reading is none either.
+const floorMib = () => (NOW && NOW.floor_mib != null ? NOW.floor_mib : 512);
+const maxPsi = () => (NOW && NOW.max_psi != null ? NOW.max_psi : 8);
+const hasCeil = () => maxPsi() < 100;
+const gib = (m) => m >= 1024 ? fmt(m / 1024, m >= 10240 ? 0 : 1) + "G" : fmt(m) + "M";
+function nodeTable(all) {
+  const up = all.filter((n) => n.connected).length, floor = floorMib(), ceil = maxPsi();
+  const limits = [floor > 0 ? `under ${fmt(floor)} MiB free` : "", hasCeil() ? `over ${fmt(ceil, 1)} memory pressure` : ""].filter(Boolean);
+  $("nodesSub").textContent = `${up} of ${all.length} answering.` + (limits.length ? ` The master holds back work from a node ${limits.join(" or ")}.` : " The master admits work whatever a node's memory.");
   const match = all.filter((n) => (!nd.q || n.id.toLowerCase().includes(nd.q) || n.pool.toLowerCase().includes(nd.q))
-    && (nd.state === "" || (nd.state === "up" ? n.connected : nd.state === "down" ? !n.connected : n.connected && n.psi > 4)));
+    && (nd.state === "" || (nd.state === "up" ? n.connected : nd.state === "down" ? !n.connected : n.connected && ((hasCeil() && n.psi > ceil / 2) || n.free_mib < floor))))
+    .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
   if (nd.offset >= match.length) nd.offset = Math.max(0, Math.floor((match.length - 1) / nd.size) * nd.size);
   const nodes = match.slice(nd.offset, nd.offset + nd.size);
   pager($("ndPager"), { offset: nd.offset, size: nd.size, total: match.length, shown: nodes.length }, (off, size) => {
     if (size !== nd.size) { nd.size = size; keepPageSize("nodes", size); }
-    nd.offset = off; nodeCards(all);
+    nd.offset = off; nodeTable(all);
   });
-  if (!match.length) box.innerHTML = `<div class="empty">${all.length ? "No node matches." : "No nodes yet. Use “+ Add a node”."}</div>`;
-  else box.querySelector(".empty")?.remove();
-  const seen = new Set();
-  for (const n of nodes) {
-    seen.add(n.id);
-    let card = box.querySelector(`[data-id="${CSS.escape(n.id)}"]`);
-    if (!card) {
-      card = document.createElement("div"); card.className = "node"; card.dataset.id = n.id;
-      card.innerHTML = `<div class="top"><span class="dot"></span><span class="name"></span><span class="pool"></span></div>
-        <div class="mid"><svg class="ring" viewBox="0 0 64 64"><circle class="track" cx="32" cy="32" r="26" fill="none" stroke-width="7"/><circle class="fill" cx="32" cy="32" r="26" fill="none" stroke-width="7" stroke-linecap="round" transform="rotate(-90 32 32)" stroke-dasharray="163.4" stroke-dashoffset="163.4"/><text x="32" y="33" text-anchor="middle" class="v"></text><text x="32" y="44" text-anchor="middle" class="s">free</text></svg>
-        <div class="facts"><div><b class="cnt num"></b> sandboxes</div><div><b class="hot num"></b> awake</div><div class="seen"></div></div></div>
-        <div class="stack"></div><div class="psi"><i></i><u></u></div><div class="feats"></div>`;
-      box.appendChild(card);
-    }
-    const total = TIERS.reduce((a, t) => a + (n.tiers[t] || 0), 0);
-    const freeLine = line("node.free_mib", n.id);
-    const memMax = Math.max(n.free_mib, ...freeLine.map((p) => p[1]), 1) * 1.05;
-    const frac = Math.max(0, Math.min(1, n.free_mib / memMax));
-    card.classList.toggle("down", !n.connected);
-    card.querySelector(".dot").className = "dot" + (n.connected ? (n.psi > 8 ? " stale" : "") : " dead");
-    card.querySelector(".name").textContent = n.id;
-    card.querySelector(".pool").textContent = n.pool;
-    const ring = card.querySelector(".fill");
-    ring.style.strokeDashoffset = (163.4 * (1 - frac)).toFixed(1);
-    ring.style.stroke = n.free_mib < 512 ? "var(--bad)" : n.free_mib < 900 ? "var(--warn)" : "var(--snapshot)";
-    card.querySelector(".v").textContent = n.free_mib >= 1024 ? (n.free_mib / 1024).toFixed(1) + "G" : n.free_mib + "M";
-    tweenText(card.querySelector(".cnt"), total);
-    tweenText(card.querySelector(".hot"), n.tiers.hot || 0);
-    card.querySelector(".seen").textContent = n.connected ? `seen ${ago(n.last_seen_age)}` : `silent for ${ago(n.last_seen_age).replace(" ago", "")}`;
-    card.querySelector(".stack").innerHTML = TIERS.map((t) => `<i title="${TIER_LABEL[t]}: ${n.tiers[t] || 0}" style="flex-grow:${n.tiers[t] || 0};background:var(--${t})"></i>`).join("") || "";
-    const psi = card.querySelector(".psi i");
-    psi.style.width = Math.min(100, n.psi / 16 * 100) + "%";
-    psi.style.background = n.psi > 8 ? "var(--bad)" : n.psi > 4 ? "var(--warn)" : "var(--frozen)";
-    card.querySelector(".psi u").style.left = (8 / 16 * 100) + "%";
-    card.querySelector(".psi").title = `memory pressure ${fmt(n.psi, 1)} (10 s average)`;
-    card.querySelector(".feats").innerHTML = n.features.map((f) => `<span>${f}</span>`).join("");
-  }
-  for (const c of [...box.children]) if (c.dataset.id && !seen.has(c.dataset.id)) c.remove();
-  // The history of the same nodes, in the same order.
-  nd.shown = nodes.map((n) => n.id);
-  if (tab === "nodes") heat();
+  const span = S ? `${clock(S.since)} – ${clock(S.now)}` : "";
+  $("ndTable").innerHTML = `<thead><tr><th>Node</th><th class="r">Free</th><th>Sandboxes</th><th>Pressure</th><th class="hist">Free memory, ${span}</th><th class="r">Seen</th></tr></thead><tbody>` +
+    (nodes.length ? nodes.map((n) => {
+      const total = TIERS.reduce((a, t) => a + (n.tiers[t] || 0), 0);
+      const freeCls = n.free_mib < floor ? "bad" : "";
+      const scale = hasCeil() ? 2 * ceil : 16;
+      const psiCol = hasCeil() && n.psi > ceil ? "var(--bad)" : hasCeil() && n.psi > ceil / 2 ? "var(--warn)" : "var(--frozen)";
+      return `<tr class="${n.connected ? "" : "down"}">
+        <td><div class="ndname"><span class="dot${n.connected ? (hasCeil() && n.psi > ceil ? " stale" : "") : " dead"}"></span>${escapeHtml(n.id)}</div>
+          <div class="sub">${escapeHtml(n.pool)}${n.features.length ? ` · <span class="feats">${n.features.map((f) => `<span>${escapeHtml(f)}</span>`).join("")}</span>` : ""}</div></td>
+        <td class="r num ${freeCls}" title="${fmt(n.free_mib)} MiB free">${gib(n.free_mib)}</td>
+        <td><b class="num">${fmt(total)}</b> <span class="sub" style="display:inline">${fmt(n.tiers.hot || 0)} awake</span>
+          <div class="stack">${TIERS.map((t) => `<i title="${TIER_LABEL[t]}: ${fmt(n.tiers[t] || 0)}" style="flex-grow:${n.tiers[t] || 0};background:var(--${t})"></i>`).join("")}</div></td>
+        <td><span class="num">${fmt(n.psi, 1)}</span><div class="meter" title="memory pressure ${fmt(n.psi, 1)} (10 s average)${hasCeil() ? ` against ${fmt(ceil, 1)}` : ""}"><i style="width:${Math.min(100, n.psi / scale * 100)}%;background:${psiCol}"></i>${hasCeil() ? '<u style="left:50%"></u>' : ""}</div></td>
+        <td class="hist"><canvas class="strip" data-id="${escapeHtml(n.id)}"></canvas></td>
+        <td class="r when">${n.connected ? ago(n.last_seen_age) : `silent ${ago(n.last_seen_age).replace(" ago", "")}`}</td></tr>`;
+    }).join("")
+    : `<tr><td colspan="6"><div class="empty">${all.length ? "No node matches." : "No nodes yet. Use “+ Add a node”."}</div></td></tr>`) + "</tbody>";
+  strips(all);
 }
-
-// ---- heatmap --------------------------------------------------------------
-function heat() {
-  const ids = nd.shown || [], L = 64, B = 20, rowH = 26;
-  const c = $("heat"), dpr = devicePixelRatio || 1, w = c.clientWidth, h = B + Math.max(1, ids.length) * rowH;
-  c.width = w * dpr; c.height = h * dpr; c.style.height = h + "px";
-  const ctx = c.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
-  if (!ids.length || !S) return;
-  const t0 = S.since, t1 = S.now, sx = (t) => L + (t - t0) / (t1 - t0) * (w - L - 6);
-  let vmax = 0; for (const id of ids) for (const [, v] of line("node.free_mib", id)) vmax = Math.max(vmax, v);
+// One scale for every strip: the most free memory any node had in the range.
+function heatScale(all) {
+  let vmax = Math.max(1, floorMib() * 2);
+  for (const n of all) for (const [, v] of line("node.free_mib", n.id)) vmax = Math.max(vmax, v);
+  return vmax;
+}
+function heatColor(v, vmax) {
+  if (v < floorMib()) return css("--bad");
   const c0 = hex(css("--heat-0")), c1 = hex(css("--heat-1")), c2 = hex(css("--heat-2"));
-  const cell = Math.max(2, (w - L) / Math.max(1, (t1 - t0) / S.step));
-  ids.forEach((id, i) => {
-    const y = i * rowH;
-    ctx.fillStyle = css("--ink-2"); ctx.font = "11.5px system-ui, -apple-system, Segoe UI, sans-serif"; ctx.textAlign = "right";
-    ctx.fillText(id, L - 8, y + rowH / 2 + 4);
-    const ups = new Map(line("node.up", id));
-    for (const [t, v] of line("node.free_mib", id)) {
-      const used = 1 - v / (vmax || 1);   // fuller is darker
-      const col = used < 0.5 ? mix(c0, c1, used * 2) : mix(c1, c2, (used - 0.5) * 2);
-      ctx.fillStyle = ups.get(t) === 0 ? css("--grid") : `rgb(${col.join(",")})`;
-      ctx.fillRect(sx(t), y + 1.5, cell + 0.6, rowH - 3);
+  const used = 1 - v / vmax;
+  const col = used < 0.5 ? mix(c0, c1, used * 2) : mix(c1, c2, (used - 0.5) * 2);
+  return `rgb(${col.join(",")})`;
+}
+function strips(all) {
+  if (!S) return;
+  const vmax = heatScale(all), floor = floorMib(), t0 = S.since, t1 = S.now, dpr = devicePixelRatio || 1;
+  for (const c of $("ndTable").querySelectorAll("canvas.strip")) {
+    const id = c.dataset.id, w = c.clientWidth, h = c.clientHeight;
+    c.width = w * dpr; c.height = h * dpr;
+    const ctx = c.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = css("--grid"); ctx.fillRect(0, 0, w, h);
+    const pts = line("node.free_mib", id), ups = new Map(line("node.up", id));
+    const sx = (t) => (t - t0) / (t1 - t0) * w, cell = Math.max(1, w / Math.max(1, (t1 - t0) / S.step));
+    for (const [t, v] of pts) {
+      ctx.fillStyle = ups.get(t) === 0 ? css("--grid") : heatColor(v, vmax);
+      ctx.fillRect(sx(t), 0, cell + 0.6, h);
     }
-  });
-  ctx.fillStyle = css("--muted"); ctx.textAlign = "left"; ctx.fillText(clock(t0), L, h - 5);
-  ctx.textAlign = "right"; ctx.fillText(clock(t1), w - 6, h - 5);
-  c.onmousemove = (e) => {
-    const r = c.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
-    const i = Math.floor(y / rowH); if (i < 0 || i >= ids.length || x < L) return hideTip();
-    const t = t0 + (x - L) / (w - L - 6) * (t1 - t0);
-    const pts = line("node.free_mib", ids[i]); if (!pts.length) return hideTip();
-    let best = pts[0]; for (const p of pts) if (Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p;
-    showTip(e, `${ids[i]} · ${clock(best[0])}`, [["free memory", css("--frozen"), fmt(best[1]) + " MiB"]]);
-  };
-  c.onmouseleave = hideTip;
+    c.onmousemove = (e) => {
+      if (!pts.length) return hideTip();
+      const r = c.getBoundingClientRect(), t = t0 + (e.clientX - r.left) / r.width * (t1 - t0);
+      let best = pts[0]; for (const p of pts) if (Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p;
+      const silent = ups.get(best[0]) === 0;
+      showTip(e, `${escapeHtml(id)} · ${clock(best[0])}`, [[silent ? "silent" : "free memory", silent ? css("--grid") : heatColor(best[1], vmax), silent ? "–" : fmt(best[1]) + " MiB"]]);
+    };
+    c.onmouseleave = hideTip;
+  }
+  // The legend: the same colours, in MiB, with the floor marked.
+  const F = Math.min(100, floor / vmax * 100);
+  const stops = floor > 0
+    ? [`${css("--bad")} 0%`, `${css("--bad")} ${F}%`, `${heatColor(floor, vmax)} ${F}%`, `${heatColor((floor + vmax) / 2, vmax)} ${(F + 100) / 2}%`, `${heatColor(vmax, vmax)} 100%`]
+    : [`${heatColor(0, vmax)} 0%`, `${heatColor(vmax / 2, vmax)} 50%`, `${heatColor(vmax, vmax)} 100%`];
+  const ticks = floor > 0 ? [[0, "0"], [F, `${gib(floor)} floor`], [100, gib(vmax)]] : [[0, "0"], [50, gib(vmax / 2)], [100, gib(vmax)]];
+  if (floor > 0 && F < 70) ticks.splice(2, 0, [(F + 100) / 2, gib((floor + vmax) / 2)]);
+  $("ndLegend").innerHTML = `<span>Free memory</span><span class="scale"><span class="ramp" style="background:linear-gradient(90deg, ${stops.join(", ")})">${floor > 0 ? `<u style="left:${F}%"></u>` : ""}</span>
+    <span class="ticks">${ticks.map(([x, l]) => `<span style="left:${x}%">${l}</span>`).join("")}</span></span>
+    ${floor > 0 ? `<span class="key"><i style="background:var(--bad)"></i>under the floor: the master sends it nothing new</span>` : ""}
+    <span class="key"><i style="background:var(--grid)"></i>silent</span>`;
 }
 const hex = (s) => { s = s.replace("#", ""); return [0, 2, 4].map((i) => parseInt(s.slice(i, i + 2), 16)); };
 const mix = (a, b, k) => a.map((v, i) => Math.round(v + (b[i] - v) * Math.max(0, Math.min(1, k))));
@@ -1055,7 +1054,7 @@ function redrawAll(first = false) {
   legend($("latLegend"), lat.map((r) => [r.label, r.color, r.dash]));
   timeChart($("c-lat"), lat, { log: true, unit: " ms", first });
   if (tab === "overview") drawFlow();
-  nodeCards(NOW.nodes);
+  if (tab === "nodes") nodeTable(NOW.nodes);
   // KPI sparklines
   const total = sumAt("fleet.sandboxes", TIERS);
   spark($("s-total"), total, css("--frozen"));

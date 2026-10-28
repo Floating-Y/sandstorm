@@ -51,9 +51,13 @@ donut beside it, which showed the same four counts again.
 
 Sandboxes that will not start are a line above the sandbox table and a
 count on its Failing filter, which lists them with their errors -- not a
-second list of the same rows under it. On the Nodes tab, free memory over
-time is one heatmap across the page, a row for each node shown above it,
-rather than a sparkline on every card as well.
+second list of the same rows under it. The Nodes tab is one table, a row
+a node: free memory, sandboxes by tier, pressure against the master's
+ceiling, when it was last seen, and its free memory over the range as a
+strip. Every strip shares one scale, with a legend in MiB, so a column read
+down is one moment across the fleet; time under the master's floor is red.
+The floor and ceiling are the master's own, now in `GET /v1/console/now`
+as `floor_mib` and `max_psi`.
 
 Sandboxes, nodes and activity share one pager: the range shown, the pages
 within reach, and 25, 50 or 100 a page, remembered per table. Nodes can be

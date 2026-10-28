@@ -1523,6 +1523,10 @@ mod api_auth {
             .unwrap();
         assert!(now["nodes"].is_array());
         assert_eq!(now["failed"], 0);
+        // The thresholds the console marks are the master's own; this
+        // harness admits everything, so it says so.
+        assert_eq!(now["floor_mib"], 0);
+        assert!(now["max_psi"].is_number());
 
         // This harness builds a state without a history store.
         let series = c

@@ -587,6 +587,10 @@ struct ConsoleNow {
     nodes: Vec<ConsoleNode>,
     failing: Vec<ConsoleFailing>,
     counters: HashMap<&'static str, u64>,
+    /// The admission thresholds a node is held to, so the console marks
+    /// the figures it actually refuses at rather than the defaults.
+    floor_mib: u64,
+    max_psi: f64,
 }
 
 /// Everything the console draws that is a single "now" rather than a line.
@@ -623,6 +627,8 @@ async fn console_now(State(st): State<St>) -> Result<Json<ConsoleNow>, ApiErr> {
     ]);
     Ok(Json(ConsoleNow {
         now,
+        floor_mib: st.admit.min_free_mib,
+        max_psi: st.admit.max_psi_avg10,
         uptime_secs: m.uptime().as_secs(),
         idle: [
             st.idle.to_frozen.as_secs(),
