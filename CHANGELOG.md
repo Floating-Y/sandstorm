@@ -27,7 +27,8 @@ pairing code for one the master connects to -- the README's mark and
 wordmark in its header, drawn as SVG in the theme's colours, with titles and
 figures set in the wordmark's Newsreader (a 22 KB subset inlined, since a
 master may have no internet), one neutral accent so colour is left to the
-data, plain tabs over a sliding underline, and cards without glow, and a favicon in
+data, plain tabs over a sliding underline, cards without glow, and an overview without boxes -- a strip of figures,
+then the tier flow and the charts, each under a hairline, and a favicon in
 place of forkd's bolt, and sparklines that draw in once instead of replaying
 the sweep on every refresh.
 

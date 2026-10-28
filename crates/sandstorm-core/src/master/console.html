@@ -59,7 +59,7 @@ header { position: sticky; top: 0; z-index: 10; display: flex; align-items: cent
 .brand svg { height: 24px; width: auto; display: block; overflow: visible; }
 .brand .mark { fill: var(--brand); }
 .brand .word { fill: currentColor; }
-.live { display: flex; align-items: center; gap: 8px; color: var(--ink-2); font-size: 13px; }
+.live { display: flex; align-items: center; gap: 8px; color: var(--ink-2); font-size: 13px; white-space: nowrap; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); position: relative; }
 .dot::after { display: none; content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 2px solid var(--good);
   animation: ping 1.8s cubic-bezier(0,0,.2,1) infinite; }
@@ -71,7 +71,7 @@ header { position: sticky; top: 0; z-index: 10; display: flex; align-items: cent
 .seg button { border: 0; background: none; color: var(--ink-2); padding: 5px 11px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px; }
 .seg button:hover { color: var(--ink); }
 .seg button.on { background: var(--card-2); color: var(--ink); }
-.iconbtn { border: 1px solid transparent; background: none; color: var(--ink-2); border-radius: 8px; padding: 6px 10px; cursor: pointer; font: inherit; font-size: 13px; }
+.iconbtn { white-space: nowrap; border: 1px solid transparent; background: none; color: var(--ink-2); border-radius: 8px; padding: 6px 10px; cursor: pointer; font: inherit; font-size: 13px; }
 .tabs-nav { display: flex; gap: 4px; }
 .tabs-nav a { font-size: 13.5px; font-weight: 500; color: var(--muted); text-decoration: none; padding: 6px 12px; border-radius: 7px; display: inline-flex; align-items: center; gap: 6px; }
 .tabs-nav a:hover { color: var(--ink); }
@@ -126,10 +126,11 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .tip .r b { font-weight: 600; }
 /* The tier flow: four tiers, and an arrow for each move between them whose
    width, label and moving dashes are the measured rate. */
-#flow { width: 100%; height: 184px; display: block; overflow: visible; }
-#flow .box { fill: var(--card-2); stroke: var(--line); }
+#flow { width: 100%; height: 156px; display: block; overflow: visible; }
+#flow .box { fill: none; stroke: none; }
 #flow .lbl { fill: var(--ink-2); font-size: 12.5px; font-weight: 600; }
 #flow .hint, #flow .pct, #flow .verb, #flow .why { fill: var(--muted); font-size: 11.5px; }
+#flow .hint { font-weight: 400; }
 #flow .cnt { fill: var(--ink); font-family: var(--serif); font-weight: 500; letter-spacing: -.3px; }
 #flow .track { fill: var(--grid); }
 #flow .bar { transition: width .8s cubic-bezier(.2,.8,.2,1); }
@@ -284,16 +285,28 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
    share the height under the header instead of each taking what it likes,
    and the charts draw to the box they are given. */
 @media (min-width: 1201px) and (min-height: 620px) {
-  body.tab-overview main { height: calc(100vh - var(--head, 64px)); min-height: 560px; padding-top: 14px; padding-bottom: 14px; gap: 12px;
+  body.tab-overview main { height: calc(100vh - var(--head, 64px)); min-height: 560px; padding-top: 14px; padding-bottom: 14px; gap: 0;
     grid-template-rows: auto auto minmax(0, 1fr); }
-  body.tab-overview main > .card:not(.kpi) { display: flex; flex-direction: column; min-height: 0; padding: 14px 16px; }
+  body.tab-overview main > .card:not(.kpi) { display: flex; flex-direction: column; min-height: 0; }
   body.tab-overview main > .card .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 6px; }
   body.tab-overview .legend { margin-bottom: 4px; }
-  body.tab-overview .kpi { padding: 12px 16px 40px; }
+  body.tab-overview main > .kpi { padding-top: 2px; padding-bottom: 40px; }
   body.tab-overview .kpi .value { font-size: 30px; margin: 4px 0 0; }
   body.tab-overview .kpi svg.spark { height: 30px; }
   body.tab-overview .kpi .foot { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   body.tab-overview .chart { flex: 1 1 0; min-height: 0; height: auto; }
+}
+/* The overview without boxes: a strip of figures, then two sections, each
+   under a hairline. Other tabs keep their cards, which hold their tables. */
+body.tab-overview main { gap: 0; }
+body.tab-overview main > .card { background: none; border: 0; border-radius: 0; padding: 18px 0; overflow: visible; }
+body.tab-overview main > .kpi { padding: 4px 0 46px; }
+body.tab-overview main > .flowsec, body.tab-overview main > .chartsec { border-top: 1px solid var(--line); }
+@media (min-width: 1201px) {
+  /* Columns side by side: a hairline between them, not a gap. */
+  body.tab-overview main > .kpi, body.tab-overview main > .chartsec { padding-left: 22px; padding-right: 22px; border-left: 1px solid var(--line); }
+  body.tab-overview main > .kpi.first, body.tab-overview main > .chartsec.first { padding-left: 0; border-left: 0; }
+  body.tab-overview main > .kpi.last, body.tab-overview main > .chartsec.last { padding-right: 0; }
 }
 /* Activity: the same table as the sandboxes. */
 table.tbl td.when { color: var(--muted); font-size: 12px; }
@@ -352,25 +365,25 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
 </header>
 
 <main>
-  <section data-tab="overview" class="card kpi span-2" style="animation-delay:.02s"><div class="label">Sandboxes</div><div class="value num" id="k-total">0</div><div class="foot" id="k-total-f"></div><svg class="spark" id="s-total"></svg></section>
+  <section data-tab="overview" class="card kpi span-2 first" style="animation-delay:.02s"><div class="label">Sandboxes</div><div class="value num" id="k-total">0</div><div class="foot" id="k-total-f"></div><svg class="spark" id="s-total"></svg></section>
   <section data-tab="overview" class="card kpi span-2" style="animation-delay:.06s"><div class="label"><span class="swatch" style="background:var(--hot)"></span>Awake</div><div class="value num" id="k-hot">0</div><div class="foot" id="k-hot-f"></div><svg class="spark" id="s-hot"></svg></section>
   <section data-tab="overview" class="card kpi span-2" style="animation-delay:.10s"><div class="label">Sandboxes per awake one</div><div class="value num" id="k-ratio">0</div><div class="foot">how far idle tiers stretch memory</div><svg class="spark" id="s-ratio"></svg></section>
   <section data-tab="overview" class="card kpi span-2" style="animation-delay:.14s"><div class="label">Nodes</div><div class="value num" id="k-nodes">0</div><div class="foot" id="k-nodes-f"></div><svg class="spark" id="s-nodes"></svg></section>
   <section data-tab="overview" class="card kpi span-2" style="animation-delay:.18s"><div class="label">Creates / min</div><div class="value num" id="k-creates">0</div><div class="foot" id="k-creates-f"></div><svg class="spark" id="s-creates"></svg></section>
-  <section data-tab="overview" class="card kpi span-2" style="animation-delay:.22s"><div class="label">API p99</div><div class="value num" id="k-p99">–</div><div class="foot" id="k-p99-f"></div><svg class="spark" id="s-p99"></svg></section>
+  <section data-tab="overview" class="card kpi span-2 last" style="animation-delay:.22s"><div class="label">API p99</div><div class="value num" id="k-p99">–</div><div class="foot" id="k-p99-f"></div><svg class="spark" id="s-p99"></svg></section>
 
-  <section data-tab="overview" class="card span-12" style="animation-delay:.25s">
+  <section data-tab="overview" class="card span-12 flowsec" style="animation-delay:.25s">
     <h2>Tier flow</h2>
     <div class="sub" id="flowSub">Where the sandboxes are now, and how fast they move between tiers. Each arrow is as wide as its rate over the last half-minute.</div>
     <svg id="flow" role="img" aria-label="Sandboxes by tier, and the rates between tiers"></svg>
   </section>
 
-  <section data-tab="overview" class="card span-5" style="animation-delay:.34s">
+  <section data-tab="overview" class="card span-5 chartsec first" style="animation-delay:.34s">
     <h2>Sandboxes by tier</h2><div class="sub" id="tiersSub">Over the selected range</div>
     <div class="legend" id="tiersLegend"></div>
     <svg class="chart" id="c-tiers" height="250"></svg>
   </section>
-  <section data-tab="overview" class="card span-4" style="animation-delay:.38s">
+  <section data-tab="overview" class="card span-4 chartsec" style="animation-delay:.38s">
     <h2>Lifecycle rates</h2><div class="sub">Per second</div>
     <div class="legend" id="ratesLegend"></div>
     <svg class="chart" id="c-rates" height="250"></svg>
@@ -450,7 +463,7 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
     <div class="tbl-wrap"><table class="tbl" id="snapTable"></table></div>
   </section>
 
-  <section data-tab="overview" class="card span-3" style="animation-delay:.5s">
+  <section data-tab="overview" class="card span-3 chartsec last" style="animation-delay:.5s">
     <h2>Latency</h2><div class="sub">Milliseconds, log scale. The API, creates, and waiting for the store lock.</div>
     <div class="legend" id="latLegend"></div>
     <svg class="chart" id="c-lat" height="210"></svg>
@@ -780,7 +793,7 @@ const headUp = (x, y, w) => { const s = 5 + w * 0.6; return `M${x - s * 0.7},${y
 function flowBuild(svg, w, h) {
   const L = 92, R = 4, bottom = 46;
   const G = Math.max(84, Math.min(140, w * 0.085));
-  const bw = (w - L - R - 3 * G) / 4, bh = Math.max(92, Math.min(124, h - bottom - 4));
+  const bw = (w - L - R - 3 * G) / 4, bh = Math.max(84, Math.min(100, h - bottom - 4));
   const top = Math.max(2, (h - bottom - bh) / 2);
   const x = (i) => L + i * (bw + G), cx = (i) => x(i) + bw / 2;
   const yMid = top + bh / 2, yBot = top + bh, yW = yBot + 22, rc = 10;
@@ -791,8 +804,7 @@ function flowBuild(svg, w, h) {
     const X = x(i), pad = 16, barW = bw - pad * 2 - 46;
     m += `<g id="f-box-${t}"><title></title><rect class="box" x="${X}" y="${top}" width="${bw}" height="${bh}" rx="12"/>
       <circle cx="${X + pad + 4}" cy="${top + 21}" r="4" style="fill:var(--${t})"/>
-      <text class="lbl" x="${X + pad + 14}" y="${top + 25}">${TIER_LABEL[t]}</text>
-      <text class="hint" id="f-hint-${t}" x="${X + bw - pad}" y="${top + 25}" text-anchor="end"></text>
+      <text class="lbl" x="${X + pad + 14}" y="${top + 25}">${TIER_LABEL[t]}<tspan class="hint" id="f-hint-${t}" dx="6"></tspan></text>
       <text class="cnt num" id="f-cnt-${t}" x="${X + pad}" y="${top + 34 + fs}" style="font-size:${fs}px">0</text>
       <rect class="track" x="${X + pad}" y="${yBot - 20}" width="${barW}" height="5" rx="2.5"/>
       <rect class="bar" id="f-bar-${t}" x="${X + pad}" y="${yBot - 20}" width="0" height="5" rx="2.5" style="fill:var(--${t})"/>
@@ -824,7 +836,7 @@ function drawFlow() {
   const g = flow.g, c = flow.counts, r = flow.rates;
   const total = TIERS.reduce((a, t) => a + (c[t] || 0), 0);
   const idle = NOW ? NOW.idle : null;
-  const hint = { hot: "running", frozen: idle ? `idle ${dur(idle[0])}+` : "", snapshot: idle ? `idle ${dur(idle[1])}+` : "", detached: idle ? `idle ${dur(idle[2])}+` : "" };
+  const hint = { hot: "· running", frozen: idle ? `· idle ${dur(idle[0])}+` : "", snapshot: idle ? `· idle ${dur(idle[1])}+` : "", detached: idle ? `· idle ${dur(idle[2])}+` : "" };
   for (const t of TIERS) {
     const share = total ? (c[t] || 0) / total : 0;
     tweenText($("f-cnt-" + t), c[t] || 0);
@@ -1113,13 +1125,13 @@ function redrawAll(first = false) {
   if (tab === "nodes") nodeView(NOW.nodes);
   // KPI sparklines
   const total = sumAt("fleet.sandboxes", TIERS);
-  spark($("s-total"), total, css("--ink-2"));
-  spark($("s-hot"), line("fleet.sandboxes", "hot"), css("--ink-2"));
+  spark($("s-total"), total, css("--ink-2"), false);
+  spark($("s-hot"), line("fleet.sandboxes", "hot"), css("--ink-2"), false);
   const hotMap = new Map(line("fleet.sandboxes", "hot"));
-  spark($("s-ratio"), total.map(([t, v]) => [t, v / Math.max(1, hotMap.get(t) || 1)]), css("--ink-2"));
-  spark($("s-nodes"), line("fleet.nodes", "up"), css("--ink-2"));
-  spark($("s-creates"), line("rate.creates", "placed").map(([t, v]) => [t, v * 60]), css("--ink-2"));
-  spark($("s-p99"), line("latency.api", "p99"), css("--ink-2"));
+  spark($("s-ratio"), total.map(([t, v]) => [t, v / Math.max(1, hotMap.get(t) || 1)]), css("--ink-2"), false);
+  spark($("s-nodes"), line("fleet.nodes", "up"), css("--ink-2"), false);
+  spark($("s-creates"), line("rate.creates", "placed").map(([t, v]) => [t, v * 60]), css("--ink-2"), false);
+  spark($("s-p99"), line("latency.api", "p99"), css("--ink-2"), false);
 }
 
 async function refresh(first = false) {
