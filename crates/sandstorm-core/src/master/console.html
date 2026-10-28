@@ -64,6 +64,18 @@ header { position: sticky; top: 0; z-index: 10; display: flex; align-items: cent
 .tabs-nav .n { font-size: 11px; font-weight: 600; color: var(--muted); background: var(--card-2); border-radius: 999px; padding: 0 6px; min-width: 18px; text-align: center; }
 .tabs-nav a[aria-current="page"] .n { background: var(--card); }
 .tabs-nav .n.bad { color: #fff; background: var(--bad); }
+.tabs-nav .n:empty { display: none; }
+/* One pill that slides to the tab you pick, rather than each tab lighting up. */
+.tabs-nav { position: relative; }
+.tabs-nav a { position: relative; z-index: 1; transition: color .2s; }
+.tabs-nav a[aria-current="page"] { background: none; box-shadow: none; }
+.tabs-nav .ind { position: absolute; z-index: 0; top: 3px; bottom: 3px; left: 0; width: 0; border-radius: 7px; pointer-events: none;
+  background: var(--card-2); box-shadow: inset 0 0 0 1px var(--line), 0 1px 3px rgba(0,0,0,.2);
+  transition: transform .42s cubic-bezier(.3,1.3,.4,1), width .42s cubic-bezier(.3,1.3,.4,1); }
+.tabs-nav .ind.still { transition: none; }
+main.entering > [data-tab]:not([hidden]) { animation: tabin .34s cubic-bezier(.2,.8,.2,1) both; }
+main.entering > [data-tab]:not([hidden]):nth-child(n+7) { animation-delay: .04s; }
+@keyframes tabin { from { opacity: 0; transform: translateY(8px) scale(.995); } }
 [data-tab][hidden] { display: none !important; }
 /* The cards rise in once, when the page opens; switching tabs just shows them. */
 body.settled .card { animation: none; }
@@ -73,6 +85,7 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
   animation: rise .6s cubic-bezier(.2,.8,.2,1) both; }
 @keyframes rise { from { opacity: 0; transform: translateY(10px); } }
 .card h2 { margin: 0 0 2px; font-size: 14px; font-weight: 600; }
+.card { scroll-margin-top: calc(var(--head, 64px) + 12px); }
 .card .sub { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
 .span-2 { grid-column: span 2; } .span-3 { grid-column: span 3; } .span-4 { grid-column: span 4; }
 .span-5 { grid-column: span 5; } .span-6 { grid-column: span 6; } .span-7 { grid-column: span 7; }
@@ -133,13 +146,6 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .feats { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
 .feats span { font-size: 10.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; }
 #heat { width: 100%; display: block; }
-.feed { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; max-height: 360px; overflow: auto; }
-.feed li { display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; align-items: start; padding: 7px 6px; border-radius: 8px; font-size: 13px; }
-.feed li.new { animation: slidein .7s cubic-bezier(.2,.8,.2,1); background: color-mix(in srgb, var(--accent) 10%, transparent); }
-@keyframes slidein { from { opacity: 0; transform: translateX(-16px); } }
-.feed .ic { width: 22px; height: 22px; border-radius: 7px; display: grid; place-items: center; font-size: 12px; }
-.feed .when { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
-.feed .d { color: var(--ink-2); }
 .fail { display: grid; gap: 6px; }
 .fail .f { border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; font-size: 12.5px; background: var(--card-2); }
 .fail .f code { font-size: 11.5px; color: var(--ink-2); }
@@ -216,9 +222,18 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
 .selbar button.danger { color: var(--bad); }
 .selbar button.danger.armed { background: var(--bad); color: #fff; border-color: var(--bad); }
 .selbar button.link { border: 0; background: none; color: var(--muted); margin-left: auto; }
-.pager { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; font-size: 12.5px; color: var(--muted); }
-.pager button { font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 7px; border: 1px solid var(--line); background: none; color: var(--ink-2); cursor: pointer; }
-.pager button:disabled { opacity: .4; cursor: default; }
+/* One pager for every table: where you are, the pages within reach, and how
+   many rows a page holds. */
+.pager { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px; font-size: 12.5px; color: var(--muted); }
+.pager:empty { display: none; }
+.pager .pages { display: flex; align-items: center; gap: 3px; }
+.pager button { font: inherit; font-size: 12.5px; min-width: 30px; height: 28px; padding: 0 8px; border-radius: 8px; border: 1px solid transparent; background: none; color: var(--ink-2); cursor: pointer; font-variant-numeric: tabular-nums; transition: background .15s, color .15s, border-color .15s; }
+.pager button:hover:not(:disabled) { border-color: var(--line); color: var(--ink); background: var(--card-2); }
+.pager button[aria-current="page"] { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.pager button:disabled { opacity: .35; cursor: default; }
+.pager .gap { padding: 0 4px; color: var(--muted); }
+.pager .size { display: inline-flex; align-items: center; gap: 6px; }
+.pager .size select { font: inherit; font-size: 12.5px; padding: 4px 6px; border-radius: 7px; border: 1px solid var(--line); background: var(--card-2); color: var(--ink); }
 .flash { font-size: 12.5px; margin-left: 8px; }
 .gate .secret { display: flex; gap: 6px; align-items: stretch; margin-top: 6px; }
 .gate .secret code { flex: 1; background: var(--card-2); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; font-size: 12px; word-break: break-all; }
@@ -226,6 +241,56 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
 .gate .err details { margin-top: 4px; color: var(--muted); }
 .gate .err summary { cursor: pointer; font-size: 12px; }
 .gate .err details code { display: block; margin-top: 4px; white-space: pre-wrap; word-break: break-all; font-size: 11.5px; }
+/* The overview on one screen where the screen has room for it: the cards
+   share the height under the header instead of each taking what it likes,
+   and the charts draw to the box they are given. */
+@media (min-width: 1201px) and (min-height: 620px) {
+  body.tab-overview main { height: calc(100vh - var(--head, 64px)); min-height: 560px; padding-top: 14px; padding-bottom: 14px; gap: 12px;
+    grid-template-rows: auto minmax(0, 1.15fr) minmax(0, 1fr); }
+  body.tab-overview main > .card:not(.kpi) { display: flex; flex-direction: column; min-height: 0; padding: 14px 16px; }
+  body.tab-overview main > .card .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 6px; }
+  body.tab-overview .legend { margin-bottom: 4px; }
+  body.tab-overview .kpi { padding: 12px 16px 10px; }
+  body.tab-overview .kpi .value { font-size: 26px; margin: 2px 0 0; }
+  body.tab-overview .kpi svg.spark { height: 36px; }
+  body.tab-overview .kpi .foot { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  body.tab-overview #flow, body.tab-overview .chart { flex: 1 1 0; min-height: 0; height: auto; }
+  body.tab-overview .donutwrap { flex: 1 1 0; min-height: 0; }
+  body.tab-overview #donut { height: 100%; width: auto; max-height: 168px; max-width: 46%; }
+}
+/* Activity: the same table as the sandboxes. */
+table.tbl td.when { color: var(--muted); font-size: 12px; }
+.evk { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.evk .ic { width: 22px; height: 22px; border-radius: 7px; display: grid; place-items: center; font-size: 12px; }
+table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
+@keyframes rowin { from { background: color-mix(in srgb, var(--accent) 16%, transparent); } }
+/* The snapshot builder: three steps across, a terminal under them. */
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 6px; }
+@media (max-width: 960px) { .steps { grid-template-columns: 1fr; } }
+.step { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; background: var(--card-2); display: flex; flex-direction: column; gap: 8px; transition: opacity .3s, border-color .3s; }
+.step.off { opacity: .45; pointer-events: none; }
+.step.now { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+.step .n { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--line); color: var(--ink); font-size: 11.5px; font-weight: 700; margin-right: 6px; }
+.step.done .n { background: var(--good); color: #fff; }
+.step.now .n { background: var(--accent); color: #fff; }
+.step h3 { margin: 0; font-size: 13.5px; font-weight: 600; display: flex; align-items: center; }
+.step label { font-size: 12px; color: var(--ink-2); }
+.step select, .step input[type=text], .step textarea { font: inherit; font-size: 13px; padding: 7px 10px; border-radius: 9px; border: 1px solid var(--line); background: var(--card); color: var(--ink); width: 100%; }
+.step textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; min-height: 92px; resize: vertical; }
+.step .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.step .row .btn { flex: none; }
+.step .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.step .btn:disabled { opacity: .5; cursor: progress; }
+.step .note { font-size: 12px; color: var(--muted); line-height: 1.45; }
+.step .check { display: inline-flex; gap: 6px; align-items: center; font-size: 12.5px; color: var(--ink-2); }
+.step .who { font-size: 12px; color: var(--ink-2); }
+.step .who code { font-size: 11.5px; }
+.step .hint { color: var(--bad); font-size: 12px; }
+.step .hint[hidden] { display: none; }
+.term { margin-top: 12px; background: #0b0b0a; color: #d8d6cf; border: 1px solid var(--line); border-radius: 12px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 10px 12px; max-height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+.term:empty::before { content: "Output from each command lands here."; color: #6f6e69; }
+.term .cmd { color: #8ab4f8; } .term .ok { color: #6fcf6f; } .term .bad { color: #f08a8a; } .term .dim { color: #85837d; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 </style>
 </head>
@@ -233,10 +298,11 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
 <header>
   <div class="brand"><svg viewBox="0 0 56 56" aria-hidden="true"><g transform="translate(2,2)" fill="#e0892c"><rect x="28.2" y="25.2" width="1.6" height="1.6" rx="0.4" transform="rotate(0.0 29.00 26.00)" opacity="1.0"/><rect x="29.7" y="26.6" width="2.0" height="2.0" rx="0.4" transform="rotate(19.5 30.71 27.67)" opacity="0.9"/><rect x="30.2" y="29.1" width="2.4" height="2.4" rx="0.5" transform="rotate(39.0 31.44 30.40)" opacity="0.9"/><rect x="29.2" y="32.2" width="2.8" height="2.8" rx="0.6" transform="rotate(58.4 30.71 33.67)" opacity="0.9"/><rect x="26.6" y="35.1" width="3.2" height="3.2" rx="0.7" transform="rotate(77.9 28.30 36.76)" opacity="0.9"/><rect x="22.4" y="37.0" width="3.7" height="3.7" rx="0.8" transform="rotate(97.4 24.33 38.89)" opacity="0.8"/><rect x="17.1" y="37.3" width="4.1" height="4.1" rx="0.9" transform="rotate(116.9 19.22 39.38)" opacity="0.8"/><rect x="11.4" y="35.4" width="4.5" height="4.5" rx="1.0" transform="rotate(136.4 13.70 37.73)" opacity="0.8"/><rect x="6.1" y="31.3" width="4.9" height="4.9" rx="1.1" transform="rotate(155.9 8.66 33.78)" opacity="0.8"/><rect x="2.3" y="25.0" width="5.3" height="5.3" rx="1.2" transform="rotate(175.3 5.07 27.71)" opacity="0.7"/><rect x="0.8" y="17.2" width="5.8" height="5.8" rx="1.3" transform="rotate(194.8 3.76 20.12)" opacity="0.7"/><rect x="23.7" y="27.8" width="1.6" height="1.6" rx="0.4" transform="rotate(120.0 24.50 28.60)" opacity="1.0"/><rect x="21.1" y="28.2" width="2.0" height="2.0" rx="0.4" transform="rotate(139.5 22.20 29.25)" opacity="0.9"/><rect x="18.2" y="27.2" width="2.4" height="2.4" rx="0.5" transform="rotate(159.0 19.47 28.51)" opacity="0.9"/><rect x="15.5" y="24.8" width="2.8" height="2.8" rx="0.6" transform="rotate(178.5 17.00 26.24)" opacity="0.9"/><rect x="13.8" y="20.9" width="3.2" height="3.2" rx="0.7" transform="rotate(197.9 15.53 22.62)" opacity="0.9"/><rect x="13.8" y="16.2" width="3.7" height="3.7" rx="0.8" transform="rotate(217.4 15.67 18.10)" opacity="0.8"/><rect x="15.7" y="11.3" width="4.1" height="4.1" rx="0.9" transform="rotate(236.9 17.80 13.44)" opacity="0.8"/><rect x="19.7" y="7.2" width="4.5" height="4.5" rx="1.0" transform="rotate(256.4 21.99 9.48)" opacity="0.8"/><rect x="25.4" y="4.6" width="4.9" height="4.9" rx="1.1" transform="rotate(275.9 27.93 7.10)" opacity="0.8"/><rect x="32.2" y="4.3" width="5.3" height="5.3" rx="1.2" transform="rotate(295.3 34.98 7.02)" opacity="0.7"/><rect x="39.3" y="6.7" width="5.8" height="5.8" rx="1.3" transform="rotate(314.8 42.21 9.68)" opacity="0.7"/><rect x="23.7" y="22.6" width="1.6" height="1.6" rx="0.4" transform="rotate(240.0 24.50 23.40)" opacity="1.0"/><rect x="24.0" y="20.0" width="2.0" height="2.0" rx="0.4" transform="rotate(259.5 25.09 21.08)" opacity="0.9"/><rect x="25.8" y="17.8" width="2.4" height="2.4" rx="0.5" transform="rotate(279.0 27.09 19.09)" opacity="0.9"/><rect x="28.8" y="16.6" width="2.8" height="2.8" rx="0.6" transform="rotate(298.5 30.29 18.09)" opacity="0.9"/><rect x="32.5" y="16.9" width="3.2" height="3.2" rx="0.7" transform="rotate(317.9 34.16 18.63)" opacity="0.9"/><rect x="36.1" y="19.1" width="3.7" height="3.7" rx="0.8" transform="rotate(337.4 38.00 21.00)" opacity="0.8"/><rect x="38.9" y="23.1" width="4.1" height="4.1" rx="0.9" transform="rotate(356.9 40.98 25.18)" opacity="0.8"/><rect x="40.0" y="28.5" width="4.5" height="4.5" rx="1.0" transform="rotate(376.4 42.31 30.79)" opacity="0.8"/><rect x="38.9" y="34.6" width="4.9" height="4.9" rx="1.1" transform="rotate(395.9 41.40 37.13)" opacity="0.8"/><rect x="35.2" y="40.5" width="5.3" height="5.3" rx="1.2" transform="rotate(415.4 37.95 43.27)" opacity="0.7"/><rect x="29.1" y="45.3" width="5.8" height="5.8" rx="1.3" transform="rotate(434.8 32.03 48.20)" opacity="0.7"/></g></svg>Sandstorm <small>console</small></div>
   <nav class="tabs-nav" id="tabs" aria-label="Sections">
+    <span class="ind still" id="tabInd" aria-hidden="true"></span>
     <a href="#overview" data-go="overview">Overview</a>
     <a href="#nodes" data-go="nodes">Nodes <span class="n" id="n-nodes"></span></a>
     <a href="#sandboxes" data-go="sandboxes">Sandboxes <span class="n" id="n-sandboxes"></span></a>
-    <a href="#snapshots" data-go="snapshots">Snapshots <span class="n" id="n-snapshots"></span></a>
+    <a href="#snapshots" data-go="snapshots">Snapshots</a>
     <a href="#activity" data-go="activity">Activity</a>
   </nav>
   <div class="live"><span class="dot" id="dot"></span><span id="liveText">connecting</span></div>
@@ -267,12 +333,12 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
     <div class="donutwrap"><svg id="donut" width="168" height="168" viewBox="0 0 168 168" role="img" aria-label="Sandboxes by tier"></svg><div class="dlist" id="dlist"></div></div>
   </section>
 
-  <section data-tab="overview" class="card span-7" style="animation-delay:.34s">
+  <section data-tab="overview" class="card span-5" style="animation-delay:.34s">
     <h2>Sandboxes by tier</h2><div class="sub" id="tiersSub">Over the selected range</div>
     <div class="legend" id="tiersLegend"></div>
     <svg class="chart" id="c-tiers" height="250"></svg>
   </section>
-  <section data-tab="overview" class="card span-5" style="animation-delay:.38s">
+  <section data-tab="overview" class="card span-4" style="animation-delay:.38s">
     <h2>Lifecycle rates</h2><div class="sub">Per second</div>
     <div class="legend" id="ratesLegend"></div>
     <svg class="chart" id="c-rates" height="250"></svg>
@@ -280,7 +346,12 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
 
   <section data-tab="nodes" class="card span-12" style="animation-delay:.42s">
     <div class="head"><div><h2>Nodes</h2><div class="sub" id="nodesSub"></div></div><button class="btn" id="addNode" type="button">+ Add a node</button></div>
+    <div class="bar">
+      <input id="ndQ" type="search" placeholder="Search by node or pool">
+      <div class="chips" id="ndState"></div>
+    </div>
     <div class="nodes" id="nodes"></div>
+    <div class="pager" id="ndPager"></div>
   </section>
 
   <section data-tab="sandboxes" class="card span-12" style="animation-delay:.44s">
@@ -298,7 +369,41 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
     </div>
     <div class="tbl-wrap"><table class="tbl" id="sbTable"></table></div>
     <div class="menu" id="sbMenu" role="menu" hidden></div>
-    <div class="pager"><span id="sbRange"></span><span><button id="sbPrev" type="button">Previous</button> <button id="sbNext" type="button">Next</button></span></div>
+    <div class="pager" id="sbPager"></div>
+  </section>
+
+  <section data-tab="snapshots" class="card span-12" style="animation-delay:.44s">
+    <div class="head"><div><h2>Build a snapshot</h2><div class="sub">Start a sandbox, set it up, and save it as an image new sandboxes fork from in milliseconds.</div></div><button class="btn" id="bdDiscard" type="button" hidden>Discard the build</button></div>
+    <div class="steps">
+      <div class="step now" id="bdS1">
+        <h3><span class="n">1</span>Start from</h3>
+        <div class="row" role="radiogroup" aria-label="Start from">
+          <label class="check"><input type="radio" name="bdFrom" value="template" checked> A template</label>
+          <label class="check"><input type="radio" name="bdFrom" value="snapshot"> A snapshot</label>
+        </div>
+        <select id="bdBase" aria-label="Template or snapshot to start from"></select>
+        <label for="bdNode">Node</label>
+        <select id="bdNode"><option value="">Any node with room</option></select>
+        <div class="row"><button class="btn primary" id="bdStart" type="button">Start a build sandbox</button></div>
+        <div class="who" id="bdWho"></div>
+      </div>
+      <div class="step off" id="bdS2">
+        <h3><span class="n">2</span>Set it up</h3>
+        <label for="bdCmds">Commands, one a line, run in order with <code>sh -c</code>. The first that fails stops the run.</label>
+        <textarea id="bdCmds" spellcheck="false" placeholder="pip install numpy pandas&#10;python3 -c 'import numpy'"></textarea>
+        <div class="row"><button class="btn primary" id="bdRun" type="button">Run</button><label class="check" for="bdTimeout">each up to <input id="bdTimeout" type="text" inputmode="numeric" value="300" style="width:58px"> s</label></div>
+      </div>
+      <div class="step off" id="bdS3">
+        <h3><span class="n">3</span>Save it</h3>
+        <label for="bdTag">Snapshot name</label>
+        <input id="bdTag" type="text" placeholder="python-data-v1" spellcheck="false" autocomplete="off">
+        <div class="hint" id="bdTagHint" hidden></div>
+        <label class="check"><input type="checkbox" id="bdCleanup" checked> Delete the build sandbox once it is saved</label>
+        <div class="row"><button class="btn primary" id="bdSave" type="button">Save snapshot</button><button class="btn" id="bdFork" type="button" hidden>Fork a sandbox from it</button></div>
+        <div class="note" id="bdSaved"></div>
+      </div>
+    </div>
+    <div class="term" id="bdTerm" role="log" aria-live="polite"></div>
   </section>
 
   <section data-tab="snapshots" class="card span-12" style="animation-delay:.45s">
@@ -310,15 +415,23 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
     <h2>Free memory by node</h2><div class="sub">Each row a node, each column a moment. Darker is fuller.</div>
     <canvas id="heat" data-h="210"></canvas>
   </section>
-  <section data-tab="overview" class="card span-5" style="animation-delay:.5s">
+  <section data-tab="overview" class="card span-3" style="animation-delay:.5s">
     <h2>Latency</h2><div class="sub">Milliseconds, log scale. The API, creates, and waiting for the store lock.</div>
     <div class="legend" id="latLegend"></div>
     <svg class="chart" id="c-lat" height="210"></svg>
   </section>
 
-  <section data-tab="activity" class="card span-7" style="animation-delay:.54s">
-    <h2>What happened</h2><div class="sub">Recorded by the master as it samples the fleet</div>
-    <ul class="feed" id="feed"></ul>
+  <section data-tab="activity" class="card span-12" style="animation-delay:.54s">
+    <h2>Activity</h2><div class="sub" id="actSub">What the master recorded as it sampled the fleet: nodes going silent and coming back, refusals, wakes, sandboxes that will not start.</div>
+    <div class="bar">
+      <input id="actQ" type="search" placeholder="Search by node, sandbox or detail">
+      <div class="chips" id="actKinds"></div>
+      <select id="actSince" aria-label="How far back">
+        <option value="3600">Last hour</option><option value="21600">Last 6 hours</option><option value="86400" selected>Last 24 hours</option><option value="172800">Last 2 days</option>
+      </select>
+    </div>
+    <div class="tbl-wrap"><table class="tbl" id="actTable"></table></div>
+    <div class="pager" id="actPager"></div>
   </section>
   <section data-tab="sandboxes" class="card span-5" style="animation-delay:.58s">
     <h2>Not starting</h2><div class="sub" id="failSub"></div>
@@ -399,6 +512,7 @@ const fmt = (n, d = 0) => (n == null || !isFinite(n)) ? "–" : Number(n).toLoca
 const ago = (s) => s < 60 ? `${Math.round(s)}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`;
 const clock = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: range <= 900 ? "2-digit" : undefined });
 const ease = (t) => 1 - Math.pow(1 - t, 3);
+const PAGE_SIZES = [25, 50, 100];
 let token = null;
 try { token = sessionStorage.getItem("sandstorm-token"); } catch (e) {}
 let range = 900;
@@ -532,7 +646,9 @@ function drawIn(p, dur = 1100) {
 // `kind` is "line" or "stack". Hover shows a crosshair and every value.
 function timeChart(svg, series, { kind = "line", log = false, unit = "", first = false } = {}) {
   svg.innerHTML = "";
-  const w = svg.clientWidth || 600, h = Number(svg.getAttribute("height")) || 240;
+  // The box it was given: fixed by its height attribute on a scrolling
+  // page, shared out by the grid on the one-screen overview.
+  const w = svg.clientWidth || 600, h = svg.clientHeight || Number(svg.getAttribute("height")) || 240;
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   const L = 44, R = 10, T = 8, B = 22;
   const all = series.flatMap((s) => s.points);
@@ -616,7 +732,7 @@ function hideTip() { $("tip").classList.remove("on"); }
 const flow = { particles: [], counts: { hot: 0, frozen: 0, snapshot: 0, detached: 0 }, shownCounts: { hot: 0, frozen: 0, snapshot: 0, detached: 0 }, rates: {}, acc: {}, last: performance.now() };
 function flowGeom() {
   const c = $("flow"), dpr = devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
-  if (c.width !== Math.round(w * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+  if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
   const pad = 70, colW = Math.min(110, (w - pad * 2) / 6), gap = (w - pad * 2 - colW * 4) / 3;
   const top = 38, bottom = h - 54;
   const cols = {};
@@ -748,10 +864,33 @@ function donut(tiers) {
 }
 
 // ---- nodes ----------------------------------------------------------------
-function nodeCards(nodes) {
+// Filtered and paged here: the master sends every node with each refresh,
+// and even a large fleet's list is small next to its sandboxes.
+const nd = { q: "", state: "", offset: 0, size: pageSize("nodes", 25) };
+const ND_STATES = [["", "All"], ["up", "Answering"], ["down", "Silent"], ["pressure", "Under pressure"]];
+$("ndState").innerHTML = ND_STATES.map(([v, l]) => `<button type="button" data-v="${v}" aria-pressed="${v === ""}">${l}</button>`).join("");
+$("ndState").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  nd.state = b.dataset.v; nd.offset = 0;
+  for (const x of $("ndState").children) x.setAttribute("aria-pressed", String(x === b));
+  if (NOW) nodeCards(NOW.nodes);
+});
+let ndTyping;
+$("ndQ").addEventListener("input", () => { clearTimeout(ndTyping); ndTyping = setTimeout(() => { nd.q = $("ndQ").value.trim().toLowerCase(); nd.offset = 0; if (NOW) nodeCards(NOW.nodes); }, 150); });
+function nodeCards(all) {
   const box = $("nodes");
-  const up = nodes.filter((n) => n.connected).length;
-  $("nodesSub").textContent = `${up} of ${nodes.length} answering. Ring: free memory. Bar: memory pressure against the 8.0 the master refuses at.`;
+  const up = all.filter((n) => n.connected).length;
+  $("nodesSub").textContent = `${up} of ${all.length} answering. Ring: free memory. Bar: memory pressure against the 8.0 the master refuses at.`;
+  const match = all.filter((n) => (!nd.q || n.id.toLowerCase().includes(nd.q) || n.pool.toLowerCase().includes(nd.q))
+    && (nd.state === "" || (nd.state === "up" ? n.connected : nd.state === "down" ? !n.connected : n.connected && n.psi > 4)));
+  if (nd.offset >= match.length) nd.offset = Math.max(0, Math.floor((match.length - 1) / nd.size) * nd.size);
+  const nodes = match.slice(nd.offset, nd.offset + nd.size);
+  pager($("ndPager"), { offset: nd.offset, size: nd.size, total: match.length, shown: nodes.length }, (off, size) => {
+    if (size !== nd.size) { nd.size = size; keepPageSize("nodes", size); }
+    nd.offset = off; nodeCards(all);
+  });
+  if (!match.length) box.innerHTML = `<div class="empty">${all.length ? "No node matches." : "No nodes yet. Use “+ Add a node”."}</div>`;
+  else box.querySelector(".empty")?.remove();
   const seen = new Set();
   for (const n of nodes) {
     seen.add(n.id);
@@ -788,7 +927,7 @@ function nodeCards(nodes) {
     spark(card.querySelector(".nspark"), freeLine, css("--frozen"));
     card.querySelector(".feats").innerHTML = n.features.map((f) => `<span>${f}</span>`).join("");
   }
-  for (const c of [...box.children]) if (!seen.has(c.dataset.id)) c.remove();
+  for (const c of [...box.children]) if (c.dataset.id && !seen.has(c.dataset.id)) c.remove();
 }
 
 // ---- heatmap --------------------------------------------------------------
@@ -830,19 +969,65 @@ function heat() {
 const hex = (s) => { s = s.replace("#", ""); return [0, 2, 4].map((i) => parseInt(s.slice(i, i + 2), 16)); };
 const mix = (a, b, k) => a.map((v, i) => Math.round(v + (b[i] - v) * Math.max(0, Math.min(1, k))));
 
-// ---- feed and failures -----------------------------------------------------
+// ---- failures ------------------------------------------------------------------
 const ICON = { node_down: ["⏻", "--bad"], node_up: ["⏻", "--good"], failing: ["!", "--warn"], quarantined: ["⛔", "--bad"], refused: ["⊘", "--warn"], woken: ["↺", "--hot"], to_disk: ["⤓", "--snapshot"] };
-let seenEvents = new Set(), firstFeed = true;
-function feed(events) {
-  const ul = $("feed");
-  if (!events.length) { ul.innerHTML = `<div class="empty">Nothing yet. Node changes, refusals, wakes and failures land here.</div>`; return; }
-  const now = Date.now() / 1000;
-  ul.innerHTML = events.map((e) => {
-    const k = e.ts + e.kind + e.subject + e.detail, isNew = !firstFeed && !seenEvents.has(k);
-    const [ic, col] = ICON[e.kind] || ["•", "--muted"];
-    return `<li class="${isNew ? "new" : ""}"><span class="ic" style="background:color-mix(in srgb, var(${col}) 18%, transparent);color:var(${col})">${ic}</span><span><span class="d">${escapeHtml(e.detail)}</span></span><span class="when">${ago(now - e.ts)}</span></li>`;
-  }).join("");
-  seenEvents = new Set(events.map((e) => e.ts + e.kind + e.subject + e.detail)); firstFeed = false;
+const EV_LABEL = { node_down: "Node silent", node_up: "Node back", failing: "Not starting", quarantined: "Quarantined", refused: "Refused", woken: "Woken", to_disk: "To disk" };
+const ACT_KINDS = [["", "All"], ["node_down,node_up", "Nodes"], ["failing,quarantined", "Not starting"], ["refused", "Refused"], ["woken", "Woken"], ["to_disk", "To disk"]];
+
+// ---- activity ---------------------------------------------------------------------
+// Paged and filtered on the master, like the sandboxes: two days of a busy
+// fleet is far more than one page.
+const act = { kind: "", q: "", since: 86400, offset: 0, size: pageSize("activity", 50), total: 0, rows: [], busy: false, seen: null };
+$("actKinds").innerHTML = ACT_KINDS.map(([k, l]) => {
+  const [ic, col] = ICON[k.split(",")[0]] || [];
+  return `<button type="button" data-k="${k}" aria-pressed="${k === ""}">${ic ? `<span style="color:var(${col})">${ic}</span>` : ""}${l}</button>`;
+}).join("");
+$("actKinds").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  act.kind = b.dataset.k; act.offset = 0;
+  for (const x of $("actKinds").children) x.setAttribute("aria-pressed", String(x === b));
+  loadActivity();
+});
+let actTyping;
+$("actQ").addEventListener("input", () => { clearTimeout(actTyping); actTyping = setTimeout(() => { act.q = $("actQ").value.trim(); act.offset = 0; loadActivity(); }, 250); });
+$("actSince").addEventListener("change", () => { act.since = Number($("actSince").value); act.offset = 0; loadActivity(); });
+async function loadActivity() {
+  if (!token || act.busy) return;
+  act.busy = true;
+  try {
+    const qs = new URLSearchParams({ since: act.since, limit: act.size, offset: act.offset });
+    if (act.kind) qs.set("kind", act.kind);
+    if (act.q) qs.set("q", act.q);
+    const { total, rows } = await apiPage("/v1/console/events?" + qs);
+    act.total = total; act.rows = rows;
+    if (act.offset >= total && total > 0) { act.offset = Math.floor((total - 1) / act.size) * act.size; act.busy = false; return loadActivity(); }
+    renderActivity();
+  } catch (e) {
+    if (String(e.message) === "401") return;
+    $("actTable").innerHTML = `<tbody><tr><td><div class="empty">${escapeHtml(errorText(e))}</div></td></tr></tbody>`;
+    $("actPager").innerHTML = "";
+  } finally { act.busy = false; }
+}
+function errorText(e) { let m = String(e.message || e); try { m = JSON.parse(m).error || m; } catch (x) {} return m; }
+function renderActivity() {
+  const nowS = Date.now() / 1000, key = (e) => e.ts + e.kind + e.subject + e.detail;
+  // Only rows that arrive while the first page is open are new.
+  const fresh = act.offset === 0 && act.seen ? (e) => !act.seen.has(key(e)) : () => false;
+  $("actTable").innerHTML = `<thead><tr><th>When</th><th>What</th><th>Node or sandbox</th><th>Detail</th></tr></thead><tbody>` +
+    (act.rows.length ? act.rows.map((e) => {
+      const [ic, col] = ICON[e.kind] || ["•", "--muted"];
+      return `<tr${fresh(e) ? ' class="new"' : ""}>
+        <td class="when" title="${escapeHtml(new Date(e.ts * 1000).toLocaleString())}">${ago(Math.max(0, nowS - e.ts))}</td>
+        <td><span class="evk"><span class="ic" style="background:color-mix(in srgb, var(${col}) 18%, transparent);color:var(${col})">${ic}</span>${escapeHtml(EV_LABEL[e.kind] || e.kind)}</span></td>
+        <td class="id">${escapeHtml(e.subject)}</td>
+        <td><div class="wrap">${escapeHtml(e.detail)}</div></td></tr>`;
+    }).join("")
+    : `<tr><td colspan="4"><div class="empty">${act.kind || act.q ? "Nothing matches." : "Nothing in this window. Node changes, refusals, wakes and failures land here."}</div></td></tr>`) + "</tbody>";
+  if (act.offset === 0) act.seen = new Set(act.rows.map(key));
+  pager($("actPager"), { offset: act.offset, size: act.size, total: act.total, shown: act.rows.length }, (off, size) => {
+    if (size !== act.size) { act.size = size; keepPageSize("activity", size); }
+    act.offset = off; loadActivity();
+  });
 }
 function failing(list, total) {
   $("failSub").textContent = total ? `${total} sandboxes carry an error from their node` : "Every sandbox the nodes were asked to start is running";
@@ -854,18 +1039,34 @@ const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "
 // In the hash, so a reload or a shared link lands on the same one.
 const TABS = ["overview", "nodes", "sandboxes", "snapshots", "activity"];
 let tab = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "overview";
+function placeTabInd() {
+  const a = $("tabs").querySelector(`a[data-go="${tab}"]`); if (!a) return;
+  const ind = $("tabInd");
+  ind.style.width = a.offsetWidth + "px";
+  ind.style.transform = `translateX(${a.offsetLeft}px)`;
+}
 function showTab(t) {
+  const was = tab;
   tab = TABS.includes(t) ? t : "overview";
   for (const sec of document.querySelectorAll("main > [data-tab]")) sec.hidden = sec.dataset.tab !== tab;
   for (const a of $("tabs").querySelectorAll("a")) {
     if (a.dataset.go === tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+  }
+  for (const x of TABS) document.body.classList.toggle("tab-" + x, x === tab);
+  document.documentElement.style.setProperty("--head", document.querySelector("header").offsetHeight + "px");
+  placeTabInd();
+  if (was !== tab && document.body.classList.contains("settled")) {
+    const m = document.querySelector("main");
+    m.classList.remove("entering"); void m.offsetWidth; m.classList.add("entering");
+    clearTimeout(showTab.t); showTab.t = setTimeout(() => m.classList.remove("entering"), 500);
   }
   // The time range only shapes the charts.
   $("range").style.visibility = tab === "overview" || tab === "nodes" ? "" : "hidden";
   // Charts measure their box, which is nothing while hidden.
   requestAnimationFrame(() => redrawAll());
   if (tab === "sandboxes") loadSandboxes();
-  if (tab === "snapshots") loadSnapshots();
+  if (tab === "snapshots") { loadSnapshots(); builderOptions(); }
+  if (tab === "activity") loadActivity();
 }
 addEventListener("hashchange", () => showTab(location.hash.slice(1)));
 
@@ -910,10 +1111,9 @@ async function refresh(first = false) {
   if (!token) { showGate(); return; }
   try {
     const step = range <= 900 ? 5 : undefined;
-    const [now, series, events] = await Promise.all([
+    const [now, series] = await Promise.all([
       api("/v1/console/now"),
       api(`/v1/console/series?since=${range}` + (step ? `&step=${step}` : "")),
-      api(`/v1/console/events?since=${Math.max(range, 3600)}&limit=60`),
     ]);
     NOW = now; S = series; lastOk = Date.now();
     const tiers = Object.fromEntries(TIERS.map((t) => [t, now.tiers[t] || 0]));
@@ -950,11 +1150,10 @@ async function refresh(first = false) {
     }
     if (tab === "sandboxes") loadSandboxes();
     if (tab === "snapshots") loadSnapshots();
+    if (tab === "activity" && act.offset === 0) loadActivity();
     $("n-nodes").textContent = now.nodes.length ? `${up}/${now.nodes.length}` : "";
     $("n-sandboxes").textContent = total ? compact(total) : "";
-    $("n-snapshots").textContent = now.snapshots ? fmt(now.snapshots) : "";
     $("n-nodes").classList.toggle("bad", up < now.nodes.length);
-    feed(events);
     failing(now.failing, now.failed);
     setLive();
   } catch (e) {
@@ -967,12 +1166,14 @@ function setLive(err) {
   $("liveText").textContent = err && !lastOk ? "cannot reach the master" : `live · updated ${ago(age)}`;
 }
 setInterval(() => lastOk && setLive(), 1000);
-addEventListener("resize", () => redrawAll());
+addEventListener("resize", () => {
+  document.documentElement.style.setProperty("--head", document.querySelector("header").offsetHeight + "px");
+  placeTabInd(); redrawAll();
+});
 // ---- sandboxes ----------------------------------------------------------------
 // A page of the fleet's sandboxes, filtered on the master: on a fleet of
-// 20,000 the whole list is about 10 MB, and the table only ever shows 50.
-const SB_PAGE = 50;
-const sb = { tier: "", q: "", node: "", offset: 0, total: 0, rows: [], busy: false };
+// 20,000 the whole list is about 10 MB, and the table only shows a page.
+const sb = { tier: "", q: "", node: "", offset: 0, size: pageSize("sandboxes", 50), total: 0, rows: [], busy: false };
 const SB_CHIPS = [["", "All"], ...TIERS.map((t) => [t, TIER_LABEL[t]]), ["failing", "Failing"]];
 $("sbTiers").innerHTML = SB_CHIPS.map(([t, l]) => `<button type="button" data-t="${t}" aria-pressed="${t === "" }">${t && t !== "failing" ? `<i class="swatch" style="background:var(--${t})"></i>` : ""}${l}</button>`).join("");
 $("sbTiers").addEventListener("click", (e) => {
@@ -984,8 +1185,41 @@ $("sbTiers").addEventListener("click", (e) => {
 let sbTyping;
 $("sbQ").addEventListener("input", () => { clearTimeout(sbTyping); sbTyping = setTimeout(() => { sb.q = $("sbQ").value.trim(); sb.offset = 0; sel.clear(); loadSandboxes(); }, 250); });
 $("sbNode").addEventListener("change", () => { sb.node = $("sbNode").value; sb.offset = 0; sel.clear(); loadSandboxes(); });
-$("sbPrev").onclick = () => { sb.offset = Math.max(0, sb.offset - SB_PAGE); loadSandboxes(); };
-$("sbNext").onclick = () => { if (sb.offset + SB_PAGE < sb.total) { sb.offset += SB_PAGE; loadSandboxes(); } };
+
+// ---- pager ---------------------------------------------------------------------
+// Shared by every table. The size a page holds is remembered per table, in
+// this browser only.
+function pageSize(name, dflt) {
+  try { const v = Number(localStorage.getItem("sandstorm-console-page-" + name)); return PAGE_SIZES.includes(v) ? v : dflt; } catch (e) { return dflt; }
+}
+function keepPageSize(name, v) { try { localStorage.setItem("sandstorm-console-page-" + name, String(v)); } catch (e) {} }
+// The first and last page, the ones either side of this one, and gaps.
+function pageList(cur, pages) {
+  const want = new Set([0, pages - 1, cur - 1, cur, cur + 1]);
+  if (cur <= 3) for (let p = 1; p <= 4; p++) want.add(p);
+  if (cur >= pages - 4) for (let p = pages - 5; p < pages - 1; p++) want.add(p);
+  return [...want].filter((p) => p >= 0 && p < pages).sort((a, b) => a - b);
+}
+function pager(node, { offset, size, total, shown }, go) {
+  if (!total) { node.innerHTML = ""; return; }
+  const pages = Math.max(1, Math.ceil(total / size)), cur = Math.min(pages - 1, Math.floor(offset / size));
+  let nums = "", prev = -1;
+  for (const p of pageList(cur, pages)) {
+    if (p - prev > 1) nums += `<span class="gap">…</span>`;
+    nums += `<button type="button" data-p="${p}"${p === cur ? ' aria-current="page"' : ""} aria-label="Page ${p + 1}">${fmt(p + 1)}</button>`;
+    prev = p;
+  }
+  node.innerHTML = `<span class="count">${fmt(offset + 1)}–${fmt(Math.min(total, offset + shown))} of ${fmt(total)}</span>
+    <span class="pages"><button type="button" data-p="${cur - 1}"${cur === 0 ? " disabled" : ""} aria-label="Previous page">‹</button>${nums}<button type="button" data-p="${cur + 1}"${cur >= pages - 1 ? " disabled" : ""} aria-label="Next page">›</button></span>
+    <label class="size"><select aria-label="Rows a page">${PAGE_SIZES.map((n) => `<option${n === size ? " selected" : ""}>${n}</option>`).join("")}</select> a page</label>`;
+  node.onclick = (e) => { const b = e.target.closest("button[data-p]"); if (b && !b.disabled) { go(Number(b.dataset.p) * size, size); toTableTop(node); } };
+  node.querySelector("select").onchange = (e) => { go(0, Number(e.target.value)); toTableTop(node); };
+}
+// A new page starts at its first row, not wherever the pager left you.
+function toTableTop(node) {
+  const card = node.closest(".card");
+  if (card && card.getBoundingClientRect().top < 0) card.scrollIntoView({ behavior: "smooth", block: "start" });
+}
 
 async function apiPage(path) {
   const r = await fetch(path, { headers: token ? { authorization: "Bearer " + token } : {} });
@@ -997,13 +1231,13 @@ async function loadSandboxes() {
   if (!token || sb.busy) return;
   sb.busy = true;
   try {
-    const qs = new URLSearchParams({ limit: SB_PAGE, offset: sb.offset });
+    const qs = new URLSearchParams({ limit: sb.size, offset: sb.offset });
     if (sb.tier === "failing") qs.set("failing", "true"); else if (sb.tier) qs.set("tier", sb.tier);
     if (sb.q) qs.set("q", sb.q);
     if (sb.node) qs.set("node", sb.node);
     const { total, rows } = await apiPage("/v1/sandboxes?" + qs);
     sb.total = total; sb.rows = rows;
-    if (sb.offset >= total && total > 0) { sb.offset = Math.floor((total - 1) / SB_PAGE) * SB_PAGE; sb.busy = false; return loadSandboxes(); }
+    if (sb.offset >= total && total > 0) { sb.offset = Math.floor((total - 1) / sb.size) * sb.size; sb.busy = false; return loadSandboxes(); }
     renderSandboxes();
   } catch (e) { if (String(e.message) !== "401") flash(String(e.message || e), true); }
   finally { sb.busy = false; }
@@ -1034,9 +1268,10 @@ function renderSandboxes() {
       <td class="r">${ago(Math.max(0, nowS - b.last_active_at))}</td>
       <td class="r"><button type="button" class="kebab" data-menu="${escapeHtml(b.id)}" aria-haspopup="menu" aria-label="Actions for ${escapeHtml(b.id)}">⋯</button></td></tr>`).join("")
     : `<tr><td colspan="7"><div class="empty">${sb.total === 0 && !sb.q && !sb.tier && !sb.node ? "No sandboxes yet. Use “+ New sandbox”, or POST /v1/sandboxes." : "Nothing matches."}</div></td></tr>`) + "</tbody>";
-  const end = Math.min(sb.total, sb.offset + sb.rows.length);
-  $("sbRange").textContent = sb.total ? `${fmt(sb.offset + 1)}–${fmt(end)} of ${fmt(sb.total)}` : "";
-  $("sbPrev").disabled = sb.offset === 0; $("sbNext").disabled = end >= sb.total;
+  pager($("sbPager"), { offset: sb.offset, size: sb.size, total: sb.total, shown: sb.rows.length }, (off, size) => {
+    if (size !== sb.size) { sb.size = size; keepPageSize("sandboxes", size); }
+    sb.offset = off; loadSandboxes();
+  });
   renderSelBar();
 }
 function renderSelBar() {
@@ -1170,6 +1405,171 @@ $("snapTable").addEventListener("click", async (e) => {
   }
   loadSnapshots();
 });
+
+// ---- snapshot builder -------------------------------------------------------------
+// A build sandbox, commands run in it one after another, and a branch of it
+// saved under a name. Every step is a call to the public API, so this does
+// exactly what a script would. The build sandbox's id and token are kept in
+// this tab, so a reload does not leave it running with nobody to finish it.
+const bd = { id: null, token: null, node: null, base: "", running: false, saved: null, checked: false };
+try { Object.assign(bd, JSON.parse(sessionStorage.getItem("sandstorm-build") || "{}")); } catch (e) {}
+function keepBuild() {
+  try {
+    if (bd.id) sessionStorage.setItem("sandstorm-build", JSON.stringify({ id: bd.id, token: bd.token, node: bd.node, base: bd.base }));
+    else sessionStorage.removeItem("sandstorm-build");
+  } catch (e) {}
+}
+function term(html) { const t = $("bdTerm"); t.insertAdjacentHTML("beforeend", html); t.scrollTop = t.scrollHeight; }
+function termLine(cls, text) { term(`<div${cls ? ` class="${cls}"` : ""}>${escapeHtml(text)}</div>`); }
+const bdFrom = () => document.querySelector('input[name="bdFrom"]:checked').value;
+function builderStep() {
+  const live = !!bd.id;
+  $("bdS1").className = "step " + (live ? "done" : "now");
+  $("bdS2").className = "step " + (live ? "now" : "off");
+  $("bdS3").className = "step " + (live ? "" : bd.saved ? "done" : "off");
+  for (const x of $("bdS1").querySelectorAll("input, select, button")) x.disabled = live || bd.running;
+  for (const id of ["bdCmds", "bdRun", "bdTimeout", "bdTag", "bdSave", "bdCleanup"]) $(id).disabled = !live || bd.running;
+  $("bdFork").hidden = !bd.saved; $("bdFork").disabled = bd.running;
+  $("bdDiscard").hidden = !live; $("bdDiscard").disabled = bd.running;
+  $("bdWho").innerHTML = live ? `Build sandbox <code>${escapeHtml(bd.id)}</code> on <b>${escapeHtml(bd.node || "?")}</b>, from ${escapeHtml(bd.base)}.` : "";
+  $("bdStart").textContent = bd.saved && !live ? "Start another build" : "Start a build sandbox";
+}
+function bdBusy(on) { bd.running = on; builderStep(); }
+async function builderOptions() {
+  if (!token) return;
+  try {
+    const opts = bdFrom() === "template"
+      ? (await api("/v1/templates")).map((t) => (typeof t === "string" ? t : t.name))
+      : (await api("/v1/snapshots")).sort((a, b) => b.created_at - a.created_at).map((x) => x.tag);
+    const keep = $("bdBase").value;
+    $("bdBase").innerHTML = opts.length ? opts.map((o) => `<option${o === keep ? " selected" : ""}>${escapeHtml(o)}</option>`).join("")
+      : `<option value="">${bdFrom() === "template" ? "No templates registered" : "No snapshots yet"}</option>`;
+    const nodes = NOW ? NOW.nodes.filter((n) => n.connected).map((n) => n.id) : [];
+    const keepNode = $("bdNode").value;
+    $("bdNode").innerHTML = `<option value="">Any node with room</option>` + nodes.map((n) => `<option${n === keepNode ? " selected" : ""}>${escapeHtml(n)}</option>`).join("");
+    // A build left from before a reload: carry on with it if it is still there.
+    if (bd.id && !bd.checked) {
+      bd.checked = true;
+      try { await api(`/v1/sandboxes/${encodeURIComponent(bd.id)}`); termLine("dim", `Carrying on with build sandbox ${bd.id}.`); }
+      catch (e) { if (e.status === 404) { termLine("dim", `Build sandbox ${bd.id} is gone; start another.`); bd.id = null; keepBuild(); } }
+    }
+  } catch (e) { if (String(e.message) !== "401") termLine("bad", errorText(e)); }
+  builderStep();
+}
+for (const r of document.querySelectorAll('input[name="bdFrom"]')) r.addEventListener("change", builderOptions);
+async function execIn(args, timeout) {
+  const r = await fetch(`/v1/sandboxes/${encodeURIComponent(bd.id)}/exec`, {
+    method: "POST",
+    headers: { authorization: "Bearer " + token, "x-sandstorm-sandbox-token": bd.token, "content-type": "application/json" },
+    body: JSON.stringify({ args, timeout_secs: timeout }),
+  });
+  const text = await r.text();
+  let j = null; try { j = JSON.parse(text); } catch (e) {}
+  if (!r.ok) { const e = new Error((j && j.error) || text || String(r.status)); e.status = r.status; throw e; }
+  return j;
+}
+// Running, and answering commands. The master's idle timers may have put the
+// build sandbox away while it waited for you, so wake it if they have.
+async function bdReady(limit = 90) {
+  const t0 = Date.now(); let touched = false, last = "";
+  while (Date.now() - t0 < limit * 1000) {
+    try { await execIn(["true"], 10); return; } catch (e) {
+      if (e.status === 404 || e.status === 403) throw e;
+      last = errorText(e);
+      if (!touched) { touched = true; termLine("dim", "Waking the build sandbox…"); await api(`/v1/sandboxes/${encodeURIComponent(bd.id)}/touch`, {}).catch(() => {}); }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  throw new Error(`It did not start answering within ${limit} s: ${last}`);
+}
+$("bdStart").onclick = async () => {
+  const from = bdFrom(), base = $("bdBase").value;
+  if (!base) { termLine("bad", from === "template" ? "Register a template first (POST /v1/templates)." : "There is no snapshot to start from yet."); return; }
+  const body = from === "template" ? { template: base } : { snapshot_tag: base };
+  if ($("bdNode").value) body.node_id = $("bdNode").value;
+  $("bdTerm").innerHTML = ""; $("bdSaved").innerHTML = ""; bd.saved = null;
+  bdBusy(true);
+  termLine("dim", `Starting a build sandbox from ${from} ${base}…`);
+  try {
+    const r = await api("/v1/sandboxes", body);
+    const v = Array.isArray(r) ? r[0] : r;
+    Object.assign(bd, { id: v.id, token: v.token, node: v.node_id, base: `${from} ${base}`, checked: true }); keepBuild();
+    termLine("dim", `Created ${v.id} on ${v.node_id}. Waiting for it to answer…`);
+    await bdReady();
+    termLine("ok", "Ready. Run commands to set it up, or save it as it is.");
+    $("bdCmds").focus();
+  } catch (e) { termLine("bad", errorText(e)); }
+  finally { bdBusy(false); }
+};
+$("bdRun").onclick = async () => {
+  const lines = $("bdCmds").value.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+  if (!lines.length) { termLine("dim", "Nothing to run: write a command a line."); return; }
+  const timeout = Math.max(1, Math.min(3600, Number($("bdTimeout").value) || 300));
+  bdBusy(true);
+  try {
+    await bdReady();
+    for (const cmd of lines) {
+      term(`<div class="cmd">$ ${escapeHtml(cmd)}</div>`);
+      const t0 = performance.now();
+      const r = await execIn(["sh", "-c", cmd], timeout);
+      if (r.stdout) termLine("", r.stdout.replace(/\n$/, ""));
+      if (r.stderr) termLine("bad", r.stderr.replace(/\n$/, ""));
+      termLine(r.exit_code === 0 ? "ok" : "bad", `exit ${r.exit_code} · ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+      if (r.exit_code !== 0) { termLine("bad", "Stopped there. What ran before it is still in the sandbox; fix the command and run again."); break; }
+    }
+  } catch (e) { termLine("bad", errorText(e)); }
+  finally { bdBusy(false); }
+};
+function tagProblem(tag) {
+  if (!tag) return "Give it a name.";
+  if (tag.length > 128) return "At most 128 characters.";
+  if (/[\/\\\0]/.test(tag) || tag.includes("..") || tag.startsWith(".")) return "A plain name: no slashes, no “..”, and not starting with a dot.";
+  return "";
+}
+$("bdTag").addEventListener("input", () => { $("bdTagHint").hidden = true; });
+$("bdSave").onclick = async () => {
+  const tag = $("bdTag").value.trim(), why = tagProblem(tag);
+  if (why) { $("bdTagHint").textContent = why; $("bdTagHint").hidden = false; $("bdTag").focus(); return; }
+  bdBusy(true);
+  try {
+    await bdReady();
+    termLine("dim", `Saving ${tag}. The sandbox pauses for a moment while it is checkpointed…`);
+    const snap = await api(`/v1/sandboxes/${encodeURIComponent(bd.id)}/branch`, { tag });
+    bd.saved = snap;
+    termLine("ok", `Saved ${snap.tag} on ${snap.node_id}${snap.size_bytes != null ? ` · ${mib(snap.size_bytes)}` : ""}.`);
+    $("bdSaved").innerHTML = `Saved <b>${escapeHtml(snap.tag)}</b>. A new sandbox forks from it with <code>{"snapshot_tag": "${escapeHtml(snap.tag)}"}</code>.`;
+    if ($("bdCleanup").checked) {
+      const id = bd.id;
+      await fetch("/v1/sandboxes/" + encodeURIComponent(id), { method: "DELETE", headers: { authorization: "Bearer " + token } });
+      bd.id = null; bd.token = null; keepBuild();
+      termLine("dim", `Deleted the build sandbox ${id}.`);
+    }
+    loadSnapshots();
+  } catch (e) { termLine("bad", errorText(e)); }
+  finally { bdBusy(false); }
+};
+$("bdFork").onclick = async () => {
+  if (!bd.saved) return;
+  bdBusy(true);
+  try {
+    const r = await api("/v1/sandboxes", { snapshot_tag: bd.saved.tag });
+    const v = Array.isArray(r) ? r[0] : r;
+    termLine("ok", `Forked ${v.id} from ${bd.saved.tag} on ${v.node_id}. It is in the Sandboxes tab.`);
+  } catch (e) { termLine("bad", errorText(e)); }
+  finally { bdBusy(false); }
+};
+$("bdDiscard").onclick = async () => {
+  const b = $("bdDiscard");
+  if (!b.classList.contains("armed")) { arm(b, "Discard the build"); return; }
+  bdBusy(true);
+  try {
+    await fetch("/v1/sandboxes/" + encodeURIComponent(bd.id), { method: "DELETE", headers: { authorization: "Bearer " + token } });
+    termLine("dim", `Deleted the build sandbox ${bd.id}. Nothing was saved from it.`);
+    bd.id = null; bd.token = null; keepBuild();
+  } catch (e) { termLine("bad", errorText(e)); }
+  finally { bdBusy(false); }
+};
+builderStep();
 
 // ---- new sandbox ----------------------------------------------------------------
 $("newSb").onclick = async () => {

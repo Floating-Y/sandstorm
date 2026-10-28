@@ -507,6 +507,14 @@ struct EventsQuery {
     since: i64,
     #[serde(default = "default_events_limit")]
     limit: u32,
+    #[serde(default)]
+    offset: u32,
+    /// Comma-separated event kinds; all of them if absent.
+    #[serde(default)]
+    kind: Option<String>,
+    /// Matched against subject and detail, ignoring case.
+    #[serde(default)]
+    q: Option<String>,
 }
 
 fn default_events_since() -> i64 {
@@ -517,18 +525,32 @@ fn default_events_limit() -> u32 {
     100
 }
 
+/// A page of what the master recorded, newest first, with the number that
+/// match in `x-total-count` -- the same shape as `GET /v1/sandboxes`.
 async fn console_events(
     State(st): State<St>,
     axum::extract::Query(q): axum::extract::Query<EventsQuery>,
-) -> Result<Json<Vec<super::series::Event>>, ApiErr> {
+) -> Result<impl IntoResponse, ApiErr> {
     let series = console_history(&st)?;
     let since = now_secs() - q.since.max(0);
     let limit = q.limit.clamp(1, 1000);
-    let ev = tokio::task::spawn_blocking(move || series.events(since, limit))
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(ev))
+    let kinds: Vec<String> = q
+        .kind
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(String::from)
+        .collect();
+    let needle = q.q.unwrap_or_default().trim().to_string();
+    let (ev, total) = tokio::task::spawn_blocking(move || {
+        series.events_page(since, &kinds, &needle, limit, q.offset)
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(([("x-total-count", total.to_string())], Json(ev)))
 }
 
 #[derive(Serialize)]

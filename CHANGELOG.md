@@ -36,8 +36,26 @@ the one time the master hands it out; and the snapshots, with delete.
 of them it is the whole list, as before.
 
 It is in five tabs -- Overview, Nodes, Sandboxes, Snapshots and Activity --
-kept in the URL's hash, with counts on the tabs. The sandbox and snapshot
-lists are fetched only while their tab is open.
+kept in the URL's hash, with counts on the tabs, a highlight that slides to
+the one picked, and the new tab's cards rising in. The sandbox and snapshot
+lists, and the activity, are fetched only while their tab is open.
+
+The overview fits one screen wherever the window is at least 1201 by 620:
+the cards share the height under the header, and the charts draw to the box
+they get. Smaller, it scrolls as before.
+
+Sandboxes, nodes and activity share one pager: the range shown, the pages
+within reach, and 25, 50 or 100 a page, remembered per table. Nodes can be
+searched and narrowed to answering, silent or under pressure. Activity is a
+table like the sandboxes', narrowed by kind, a search and how far back;
+`GET /v1/console/events` takes `offset`, `kind` (comma-separated) and `q`,
+and says the matching total in `x-total-count`.
+
+**Build a snapshot** on the Snapshots tab: start a sandbox from a template or
+a snapshot, run commands in it one after another with their output, and
+save it under a name, optionally deleting the build sandbox and forking one
+from the result. Every step is a public API call, and a build survives a
+reload of the tab.
 
 ### A web panel, and a join command that works
 
