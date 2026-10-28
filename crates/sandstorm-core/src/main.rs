@@ -153,6 +153,16 @@ struct ServeArgs {
     /// should differ. Defaults to --admit-max-psi.
     #[arg(long)]
     wake_max_psi: Option<f64>,
+    /// How long a wake may take to start -- waiting for a restore slot,
+    /// then for memory pressure to ease -- before the request is answered
+    /// 503 with retry-after. Overload is refused quickly rather than
+    /// queued.
+    #[arg(long, default_value_t = 2000)]
+    wake_budget_ms: u64,
+    /// How many wakes may wait for a restore slot at once; one further back
+    /// is refused at once. Defaults to twice the slots (one per CPU).
+    #[arg(long)]
+    wake_max_waiting: Option<usize>,
 
     /// Squeeze a frozen sandbox's memory into compressed swap: auto, on or
     /// off. Auto turns it on where swap is zswap or zram, which on bm took
@@ -448,6 +458,8 @@ async fn serve(a: ServeArgs) -> Result<()> {
             admit_min_free_mib: a.admit_min_free_mib,
             admit_max_psi: a.admit_max_psi,
             wake_max_psi: a.wake_max_psi.unwrap_or(a.admit_max_psi),
+            wake_budget: Duration::from_millis(a.wake_budget_ms),
+            wake_max_waiting: a.wake_max_waiting,
             features,
             fetches: Default::default(),
         };

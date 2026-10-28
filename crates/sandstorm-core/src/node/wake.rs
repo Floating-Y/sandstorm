@@ -29,23 +29,44 @@
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::proto::ObservedSandbox;
 use crate::tier::Tier;
 
-/// How recently a sandbox must have served a request for a wake not to put
-/// it away to make room: one that answered in the last moment is likely
-/// part of a conversation still going on.
+/// How long a sandbox that has just come up -- created, or restored for the
+/// master -- is spared from being put away to make room, so that the
+/// request it came up for has time to reach it. Past that, only a request
+/// in flight keeps a sandbox from being put away.
 ///
-/// Much shorter than `GRACE`, which guards against something else -- the
-/// master demoting on a view that predates a request. Measured on bm with
-/// `GRACE` here instead: at 4 req/s over 40 app64 sandboxes, most hot ones
-/// had served something in the last 15 s, so a wake under the floor found
-/// nothing it was allowed to put away and 7.5% of requests were refused,
-/// with sandboxes idle for 5 to 15 s holding the memory.
-pub const KEEP_IF_USED_WITHIN: Duration = Duration::from_secs(2);
+/// This used to be how long ANY sandbox that had served a request was
+/// spared, a stand-in for "in use". On 2026-10-28, at 80 per node and
+/// 8 req/s, it spared nearly every hot sandbox at once -- one that had
+/// answered its only request a second ago as much as a busy one -- and 26%
+/// of requests were refused for want of anything to put away.
+pub const JUST_STARTED: Duration = Duration::from_secs(2);
+
+/// How long a wake may take to start before it is refused: waiting for a
+/// restore permit, then for memory pressure to ease. What is left of it
+/// when the wake gets its permit is how long it may wait out pressure.
+///
+/// A caller is better served by a quick 503 with `retry-after` than by a
+/// long wait. On 2026-10-28, at 80 per node and 8 req/s, wakes queued with
+/// no bound: refusals fell to 14%, but the answered requests' p50 went from
+/// 13 ms to 4.6 s, a popular sandbox's wake waiting 12 s behind the wakes
+/// of sandboxes called once. Before that, waiting out pressure for up to
+/// 8 s on its own had saved 8 of 600 wakes from being refused for pressure
+/// their own restores caused; most of that is inside this.
+pub const WAKE_BUDGET: Duration = Duration::from_secs(2);
+
+/// The time constant of a sandbox's demand: each request adds one, and the
+/// total decays by `e` every this long. Ranks how frequently and how
+/// recently a sandbox is asked for in one number, so a wake puts away the
+/// sandbox least likely to be asked for next: one called once before one
+/// called often, and of two called once, the one called longer ago.
+pub const DEMAND_WINDOW: Duration = Duration::from_secs(30);
 
 /// How long after a request a sandbox is safe from demotion.
 ///
@@ -78,7 +99,9 @@ pub mod predict {
     pub const LEAD: Duration = Duration::from_secs(20);
 }
 
-type WakeFn = dyn Fn(&Wakeups, &str) -> Result<()> + Send + Sync;
+/// Brings a sandbox to Hot, waiting out memory pressure for at most the
+/// `Duration` it is given.
+type WakeFn = dyn Fn(&Wakeups, &str, Duration) -> Result<()> + Send + Sync;
 
 pub struct Wakeups {
     /// One per sandbox, held across any tier change -- a wake, or a command
@@ -92,6 +115,15 @@ pub struct Wakeups {
     /// it is kept for the sandbox's life: it is how a wake that needs
     /// memory picks which idle sandbox to put away.
     used: Mutex<HashMap<String, Instant>>,
+    /// Requests through the gateway not yet answered. A sandbox with any is
+    /// never put away to make room.
+    in_flight: Mutex<HashMap<String, usize>>,
+    /// When each sandbox came up without a request: created, or restored
+    /// for the master. See `JUST_STARTED`.
+    fresh: Mutex<HashMap<String, Instant>>,
+    /// Each sandbox's decaying request count, and when it was last brought
+    /// up to date. See `DEMAND_WINDOW`.
+    demand: Mutex<HashMap<String, (f64, Instant)>>,
     /// Sandboxes put to disk here to make room for a wake, and when.
     evicted: Mutex<HashMap<String, Instant>>,
     /// Restores read whole images from disk, so a burst of wakes for
@@ -108,12 +140,21 @@ pub struct Wakeups {
     arrivals: Mutex<HashMap<String, VecDeque<Instant>>>,
     /// The arrival a prefetch was last done after, so one is done per cycle.
     prefetched: Mutex<HashMap<String, Instant>>,
+    /// See `WAKE_BUDGET`.
+    budget: Duration,
+    /// How many wakes may wait for a restore permit at once. One that would
+    /// be further back is refused at once: it would not start in time.
+    max_waiting: usize,
+    waiting: AtomicUsize,
 }
 
 impl Wakeups {
     /// `wake` brings a sandbox to Hot and returns when it is serving. It
-    /// blocks, and is called with that sandbox's lock held.
-    pub fn new(wake: impl Fn(&Wakeups, &str) -> Result<()> + Send + Sync + 'static) -> Self {
+    /// blocks, and is called with that sandbox's lock held and how long it
+    /// may wait out memory pressure.
+    pub fn new(
+        wake: impl Fn(&Wakeups, &str, Duration) -> Result<()> + Send + Sync + 'static,
+    ) -> Self {
         let parallel = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(2)
@@ -123,13 +164,30 @@ impl Wakeups {
             seen: Mutex::default(),
             unreported: Mutex::default(),
             used: Mutex::default(),
+            in_flight: Mutex::default(),
+            fresh: Mutex::default(),
+            demand: Mutex::default(),
             evicted: Mutex::default(),
             restores: Arc::new(tokio::sync::Semaphore::new(parallel)),
             wake: Box::new(wake),
             woke: tokio::sync::Notify::new(),
             arrivals: Mutex::default(),
             prefetched: Mutex::default(),
+            budget: WAKE_BUDGET,
+            // Two each: about as many as can start within the budget when
+            // a restore takes half a second to a second.
+            max_waiting: 2 * parallel,
+            waiting: AtomicUsize::new(0),
         }
+    }
+
+    /// Other limits than `WAKE_BUDGET` and twice the restore permits.
+    pub fn with_limits(mut self, budget: Duration, max_waiting: Option<usize>) -> Self {
+        self.budget = budget;
+        if let Some(n) = max_waiting {
+            self.max_waiting = n;
+        }
+        self
     }
 
     /// The lock for one sandbox's tier.
@@ -139,7 +197,14 @@ impl Wakeups {
 
     /// A request for this sandbox reached the gateway.
     pub fn saw(&self, id: &str) {
-        let now = Instant::now();
+        self.saw_at(id, Instant::now());
+    }
+
+    fn saw_at(&self, id: &str, now: Instant) {
+        let mut demand = self.demand.lock();
+        let d = demand.entry(id.to_string()).or_insert((0.0, now));
+        *d = (decayed(*d, now) + 1.0, now);
+        drop(demand);
         let prev = self.seen.lock().insert(id.to_string(), now);
         self.used.lock().insert(id.to_string(), now);
         self.unreported.lock().insert(id.to_string());
@@ -225,44 +290,72 @@ impl Wakeups {
         self.used.lock().insert(id.to_string(), now);
     }
 
-    /// A sandbox came up here. It counts as used from now, so one that has
-    /// just started is not the first to be put away.
+    /// A sandbox came up here with no request yet: created, or restored for
+    /// the master. Spared for `JUST_STARTED`.
     pub fn started(&self, id: &str) {
-        self.used.lock().insert(id.to_string(), Instant::now());
+        let now = Instant::now();
+        self.used.lock().insert(id.to_string(), now);
+        self.fresh.lock().insert(id.to_string(), now);
     }
 
-    /// Whether this sandbox was used within `KEEP_IF_USED_WITHIN`, which
-    /// keeps it from being put away to make room.
-    pub fn recently_used(&self, id: &str, now: Instant) -> bool {
-        self.used
-            .lock()
-            .get(id)
-            .is_some_and(|at| now.saturating_duration_since(*at) < KEEP_IF_USED_WITHIN)
+    /// A request for this sandbox is on its way through the gateway. Until
+    /// the returned guard is dropped -- once the answer is in hand, or the
+    /// caller has gone -- the sandbox is not put away to make room.
+    pub fn hold(self: &Arc<Self>, id: &str) -> InFlight {
+        *self.in_flight.lock().entry(id.to_string()).or_default() += 1;
+        InFlight {
+            wake: self.clone(),
+            id: id.to_string(),
+        }
+    }
+
+    /// Whether this sandbox may not be put away to make room: a request is
+    /// in flight, or it has only just come up.
+    pub fn protected(&self, id: &str, now: Instant) -> bool {
+        self.in_flight.lock().get(id).is_some_and(|n| *n > 0)
+            || self
+                .fresh
+                .lock()
+                .get(id)
+                .is_some_and(|at| now.saturating_duration_since(*at) < JUST_STARTED)
     }
 
     /// Which sandboxes a wake may put to disk to make room, best first.
     ///
     /// Frozen before Hot -- a frozen one has already been idle long enough
-    /// for the master to say so -- and within each, the one used longest
-    /// ago; one with no record (adopted across a restart) counts as oldest.
-    /// Never `except`, the sandbox being woken, and never one that served a
-    /// request in the last `KEEP_IF_USED_WITHIN`.
+    /// for the master to say so -- and within each, the one least in demand
+    /// (`DEMAND_WINDOW`), then the one used longest ago; one with no record
+    /// (adopted across a restart) comes first. Never `except`, the sandbox
+    /// being woken, and never one that is `protected`.
     pub fn victims(&self, observed: &[ObservedSandbox], except: &str, now: Instant) -> Vec<String> {
-        let used = self.used.lock();
-        let recent = |id: &str| {
-            used.get(id)
-                .is_some_and(|at| now.saturating_duration_since(*at) < KEEP_IF_USED_WITHIN)
-        };
-        let mut ranked: Vec<(bool, Option<Instant>, &str)> = observed
+        let candidates: Vec<&ObservedSandbox> = observed
             .iter()
             .filter(|o| o.id != except && matches!(o.tier, Tier::Hot | Tier::Frozen))
-            .filter(|o| !recent(&o.id))
-            .map(|o| (o.tier == Tier::Hot, used.get(&o.id).copied(), o.id.as_str()))
+            .filter(|o| !self.protected(&o.id, now))
             .collect();
-        ranked.sort();
+        let used = self.used.lock();
+        let demand = self.demand.lock();
+        let mut ranked: Vec<(bool, f64, Option<Instant>, &str)> = candidates
+            .into_iter()
+            .map(|o| {
+                let wanted = demand.get(&o.id).map_or(0.0, |d| decayed(*d, now));
+                (
+                    o.tier == Tier::Hot,
+                    wanted,
+                    used.get(&o.id).copied(),
+                    o.id.as_str(),
+                )
+            })
+            .collect();
+        ranked.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(a.1.total_cmp(&b.1))
+                .then(a.2.cmp(&b.2))
+                .then(a.3.cmp(b.3))
+        });
         ranked
             .into_iter()
-            .map(|(_, _, id)| id.to_string())
+            .map(|(_, _, _, id)| id.to_string())
             .collect()
     }
 
@@ -304,6 +397,8 @@ impl Wakeups {
         self.locks.lock().remove(id);
         self.seen.lock().remove(id);
         self.used.lock().remove(id);
+        self.fresh.lock().remove(id);
+        self.demand.lock().remove(id);
         self.evicted.lock().remove(id);
         self.unreported.lock().remove(id);
         self.arrivals.lock().remove(id);
@@ -319,13 +414,35 @@ impl Wakeups {
     /// client disconnects -- but the blocking work cannot be called back,
     /// so the permit goes with the work and is released when it ends. A
     /// caller that gives up while still queued never starts anything.
+    ///
+    /// Refused, as held back, if it cannot start within the budget: at once
+    /// when `max_waiting` are already waiting, or once the budget has gone
+    /// waiting for a permit.
     pub async fn wake(self: &Arc<Self>, id: &str) -> Result<Duration> {
-        let permit = self
-            .restores
-            .clone()
-            .acquire_owned()
-            .await
-            .context("shutting down")?;
+        let deadline = Instant::now() + self.budget;
+        let ahead = self.waiting.fetch_add(1, Ordering::SeqCst);
+        let waiting = Waiting(&self.waiting);
+        if ahead >= self.max_waiting {
+            return Err(super::HeldBack(format!(
+                "node held it back: {ahead} wakes already waiting to restore, at most {}",
+                self.max_waiting
+            ))
+            .into());
+        }
+        let permit =
+            match tokio::time::timeout_at(deadline.into(), self.restores.clone().acquire_owned())
+                .await
+            {
+                Ok(p) => p.context("shutting down")?,
+                Err(_) => {
+                    return Err(super::HeldBack(format!(
+                        "node held it back: no restore could start within {:?}",
+                        self.budget
+                    ))
+                    .into())
+                }
+            };
+        drop(waiting);
         let me = self.clone();
         let id = id.to_string();
         let me2 = self.clone();
@@ -334,7 +451,7 @@ impl Wakeups {
             let lock = me.lock(&id);
             let _held = lock.lock();
             let t0 = Instant::now();
-            (me.wake)(&me, &id)?;
+            (me.wake)(&me, &id, deadline.saturating_duration_since(t0))?;
             // Before the lock is let go, so a wake making room cannot take
             // this one between its coming up and its counting as used.
             me.in_use(&id);
@@ -347,6 +464,40 @@ impl Wakeups {
     }
 }
 
+/// One wake waiting for a restore permit, counted until it has one or its
+/// caller has gone.
+struct Waiting<'a>(&'a AtomicUsize);
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// A request in flight to a sandbox; see `Wakeups::hold`.
+pub struct InFlight {
+    wake: Arc<Wakeups>,
+    id: String,
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        let mut all = self.wake.in_flight.lock();
+        if let Some(n) = all.get_mut(&self.id) {
+            *n -= 1;
+            if *n == 0 {
+                all.remove(&self.id);
+            }
+        }
+    }
+}
+
+/// A demand count brought forward to `now`.
+fn decayed((count, at): (f64, Instant), now: Instant) -> f64 {
+    let dt = now.saturating_duration_since(at).as_secs_f64();
+    count * (-dt / DEMAND_WINDOW.as_secs_f64()).exp()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,7 +505,7 @@ mod tests {
 
     #[test]
     fn traffic_is_reported_once() {
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         w.saw("a");
         w.saw("b");
         w.saw("a");
@@ -364,7 +515,7 @@ mod tests {
 
     #[test]
     fn grace_runs_out() {
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         assert_eq!(w.in_grace("a", Instant::now()), None, "never seen");
         w.saw("a");
         let left = w.in_grace("a", Instant::now()).expect("just seen");
@@ -376,7 +527,7 @@ mod tests {
     /// its next call; an irregular one never is.
     #[test]
     fn a_periodic_sandbox_is_prefetched_ahead_of_its_next_call() {
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         let t0 = Instant::now();
         let s = Duration::from_secs;
         for k in 0..4 {
@@ -397,7 +548,7 @@ mod tests {
 
     #[test]
     fn too_short_a_period_is_not_worth_predicting() {
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         let t0 = Instant::now();
         for k in 0..4 {
             w.arrived("busy", t0 + Duration::from_secs(20 * k));
@@ -415,46 +566,49 @@ mod tests {
         }
     }
 
-    /// Frozen goes before Hot, the longest unused first within each, and
-    /// neither the sandbox being woken, one that answered a moment ago, nor
-    /// one already on disk is ever chosen. One that answered 5 s ago is:
-    /// that is inside the master's `GRACE`, but not a conversation.
+    /// Frozen goes before Hot, and within each the one least in demand:
+    /// a sandbox called once a second ago goes before one called thirty
+    /// times that has been quiet for half a minute, and of two called once,
+    /// the one called longer ago goes first. Never the sandbox being woken,
+    /// one with a request in flight, one that has only just come up, or one
+    /// already on disk.
     #[test]
-    fn a_wake_puts_away_the_longest_idle_first() {
-        let w = Wakeups::new(|_, _| Ok(()));
+    fn a_wake_puts_away_the_least_wanted_first() {
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
         let t0 = Instant::now();
         let s = Duration::from_secs;
-        let now = t0 + s(200);
-        for (id, at) in [
-            ("hot-old", t0),
-            ("hot-new", t0 + s(100)),
-            ("frozen-new", t0 + s(90)),
-            ("frozen-old", t0 + s(10)),
-            ("quiet", t0 + s(195)),
-            ("busy", t0 + s(199)),
-        ] {
-            w.used.lock().insert(id.into(), at);
+        let now = t0 + s(300);
+        w.saw_at("frozen-once-long-ago", t0 + s(100));
+        w.saw_at("frozen-once-recent", t0 + s(250));
+        w.saw_at("once-long-ago", t0 + s(150));
+        w.saw_at("once-just-now", t0 + s(299));
+        for i in 0..30 {
+            w.saw_at("popular", t0 + s(240 + i));
         }
+        w.saw_at("busy", t0 + s(150));
+        let _request = w.hold("busy");
+        w.fresh.lock().insert("fresh".into(), now - s(1));
         let observed = [
-            seen("hot-new", Tier::Hot),
-            seen("frozen-new", Tier::Frozen),
+            seen("once-just-now", Tier::Hot),
+            seen("frozen-once-recent", Tier::Frozen),
             seen("busy", Tier::Hot),
-            seen("quiet", Tier::Hot),
+            seen("popular", Tier::Hot),
             seen("target", Tier::Frozen),
-            seen("hot-old", Tier::Hot),
+            seen("once-long-ago", Tier::Hot),
             seen("on-disk", Tier::Snapshot),
-            seen("frozen-old", Tier::Frozen),
+            seen("fresh", Tier::Hot),
+            seen("frozen-once-long-ago", Tier::Frozen),
             seen("adopted", Tier::Hot),
         ];
         assert_eq!(
             w.victims(&observed, "target", now),
             [
-                "frozen-old",
-                "frozen-new",
+                "frozen-once-long-ago",
+                "frozen-once-recent",
                 "adopted",
-                "hot-old",
-                "hot-new",
-                "quiet"
+                "once-long-ago",
+                "once-just-now",
+                "popular"
             ]
         );
     }
@@ -462,7 +616,7 @@ mod tests {
     /// Reported on every report for as long as it is protected, then not.
     #[test]
     fn evictions_are_reported_until_the_master_has_caught_up() {
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         w.put_away("b");
         w.put_away("a");
         let now = Instant::now();
@@ -475,9 +629,12 @@ mod tests {
 
     #[test]
     fn forgetting_drops_everything() {
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         w.saw("a");
+        w.started("a");
         w.forget("a");
+        assert!(w.demand.lock().is_empty());
+        assert!(w.fresh.lock().is_empty());
         assert_eq!(w.in_grace("a", Instant::now()), None);
         assert!(w.take_traffic().is_empty());
     }
@@ -489,7 +646,7 @@ mod tests {
         let running = Arc::new(AtomicUsize::new(0));
         let overlapped = Arc::new(AtomicUsize::new(0));
         let (r, o) = (running.clone(), overlapped.clone());
-        let w = Arc::new(Wakeups::new(move |_, _| {
+        let w = Arc::new(Wakeups::new(move |_, _, _| {
             if r.fetch_add(1, Ordering::SeqCst) > 0 {
                 o.fetch_add(1, Ordering::SeqCst);
             }
@@ -542,7 +699,7 @@ mod tests {
         let most = Arc::new(AtomicUsize::new(0));
         let gate = Arc::new((parking_lot::Mutex::new(false), parking_lot::Condvar::new()));
         let (r, m, g) = (running.clone(), most.clone(), gate.clone());
-        let w = Arc::new(Wakeups::new(move |_, _| {
+        let w = Arc::new(Wakeups::new(move |_, _, _| {
             let now = r.fetch_add(1, Ordering::SeqCst) + 1;
             m.fetch_max(now, Ordering::SeqCst);
             let (open, cv) = &*g;
@@ -592,28 +749,179 @@ mod tests {
         assert!(most.load(Ordering::SeqCst) <= parallel);
     }
 
-    /// A wake that waited its turn comes up counting as used now, not as of
-    /// the request that asked for it. On 2026-10-28, at 80 per node and
-    /// 8 req/s, requests waited 24 s (p50) for their wake; the sandbox came
-    /// up looking like the longest-idle hot one, and the next wake put it to
-    /// disk 0.24 s later, before the request reached it -- 98% of the 502s.
+    /// A sandbox woken for a request is spared until that request has its
+    /// answer, however long the wake took, and no longer. On 2026-10-28, at
+    /// 80 per node and 8 req/s, requests waited 24 s (p50) for their wake;
+    /// counted from the request, the sandbox came up looking long idle and
+    /// the next wake put it to disk 0.24 s later -- 98% of the 502s.
+    /// Spared for a fixed 2 s after answering instead, nearly every hot
+    /// sandbox was spared at once and 26% of requests were refused.
     #[tokio::test]
-    async fn a_sandbox_just_woken_is_not_the_next_put_away() {
-        let w = Arc::new(Wakeups::new(|_, _| Ok(())));
+    async fn a_sandbox_is_spared_while_its_request_is_in_flight_and_no_longer() {
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
         let asked = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
-        for id in ["a", "b"] {
-            w.seen.lock().insert(id.into(), asked);
-            w.used.lock().insert(id.into(), asked);
-        }
-
-        w.wake("a").await.unwrap();
-
-        let now = Instant::now();
+        w.saw_at("a", asked);
+        w.saw_at("b", asked);
         let observed = [seen("a", Tier::Hot), seen("b", Tier::Hot)];
+
+        let request = w.hold("a");
+        w.wake("a").await.unwrap();
+        let now = Instant::now();
         assert_eq!(w.victims(&observed, "c", now), ["b"]);
         assert!(
             w.in_grace("a", now).is_some(),
             "nor demoted by the master on a view from before it came up"
+        );
+
+        // Answered. Wanted no more than "b", but used since.
+        drop(request);
+        assert_eq!(w.victims(&observed, "c", Instant::now()), ["b", "a"]);
+    }
+
+    /// Holds every restore permit until `release` is called, so a test can
+    /// see what a wake does when none is free.
+    fn blocking_wakes() -> (
+        Arc<Wakeups>,
+        Arc<(parking_lot::Mutex<bool>, parking_lot::Condvar)>,
+    ) {
+        let gate = Arc::new((parking_lot::Mutex::new(false), parking_lot::Condvar::new()));
+        let g = gate.clone();
+        let w = Wakeups::new(move |_, _, _| {
+            let (open, cv) = &*g;
+            let mut open = open.lock();
+            while !*open {
+                cv.wait(&mut open);
+            }
+            Ok(())
+        });
+        (Arc::new(w), gate)
+    }
+
+    fn release(gate: &(parking_lot::Mutex<bool>, parking_lot::Condvar)) {
+        *gate.0.lock() = true;
+        gate.1.notify_all();
+    }
+
+    /// A wake that must not take long, timed. Asserting comes after the
+    /// gate is released: the runtime waits for its blocking threads when it
+    /// shuts down, so a failure with the gate shut would hang, not fail.
+    async fn late_wake(w: &Arc<Wakeups>) -> (Result<Duration>, Duration) {
+        let t0 = Instant::now();
+        let r = match tokio::time::timeout(Duration::from_secs(5), w.wake("late")).await {
+            Ok(r) => r,
+            Err(_) => Err(anyhow::anyhow!("still waiting after 5 s")),
+        };
+        (r, t0.elapsed())
+    }
+
+    fn held_back(r: &Result<Duration>) -> String {
+        let e = r.as_ref().expect_err("refused");
+        assert!(
+            e.downcast_ref::<super::super::HeldBack>().is_some(),
+            "{e:#}"
+        );
+        format!("{e:#}")
+    }
+
+    /// A wake that cannot get a restore permit within its budget is
+    /// refused, as held back, rather than left queueing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_wake_that_cannot_start_in_time_is_refused() {
+        let (w, gate) = blocking_wakes();
+        let w = Arc::new(
+            Arc::try_unwrap(w)
+                .ok()
+                .unwrap()
+                .with_limits(Duration::from_millis(300), Some(100)),
+        );
+        let permits = w.restores.available_permits();
+        let busy: Vec<_> = (0..permits)
+            .map(|i| {
+                let w = w.clone();
+                tokio::spawn(async move { w.wake(&format!("busy-{i}")).await })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (r, took) = late_wake(&w).await;
+        release(&gate);
+        for b in busy {
+            b.await.unwrap().unwrap();
+        }
+
+        let why = held_back(&r);
+        assert!(why.contains("no restore could start within"), "{why}");
+        assert!(took >= Duration::from_millis(200), "{took:?}");
+        assert!(took < Duration::from_secs(1), "{took:?}");
+    }
+
+    /// With as many wakes already waiting as the node allows, another is
+    /// refused at once: it would not start in time, so its caller should
+    /// not wait to find that out.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_wake_behind_a_full_queue_is_refused_at_once() {
+        let (w, gate) = blocking_wakes();
+        let w = Arc::new(
+            Arc::try_unwrap(w)
+                .ok()
+                .unwrap()
+                .with_limits(Duration::from_secs(10), Some(1)),
+        );
+        let permits = w.restores.available_permits();
+        let mut busy: Vec<_> = (0..permits + 1)
+            .map(|i| {
+                let w = w.clone();
+                tokio::spawn(async move { w.wake(&format!("busy-{i}")).await })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (r, took) = late_wake(&w).await;
+        release(&gate);
+        for b in busy.drain(..) {
+            b.await.unwrap().unwrap();
+        }
+
+        let why = held_back(&r);
+        assert!(why.contains("already waiting"), "{why}");
+        assert!(took < Duration::from_millis(100), "{took:?}");
+        // And the count is back to nothing waiting.
+        assert_eq!(w.waiting.load(Ordering::SeqCst), 0);
+    }
+
+    /// A wake waits out memory pressure only for what is left of its
+    /// budget once it has its permit, not a fixed time on top of the wait.
+    #[tokio::test]
+    async fn a_wake_waits_out_pressure_only_for_what_is_left() {
+        let given = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let g = given.clone();
+        let w = Arc::new(
+            Wakeups::new(move |_, _, patience| {
+                g.lock().push(patience);
+                std::thread::sleep(Duration::from_millis(300));
+                Ok(())
+            })
+            .with_limits(Duration::from_secs(2), None),
+        );
+        // More than there are permits, so some wait for one first.
+        let permits = w.restores.available_permits();
+        let all: Vec<_> = (0..permits * 2)
+            .map(|i| {
+                let w = w.clone();
+                tokio::spawn(async move { w.wake(&format!("sb-{i}")).await })
+            })
+            .collect();
+        for a in all {
+            a.await.unwrap().unwrap();
+        }
+        let given = given.lock();
+        assert!(
+            given.iter().all(|p| *p <= Duration::from_secs(2)),
+            "{given:?}"
+        );
+        assert!(
+            given.iter().any(|p| *p < Duration::from_millis(1800)),
+            "the ones that queued got less: {given:?}"
         );
     }
 }
