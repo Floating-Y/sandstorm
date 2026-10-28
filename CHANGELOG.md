@@ -23,9 +23,10 @@ keep its names.
 The console is now the only web page: `/` serves it as well as `/console`,
 and the older panel is gone. It gains **Add a node**, with both ways a node
 joins -- a single-use command for a machine that dials in, and an address and
-pairing code for one the master connects to -- the Sandstorm mark and a
-favicon in place of forkd's bolt, and sparklines that draw in once instead of
-replaying the sweep on every refresh.
+pairing code for one the master connects to -- the README's mark and
+wordmark in its header, drawn as SVG in the theme's colours, and a favicon in
+place of forkd's bolt, and sparklines that draw in once instead of replaying
+the sweep on every refresh.
 
 What the panel had and more is in the console too: every sandbox, searchable
 and filtered by tier, node or failing, a page at a time, with wake, freeze,
@@ -60,8 +61,9 @@ cards and strips mark are the master's own, now in `GET /v1/console/now`
 as `floor_mib` and `max_psi`.
 
 Sandboxes, nodes and activity share one pager: the range shown, the pages
-within reach, and how many a page -- 25, 50 or 100, or 20, 50 or 100 for
-activity, which starts at 20 -- remembered per table. Nodes can be
+within reach, and 20, 50 or 100 a page, 20 to start with, remembered per
+table. A sandbox is one line: id, template, node, tier with any error cut to
+fit beside it, address and last activity. Nodes can be
 searched and narrowed to answering, silent or under pressure. Activity is a
 table like the sandboxes', narrowed by kind, a search and how far back;
 `GET /v1/console/events` takes `offset`, `kind` (comma-separated) and `q`,
