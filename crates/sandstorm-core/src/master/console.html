@@ -21,6 +21,8 @@
   --hot: #d95926; --frozen: #3987e5; --snapshot: #199e70; --detached: #9085e9;
   --good: #0ca30c; --warn: #fab219; --bad: #e66767; --accent: #f0efec; --on-accent: #0d0d0d;
   --serif: "Newsreader", "Iowan Old Style", Georgia, serif;
+  /* Three radii: containers, controls, and tags. */
+  --r-card: 12px; --r-ctl: 8px; --r-tag: 4px;
   --glow: 0 0 0 1px rgba(255,255,255,.04), 0 10px 30px rgba(0,0,0,.35);
   --heat-0: #10243f; --heat-1: #3987e5; --heat-2: #cde2fb;
   --brand: #f0a04b;
@@ -62,7 +64,12 @@ header { position: sticky; top: 0; z-index: 10; display: flex; align-items: cent
 .brand svg { height: 24px; width: auto; display: block; overflow: visible; }
 .brand .mark { fill: var(--brand); }
 .brand .word { fill: currentColor; }
-.live { display: flex; align-items: center; gap: 8px; color: var(--ink-2); font-size: 13px; white-space: nowrap; }
+.live { display: flex; align-items: center; gap: 8px; color: var(--ink-2); font-size: 13px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.refresh { padding: 5px; line-height: 0; }
+.refresh svg { width: 14px; height: 14px; display: block; }
+.refresh:hover { color: var(--ink); }
+.refresh.spin svg { animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); position: relative; }
 .dot::after { display: none; content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 2px solid var(--good);
   animation: ping 1.8s cubic-bezier(0,0,.2,1) infinite; }
@@ -71,12 +78,12 @@ header { position: sticky; top: 0; z-index: 10; display: flex; align-items: cent
 @keyframes ping { 0% { transform: scale(.6); opacity: .9; } 100% { transform: scale(2.2); opacity: 0; } }
 .spacer { flex: 1; }
 .seg { display: flex; gap: 2px; }
-.seg button { border: 0; background: none; color: var(--ink-2); padding: 5px 11px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px; }
+.seg button { border: 0; background: none; color: var(--ink-2); padding: 5px 11px; border-radius: var(--r-ctl); cursor: pointer; font: inherit; font-size: 13px; }
 .seg button:hover { color: var(--ink); }
 .seg button.on { background: var(--card-2); color: var(--ink); }
-.iconbtn { white-space: nowrap; border: 1px solid transparent; background: none; color: var(--ink-2); border-radius: 8px; padding: 6px 10px; cursor: pointer; font: inherit; font-size: 13px; }
+.iconbtn { white-space: nowrap; border: 1px solid transparent; background: none; color: var(--ink-2); border-radius: var(--r-ctl); padding: 6px 10px; cursor: pointer; font: inherit; font-size: 13px; }
 .tabs-nav { display: flex; gap: 4px; }
-.tabs-nav a { font-size: 13.5px; font-weight: 500; color: var(--muted); text-decoration: none; padding: 6px 12px; border-radius: 7px; display: inline-flex; align-items: center; gap: 6px; }
+.tabs-nav a { font-size: 13.5px; font-weight: 500; color: var(--muted); text-decoration: none; padding: 6px 12px; border-radius: var(--r-ctl); display: inline-flex; align-items: center; gap: 6px; }
 .tabs-nav a:hover { color: var(--ink); }
 .tabs-nav a[aria-current="page"] { background: var(--card-2); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
 .tabs-nav .n { font-size: 12px; font-weight: 400; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -94,7 +101,7 @@ header { position: sticky; top: 0; z-index: 10; display: flex; align-items: cent
 /* The cards rise in once, when the page opens; switching tabs just shows them. */
 body.settled .card { animation: none; }
 main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns: repeat(12, 1fr); max-width: 1680px; margin: 0 auto; }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+.card { background: transparent; border: 1px solid var(--line); border-radius: var(--r-card);
   padding: 16px 18px; position: relative; overflow: hidden;
   animation: rise .6s cubic-bezier(.2,.8,.2,1) both; }
 @keyframes rise { from { opacity: 0; transform: translateY(10px); } }
@@ -121,7 +128,7 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); margin: -2px 0 8px; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .tip { position: fixed; z-index: 50; pointer-events: none; background: var(--card-2); border: 1px solid var(--line);
-  border-radius: 9px; padding: 8px 10px; font-size: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+  border-radius: var(--r-ctl); padding: 8px 10px; font-size: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
   opacity: 0; transform: translateY(4px); transition: opacity .12s, transform .12s; min-width: 150px; }
 .tip.on { opacity: 1; transform: none; }
 .tip .t { color: var(--muted); margin-bottom: 4px; }
@@ -133,7 +140,7 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
    connector carrying the measured rate of that move. Rates are words, not
    widths; colour is the tier the move goes to. */
 .tiers { display: grid; grid-template-columns: minmax(0, 1fr) 112px minmax(0, 1fr) 112px minmax(0, 1fr) 112px minmax(0, 1fr); margin-top: 12px; }
-.tier { min-width: 0; padding: 2px 4px; border-radius: 8px; cursor: default; }
+.tier { min-width: 0; padding: 2px 4px; border-radius: var(--r-ctl); cursor: default; }
 .tier .th { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; white-space: nowrap; }
 .tier .th i { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .tier .th .ti { margin-left: auto; color: var(--muted); font-weight: 400; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
@@ -159,7 +166,7 @@ table.nodes-tbl tr.down td { opacity: .6; }
 .ndname .dot { flex: none; }
 .ndname .dot::after { display: none; }
 .feats { display: inline-flex; gap: 4px; flex-wrap: wrap; }
-.feats span { font-size: 10.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; }
+.feats span { font-size: 10.5px; color: var(--muted); border: 1px solid var(--line); border-radius: var(--r-tag); padding: 0 5px; }
 .stack { display: flex; height: 6px; border-radius: 3px; overflow: hidden; gap: 2px; width: 160px; margin-top: 5px; }
 .stack i { display: block; height: 100%; min-width: 0; }
 .meter { position: relative; width: 96px; height: 5px; border-radius: 3px; background: var(--grid); margin-top: 6px; }
@@ -174,7 +181,7 @@ table.nodes-tbl tr.down td { opacity: .6; }
 .hrow.down .hid { color: var(--muted); }
 .haxis { display: flex; justify-content: space-between; margin: 4px 0 0 106px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 #ndView { margin-left: auto; }
-canvas.strip { display: block; width: 100%; height: 20px; border-radius: 4px; cursor: crosshair; }
+canvas.strip { display: block; width: 100%; height: 20px; border-radius: var(--r-tag); cursor: crosshair; }
 .heatlegend { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin: 0 0 10px; font-size: 12px; color: var(--ink-2); }
 .heatlegend .scale { display: grid; gap: 4px; width: 260px; }
 .heatlegend .ramp { height: 8px; border-radius: 4px; position: relative; }
@@ -188,25 +195,25 @@ canvas.strip { display: block; width: 100%; height: 20px; border-radius: 4px; cu
 /* Sandboxes that will not start: a line above the table and a count on the
    Failing filter, rather than a second list of the same rows. */
 .notice { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 12px; margin: 0 0 10px; font-size: 13px; color: var(--ink);
-  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line)); background: color-mix(in srgb, var(--warn) 9%, transparent); border-radius: 10px; }
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line)); background: color-mix(in srgb, var(--warn) 9%, transparent); border-radius: var(--r-ctl); }
 .notice[hidden] { display: none; }
 .notice .ic { color: var(--warn); font-weight: 700; }
 .notice .why { color: var(--ink-2); }
-.notice button { margin-left: auto; font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
-.chips .cnt { font-size: 11px; font-weight: 600; color: #fff; background: var(--bad); border-radius: 999px; padding: 0 6px; min-width: 18px; text-align: center; }
-.badge { font-size: 11px; border-radius: 5px; padding: 0 6px; }
+.notice button { margin-left: auto; font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+.chips .cnt { font-size: 11px; font-weight: 600; color: #fff; background: var(--bad); border-radius: var(--r-tag); padding: 0 6px; min-width: 18px; text-align: center; }
+.badge { font-size: 11px; border-radius: var(--r-tag); padding: 0 6px; }
 .empty { color: var(--muted); font-size: 13px; padding: 18px 0; text-align: center; }
 .gate { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: rgba(0,0,0,.55); backdrop-filter: blur(6px); }
 .gate[hidden] { display: none; }
-.gate form { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 26px; width: min(440px, 92vw);
+.gate form { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-card); padding: 26px; width: min(440px, 92vw);
   box-shadow: 0 30px 80px rgba(0,0,0,.5); animation: rise .5s cubic-bezier(.2,.8,.2,1); }
 .gate h1 { margin: 0 0 6px; font-family: var(--serif); font-size: 24px; font-weight: 500; }
 .gate p { color: var(--ink-2); margin: 0 0 16px; font-size: 13.5px; }
-.gate input { width: 100%; font: inherit; padding: 10px 12px; border-radius: 9px; border: 1px solid var(--line); background: var(--card-2); color: var(--ink); }
-.gate button { margin-top: 12px; width: 100%; padding: 10px; border-radius: 9px; border: 0; background: var(--accent); color: var(--on-accent); font: inherit; font-weight: 600; cursor: pointer; }
+.gate input { width: 100%; font: inherit; padding: 10px 12px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: var(--card-2); color: var(--ink); }
+.gate button { margin-top: 12px; width: 100%; padding: 10px; border-radius: var(--r-ctl); border: 0; background: var(--accent); color: var(--on-accent); font: inherit; font-weight: 600; cursor: pointer; }
 .gate .err { color: var(--bad); font-size: 12.5px; min-height: 18px; margin-top: 8px; }
 .head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
-.btn { font: inherit; font-size: 13px; font-weight: 600; padding: 7px 12px; border-radius: 9px; border: 1px solid var(--line);
+.btn { font: inherit; font-size: 13px; font-weight: 600; padding: 7px 12px; border-radius: var(--r-ctl); border: 1px solid var(--line);
   background: var(--card-2); color: var(--ink); cursor: pointer; white-space: nowrap; }
 .btn:hover { border-color: var(--accent); }
 .gate form.wide { width: min(620px, 94vw); position: relative; }
@@ -215,7 +222,7 @@ canvas.strip { display: block; width: 100%; height: 20px; border-radius: 4px; cu
 .tabs button { margin: 0; width: auto; flex: 1; background: var(--card-2); color: var(--ink-2); border: 1px solid var(--line); font-weight: 600; }
 .tabs button[aria-selected="true"] { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 .gate label { display: block; font-size: 12.5px; color: var(--ink-2); margin: 10px 0 4px; }
-.gate pre { background: var(--card-2); border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; font-size: 12px;
+.gate pre { background: var(--card-2); border: 1px solid var(--line); border-radius: var(--r-ctl); padding: 10px 12px; font-size: 12px;
   white-space: pre-wrap; word-break: break-all; margin: 10px 0 0; }
 .gate .note { color: var(--ink-2); font-size: 12.5px; margin-top: 8px; line-height: 1.5; }
 .gate .ok { color: var(--good); font-size: 13px; margin-top: 8px; }
@@ -225,10 +232,10 @@ canvas.strip { display: block; width: 100%; height: 20px; border-radius: 4px; cu
 .gate .err b { font-weight: 600; }
 .gate .err .why { display: block; color: var(--ink-2); margin-top: 3px; }
 .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0 10px; }
-.bar input, .bar select, .gate select { font: inherit; font-size: 13px; padding: 7px 10px; border-radius: 9px; border: 1px solid var(--line); background: var(--card-2); color: var(--ink); }
+.bar input, .bar select, .gate select { font: inherit; font-size: 13px; padding: 7px 10px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: var(--card-2); color: var(--ink); }
 .bar input { flex: 1; min-width: 180px; }
 .chips { display: flex; gap: 4px; flex-wrap: wrap; }
-.chips button { font: inherit; font-size: 12.5px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line); background: none; color: var(--ink-2); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.chips button { font: inherit; font-size: 12.5px; padding: 5px 10px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: none; color: var(--ink-2); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
 .chips button[aria-pressed="true"] { background: var(--card-2); color: var(--ink); border-color: var(--accent); }
 .tbl-wrap { overflow-x: auto; }
 table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -248,26 +255,26 @@ table.tbl .err1 { display: inline-block; max-width: 380px; overflow: hidden; tex
 .tierpill { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; }
 .tierpill i { width: 8px; height: 8px; border-radius: 50%; }
 .acts { display: flex; gap: 4px; justify-content: flex-end; flex-wrap: nowrap; }
-.acts button { font: inherit; font-size: 12px; padding: 3px 9px; border-radius: 7px; border: 1px solid var(--line); background: none; color: var(--ink-2); cursor: pointer; }
+.acts button { font: inherit; font-size: 12px; padding: 3px 9px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: none; color: var(--ink-2); cursor: pointer; }
 .acts button:hover { color: var(--ink); border-color: var(--ink-2); }
 .acts button.danger:hover, .acts button.armed { color: #fff; background: var(--bad); border-color: var(--bad); }
 .acts button:disabled { opacity: .5; cursor: progress; }
 table.tbl td.ck, table.tbl th.ck { width: 28px; padding-right: 0; }
 table.tbl input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
 table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transparent); }
-.kebab { font: inherit; font-size: 16px; line-height: 1; padding: 0 8px 4px; border-radius: 7px; border: 1px solid transparent; background: none; color: var(--muted); cursor: pointer; }
+.kebab { font: inherit; font-size: 16px; line-height: 1; padding: 0 8px 4px; border-radius: var(--r-ctl); border: 1px solid transparent; background: none; color: var(--muted); cursor: pointer; }
 .kebab:hover, .kebab[aria-expanded="true"] { color: var(--ink); border-color: var(--line); background: var(--card-2); }
-.menu { position: fixed; z-index: 90; min-width: 150px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 4px; box-shadow: 0 12px 30px rgba(0,0,0,.35); }
+.menu { position: fixed; z-index: 90; min-width: 150px; background: var(--card); border: 1px solid var(--line); border-radius: var(--r-ctl); padding: 4px; box-shadow: 0 12px 30px rgba(0,0,0,.35); }
 .menu[hidden] { display: none; }
-.menu button { display: block; width: 100%; text-align: left; font: inherit; font-size: 13px; padding: 7px 10px; border: 0; border-radius: 7px; background: none; color: var(--ink); cursor: pointer; }
+.menu button { display: block; width: 100%; text-align: left; font: inherit; font-size: 13px; padding: 7px 10px; border: 0; border-radius: var(--r-ctl); background: none; color: var(--ink); cursor: pointer; }
 .menu button:hover { background: var(--card-2); }
 .menu button.danger { color: var(--bad); }
 .menu button.danger.armed { background: var(--bad); color: #fff; }
 .menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; }
-.selbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 8px 10px; margin-bottom: 8px; border: 1px solid var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 8%, transparent); font-size: 13px; }
+.selbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 8px 10px; margin-bottom: 8px; border: 1px solid var(--accent); border-radius: var(--r-ctl); background: color-mix(in srgb, var(--accent) 8%, transparent); font-size: 13px; }
 .selbar[hidden] { display: none; }
 .selbar b { margin-right: 6px; }
-.selbar button { font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+.selbar button { font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
 .selbar button.danger { color: var(--bad); }
 .selbar button.danger.armed { background: var(--bad); color: #fff; border-color: var(--bad); }
 .selbar button.link { border: 0; background: none; color: var(--muted); margin-left: auto; }
@@ -276,16 +283,16 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
 .pager { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px; font-size: 12.5px; color: var(--muted); }
 .pager:empty { display: none; }
 .pager .pages { display: flex; align-items: center; gap: 3px; }
-.pager button { font: inherit; font-size: 12.5px; min-width: 30px; height: 28px; padding: 0 8px; border-radius: 8px; border: 1px solid transparent; background: none; color: var(--ink-2); cursor: pointer; font-variant-numeric: tabular-nums; transition: background .15s, color .15s, border-color .15s; }
+.pager button { font: inherit; font-size: 12.5px; min-width: 30px; height: 28px; padding: 0 8px; border-radius: var(--r-ctl); border: 1px solid transparent; background: none; color: var(--ink-2); cursor: pointer; font-variant-numeric: tabular-nums; transition: background .15s, color .15s, border-color .15s; }
 .pager button:hover:not(:disabled) { border-color: var(--line); color: var(--ink); background: var(--card-2); }
 .pager button[aria-current="page"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 .pager button:disabled { opacity: .35; cursor: default; }
 .pager .gap { padding: 0 4px; color: var(--muted); }
 .pager .size { display: inline-flex; align-items: center; gap: 6px; }
-.pager .size select { font: inherit; font-size: 12.5px; padding: 4px 6px; border-radius: 7px; border: 1px solid var(--line); background: var(--card-2); color: var(--ink); }
+.pager .size select { font: inherit; font-size: 12.5px; padding: 4px 6px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: var(--card-2); color: var(--ink); }
 .flash { font-size: 12.5px; margin-left: 8px; }
 .gate .secret { display: flex; gap: 6px; align-items: stretch; margin-top: 6px; }
-.gate .secret code { flex: 1; background: var(--card-2); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; font-size: 12px; word-break: break-all; }
+.gate .secret code { flex: 1; background: var(--card-2); border: 1px solid var(--line); border-radius: var(--r-ctl); padding: 8px 10px; font-size: 12px; word-break: break-all; }
 .gate .secret button { margin: 0; width: auto; padding: 0 12px; }
 .gate .err details { margin-top: 4px; color: var(--muted); }
 .gate .err summary { cursor: pointer; font-size: 12px; }
@@ -308,18 +315,17 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
 /* The overview's cards are outlines with no fill: each holds its own lines
    and figures, the gaps between them are one size, and the columns of the
    two rows meet at the same edges. */
-body.tab-overview main > .card { background: transparent; }
 body.tab-overview main > .kpi { padding-bottom: 46px; }
 /* Activity: the same table as the sandboxes. */
 table.tbl td.when { color: var(--muted); font-size: 12px; }
 .evk { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; }
-.evk .ic { width: 22px; height: 22px; border-radius: 7px; display: grid; place-items: center; font-size: 12px; }
+.evk .ic { width: 22px; height: 22px; border-radius: var(--r-ctl); display: grid; place-items: center; font-size: 12px; }
 table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
 @keyframes rowin { from { background: color-mix(in srgb, var(--accent) 16%, transparent); } }
 /* The snapshot builder: three steps across, a terminal under them. */
 .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 6px; }
 @media (max-width: 960px) { .steps { grid-template-columns: 1fr; } }
-.step { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; background: var(--card-2); display: flex; flex-direction: column; gap: 8px; transition: opacity .3s, border-color .3s; }
+.step { border: 1px solid var(--line); border-radius: var(--r-ctl); padding: 12px 14px; background: var(--card-2); display: flex; flex-direction: column; gap: 8px; transition: opacity .3s, border-color .3s; }
 .step.off { opacity: .45; pointer-events: none; }
 .step.now { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
 .step .n { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--line); color: var(--ink); font-size: 11.5px; font-weight: 700; margin-right: 6px; }
@@ -327,7 +333,7 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
 .step.now .n { background: var(--accent); color: var(--on-accent); }
 .step h3 { margin: 0; font-size: 13.5px; font-weight: 600; display: flex; align-items: center; }
 .step label { font-size: 12px; color: var(--ink-2); }
-.step select, .step input[type=text], .step textarea { font: inherit; font-size: 13px; padding: 7px 10px; border-radius: 9px; border: 1px solid var(--line); background: var(--card); color: var(--ink); width: 100%; }
+.step select, .step input[type=text], .step textarea { font: inherit; font-size: 13px; padding: 7px 10px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: var(--card); color: var(--ink); width: 100%; }
 .step textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; min-height: 92px; resize: vertical; }
 .step .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .step .row .btn { flex: none; }
@@ -339,7 +345,7 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
 .step .who code { font-size: 11.5px; }
 .step .hint { color: var(--bad); font-size: 12px; }
 .step .hint[hidden] { display: none; }
-.term { margin-top: 12px; background: #0b0b0a; color: #d8d6cf; border: 1px solid var(--line); border-radius: 12px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+.term { margin-top: 12px; background: #0b0b0a; color: #d8d6cf; border: 1px solid var(--line); border-radius: var(--r-ctl); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
   padding: 10px 12px; max-height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
 .term:empty::before { content: "Output from each command lands here."; color: #6f6e69; }
 .term .cmd { color: #8ab4f8; } .term .ok { color: #6fcf6f; } .term .bad { color: #f08a8a; } .term .dim { color: #85837d; }
@@ -357,7 +363,8 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
     <a href="#snapshots" data-go="snapshots">Snapshots</a>
     <a href="#activity" data-go="activity">Activity</a>
   </nav>
-  <div class="live"><span class="dot" id="dot"></span><span id="liveText">connecting</span></div>
+  <div class="live"><span class="dot" id="dot"></span><span id="liveText">connecting</span>
+    <button class="iconbtn refresh" id="refreshNow" type="button" title="Refresh now" aria-label="Refresh now"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3h-3"/></svg></button></div>
   <div class="spacer"></div>
   <div class="seg" id="range" role="group" aria-label="Time range">
     <button data-s="900" class="on">15m</button><button data-s="3600">1h</button><button data-s="21600">6h</button><button data-s="86400">24h</button>
@@ -1186,17 +1193,31 @@ async function refresh(first = false) {
     $("n-sandboxes").textContent = total ? compact(total) : "";
     $("n-nodes").classList.toggle("bad", up < now.nodes.length);
     failing(now.failing, now.failed);
-    setLive();
+    setLive(null);
   } catch (e) {
     if (String(e.message) !== "401") { console.warn(e); setLive(e); }
   }
 }
+// The time of the last good refresh, which changes only when there is a new
+// one -- not a count of seconds that changed every second. The dot turns
+// amber, then red, as that time grows old.
+let liveErr = null;
+const hms = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 function setLive(err) {
+  if (err !== undefined) liveErr = err;
   const age = (Date.now() - lastOk) / 1000;
-  $("dot").className = "dot" + (err && age > 15 ? " dead" : age > 12 ? " stale" : "");
-  $("liveText").textContent = err && !lastOk ? "cannot reach the master" : `live · updated ${ago(age)}`;
+  $("dot").className = "dot" + (liveErr && age > 15 ? " dead" : age > 12 ? " stale" : "");
+  const text = !lastOk ? (liveErr ? "cannot reach the master" : "connecting")
+    : liveErr && age > 15 ? `cannot reach the master · last ${hms(lastOk)}` : `updated ${hms(lastOk)}`;
+  if ($("liveText").textContent !== text) $("liveText").textContent = text;
 }
 setInterval(() => lastOk && setLive(), 1000);
+$("refreshNow").onclick = async () => {
+  const b = $("refreshNow");
+  if (b.classList.contains("spin")) return;
+  b.classList.add("spin");
+  try { await refresh(false); } finally { setTimeout(() => b.classList.remove("spin"), 400); }
+};
 addEventListener("resize", () => {
   document.documentElement.style.setProperty("--head", document.querySelector("header").offsetHeight + "px");
   placeTabInd(); redrawAll();

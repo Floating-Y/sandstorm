@@ -27,10 +27,12 @@ pairing code for one the master connects to -- the README's mark and
 wordmark in its header, drawn as SVG in the theme's colours, with titles and
 figures set in the wordmark's Newsreader (a 22 KB subset inlined, since a
 master may have no internet), one neutral accent so colour is left to the
-data, plain tabs over a sliding underline, cards without glow -- on the overview, outlines with no fill, on columns
-that meet at the same edges -- and a favicon in
-place of forkd's bolt, and sparklines that draw in once instead of replaying
-the sweep on every refresh.
+data, plain tabs over a sliding underline, cards that are outlines with no
+fill on every tab, on columns that meet at the same edges, three corner radii
+(card, control, tag) used everywhere, a favicon in place of forkd's bolt, and
+sparklines that draw in once instead of replaying the sweep on every refresh.
+The header says the time of the last update rather than a count of seconds
+that ticked every second, and has a button to refresh now.
 
 What the panel had and more is in the console too: every sandbox, searchable
 and filtered by tier, node or failing, a page at a time, with wake, freeze,
