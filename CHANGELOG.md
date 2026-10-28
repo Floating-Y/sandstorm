@@ -24,7 +24,10 @@ The console is now the only web page: `/` serves it as well as `/console`,
 and the older panel is gone. It gains **Add a node**, with both ways a node
 joins -- a single-use command for a machine that dials in, and an address and
 pairing code for one the master connects to -- the README's mark and
-wordmark in its header, drawn as SVG in the theme's colours, and a favicon in
+wordmark in its header, drawn as SVG in the theme's colours, with titles and
+figures set in the wordmark's Newsreader (a 22 KB subset inlined, since a
+master may have no internet), one neutral accent so colour is left to the
+data, plain tabs over a sliding underline, and cards without glow, and a favicon in
 place of forkd's bolt, and sparklines that draw in once instead of replaying
 the sweep on every refresh.
 
