@@ -133,10 +133,18 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .kpi .value { font-family: var(--serif); font-size: 34px; font-weight: 500; letter-spacing: -.4px; line-height: 1.1; margin: 6px 0 2px; }
 .kpi .value small { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 13px; color: var(--muted); font-weight: 400; margin-left: 4px; letter-spacing: 0; }
 .num .nd { display: none; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12.5px; font-weight: 500; letter-spacing: 0;
-  margin-left: 7px; color: var(--ink-2); font-variant-numeric: tabular-nums; vertical-align: 0.35em; }
-.num .nd.up, .num .nd.down { display: inline; animation: nd 4.2s ease-out forwards; }
-.num .nd.down { color: var(--muted); }
-@keyframes nd { 0% { opacity: 0; transform: translateY(3px); } 8%, 70% { opacity: 1; transform: none; } 100% { opacity: 0; } }
+  margin-left: 7px; font-variant-numeric: tabular-nums; vertical-align: 0.35em; }
+/* The change pops in beside the number and is gone in under two seconds;
+   the number wears the same colour while it rolls, then settles back. */
+.num .nd.up, .num .nd.down { display: inline-block; opacity: 0; animation: nd 1.7s cubic-bezier(.2,.8,.2,1); }
+.num .nd.up { color: var(--good); }
+.num .nd.down { color: var(--bad); }
+@keyframes nd { 0% { opacity: 0; transform: translateY(6px) scale(.6); } 14% { opacity: 1; transform: translateY(-3px) scale(1.18); }
+  26% { transform: none; } 70% { opacity: 1; transform: none; } 100% { opacity: 0; transform: translateY(-4px); } }
+.num .nv.up { animation: nv-up 1.3s ease-out; }
+.num .nv.down { animation: nv-down 1.3s ease-out; }
+@keyframes nv-up { 0%, 65% { color: var(--good); } }
+@keyframes nv-down { 0%, 65% { color: var(--bad); } }
 .kpi .foot { color: var(--muted); font-size: 12px; min-height: 18px; }
 .kpi svg.spark { position: absolute; right: 0; bottom: 0; width: 100%; height: 36px; pointer-events: none; }
 .swatch { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
@@ -704,8 +712,7 @@ function tweenText(el, to, digits = 0, suffix = "", delta = false) {
   if (delta && had && from != null && isFinite(from) && Math.round(d) !== 0) {
     const n = el.lastChild;
     n.textContent = (d > 0 ? "+" : "−") + fmt(Math.abs(d), digits);
-    n.className = "nd " + (d > 0 ? "up" : "down");
-    n.style.animation = "none"; void n.offsetWidth; n.style.animation = "";
+    for (const x of [n, v]) { x.classList.remove("up", "down"); void x.offsetWidth; x.classList.add(d > 0 ? "up" : "down"); }
   }
   const t0 = performance.now(), dur = 900;
   const step = (now) => {
