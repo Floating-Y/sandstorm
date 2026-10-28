@@ -56,6 +56,12 @@
 html, body { margin: 0; background: var(--page); color: var(--ink);
   font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
 .num { font-variant-numeric: tabular-nums; }
+/* Focus in the theme's ink rather than the browser's blue: a field shows it
+   in its border, anything else in a ring when reached by keyboard. */
+:where(input, select, textarea, button, a, [tabindex]):focus { outline: none; }
+:where(input, textarea):focus { border-color: color-mix(in srgb, var(--ink) 45%, var(--line)) !important; }
+:where(button, a, [tabindex]):focus-visible { outline: 2px solid color-mix(in srgb, var(--ink) 55%, transparent); outline-offset: 2px; }
+input[type=radio], input[type=checkbox] { accent-color: var(--accent); }
 header { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 18px;
   padding: 14px 24px; background: color-mix(in srgb, var(--page) 82%, transparent);
   backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
@@ -111,6 +117,7 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .span-2 { grid-column: span 2; } .span-3 { grid-column: span 3; } .span-4 { grid-column: span 4; }
 .span-5 { grid-column: span 5; } .span-6 { grid-column: span 6; } .span-7 { grid-column: span 7; }
 .span-8 { grid-column: span 8; } .span-12 { grid-column: span 12; }
+@media (max-width: 1200px) and (min-width: 721px) { .chartsec { grid-column: span 6 !important; } }
 @media (max-width: 1200px) { .span-2 { grid-column: span 4; } .span-3, .span-4, .span-5, .span-7, .span-8 { grid-column: span 12; } .span-6 { grid-column: span 12; } }
 @media (max-width: 720px) { main { padding: 14px 16px; } .span-2 { grid-column: span 6; } header { flex-wrap: wrap; padding: 12px 16px; } }
 .kpi .label { color: var(--ink-2); font-size: 12.5px; display: flex; align-items: center; gap: 6px; }
@@ -134,30 +141,44 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .tip .t { color: var(--muted); margin-bottom: 4px; }
 .tip .r { display: flex; justify-content: space-between; gap: 14px; }
 .tip .r b { font-weight: 600; }
-/* The tier flow: four tiers, and an arrow for each move between them whose
-   width, label and moving dashes are the measured rate. */
-/* The tier flow: the four tiers in equal columns, and between each pair a
-   connector carrying the measured rate of that move. Rates are words, not
-   widths; colour is the tier the move goes to. */
-.tiers { display: grid; grid-template-columns: minmax(0, 1fr) 112px minmax(0, 1fr) 112px minmax(0, 1fr) 112px minmax(0, 1fr); margin-top: 12px; }
-.tier { min-width: 0; padding: 2px 4px; border-radius: var(--r-ctl); cursor: default; }
-.tier .th { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; white-space: nowrap; }
-.tier .th i { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.tier .th .ti { margin-left: auto; color: var(--muted); font-weight: 400; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
-.tier .tc { font-family: var(--serif); font-size: 34px; font-weight: 500; letter-spacing: -.4px; line-height: 1.15; margin: 6px 0 10px; }
-.tier .tb { display: flex; align-items: center; gap: 10px; }
-.tier .track { flex: 1; height: 4px; border-radius: 2px; background: var(--grid); overflow: hidden; }
-.tier .track i { display: block; height: 100%; width: 0; border-radius: 2px; transition: width .8s cubic-bezier(.2,.8,.2,1); }
-.tier .tp { font-size: 12px; color: var(--muted); min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
-.tier .tin { margin-top: 9px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 17px; }
-.tier .tin b, .move b, .flowfoot b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
-.move { display: flex; flex-direction: column; align-items: stretch; gap: 5px; padding: 22px 14px 0; cursor: default; }
-.move .lab { text-align: center; font-size: 12px; color: var(--muted); white-space: nowrap; line-height: 1.25; }
-.move .ln { position: relative; height: 1.5px; background: currentColor; border-radius: 1px; margin-right: 3px; }
-.move .ln::after { content: ""; position: absolute; right: -2px; top: 50%; width: 7px; height: 7px; border-top: 1.5px solid currentColor; border-right: 1.5px solid currentColor; transform: translateY(-50%) rotate(45deg); }
-.move.none { color: var(--axis) !important; }
-.flowfoot { margin-top: 12px; font-size: 12px; color: var(--muted); text-align: right; }
-@media (max-width: 720px) { .tiers { grid-template-columns: 1fr 1fr; row-gap: 14px; } .move { display: none; } }
+/* The tier flow as a map: the four tiers in a square, idling round it
+   clockwise -- awake, frozen, on disk, detached -- and every wake coming back
+   across the middle to awake. Each line carries its measured rate; colour is
+   the tier a move goes to. */
+.topo { position: relative; flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-rows: minmax(150px, 1fr) minmax(150px, 1fr); grid-template-areas: "hot frozen" "detached snapshot";
+  gap: 64px 132px; padding-top: 46px; margin-top: 4px; }
+.topo svg.edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.tnode { position: relative; z-index: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; cursor: default;
+  border: 1px solid var(--line); border-radius: var(--r-ctl); padding: 12px 14px 0; }
+.tnode .th { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.tnode .th i { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.tnode .th .ti { margin-left: auto; color: var(--muted); font-weight: 400; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.tnode .tc { font-family: var(--serif); font-size: 38px; font-weight: 500; letter-spacing: -.4px; line-height: 1.1; margin: 6px 0 8px; }
+.tnode .tb { display: flex; align-items: center; gap: 10px; }
+.tnode .track { flex: 1; height: 4px; border-radius: 2px; background: var(--grid); overflow: hidden; }
+.tnode .track i { display: block; height: 100%; width: 0; border-radius: 2px; transition: width .8s cubic-bezier(.2,.8,.2,1); }
+.tnode .tp { font-size: 12px; color: var(--muted); min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
+.tnode svg.tsp { flex: 1 1 0; min-height: 22px; width: calc(100% + 28px); margin: 8px -14px 0; display: block; }
+.elab { position: absolute; z-index: 2; transform: translate(-50%, -50%); font-size: 12px; color: var(--muted); white-space: nowrap; cursor: default;
+  background: var(--page); border: 1px solid var(--line); border-radius: var(--r-tag); padding: 1px 7px; }
+.elab b, .flowfoot b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.elab.none b { color: var(--muted); font-weight: 400; }
+.flowfoot { margin-top: 10px; font-size: 12px; color: var(--muted); text-align: right; }
+@media (max-width: 720px) { .topo { gap: 10px; padding-top: 0; } .topo svg.edges, .elab { display: none; } }
+/* Node headroom: free memory on each node now, tightest first, against the
+   floor the master holds back work under. */
+.room { flex: 1 1 auto; min-height: 0; overflow: hidden; display: grid; align-content: start; gap: 2px; margin-top: 2px; }
+.rrow { display: grid; grid-template-columns: minmax(56px, 92px) 1fr 54px; gap: 10px; align-items: center; height: 24px; font-size: 12.5px; cursor: default; }
+.rrow .rid { display: flex; align-items: center; gap: 7px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rrow .rid .dot::after { display: none; }
+.rrow .rbar { position: relative; height: 6px; border-radius: 3px; background: var(--grid); }
+.rrow .rbar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; }
+.rrow .rbar u { position: absolute; top: -4px; bottom: -4px; width: 1px; background: var(--ink-2); }
+.rrow .rv { text-align: right; color: var(--ink); font-variant-numeric: tabular-nums; }
+.rrow.down .rid, .rrow.down .rv { color: var(--muted); }
+.room .more { font-size: 12px; color: var(--muted); text-decoration: none; padding-top: 4px; }
+.room .more:hover { color: var(--ink); }
 
 /* Nodes, a row each. Their memory over time is the other view. */
 table.nodes-tbl td { vertical-align: middle; }
@@ -169,7 +190,10 @@ table.nodes-tbl tr.down td { opacity: .6; }
 .feats span { font-size: 10.5px; color: var(--muted); border: 1px solid var(--line); border-radius: var(--r-tag); padding: 0 5px; }
 .stack { display: flex; height: 6px; border-radius: 3px; overflow: hidden; gap: 2px; width: 160px; margin-top: 5px; }
 .stack i { display: block; height: 100%; min-width: 0; }
-.meter { position: relative; width: 96px; height: 5px; border-radius: 3px; background: var(--grid); margin-top: 6px; }
+/* Pressure as the node cards had it: one thin bar across the column, the
+   figure in its hover. */
+table.nodes-tbl th.psi { width: 18%; }
+.meter { position: relative; height: 4px; border-radius: 3px; background: var(--grid); min-width: 120px; }
 .meter i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; }
 .meter u { position: absolute; top: -3px; bottom: -3px; width: 1px; background: var(--ink-2); }
 /* The same nodes' free memory over the range: a strip each, on one scale and
@@ -218,9 +242,12 @@ canvas.strip { display: block; width: 100%; height: 20px; border-radius: var(--r
 .btn:hover { border-color: var(--accent); }
 .gate form.wide { width: min(620px, 94vw); position: relative; }
 .gate .x { position: absolute; top: 14px; right: 16px; margin: 0; width: auto; padding: 2px 8px; background: none; color: var(--muted); font-size: 20px; }
-.tabs { display: flex; gap: 6px; margin: 4px 0 14px; }
-.tabs button { margin: 0; width: auto; flex: 1; background: var(--card-2); color: var(--ink-2); border: 1px solid var(--line); font-weight: 600; }
-.tabs button[aria-selected="true"] { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.tabs { display: flex; gap: 2px; padding: 3px; margin: 4px 0 14px; border: 1px solid var(--line); border-radius: var(--r-ctl); background: var(--card-2); }
+.gate .tabs button { margin: 0; width: auto; flex: 1; padding: 7px 10px; background: none; color: var(--muted); border: 0; border-radius: calc(var(--r-ctl) - 3px); font-weight: 500; }
+.gate .tabs button:hover { color: var(--ink); }
+.gate .tabs button[aria-selected="true"] { background: var(--line); color: var(--ink); }
+/* A dialog's action is a button its own size, not a bar across it. */
+.gate .go { width: auto; padding: 8px 18px; margin-top: 14px; }
 .gate label { display: block; font-size: 12.5px; color: var(--ink-2); margin: 10px 0 4px; }
 .gate pre { background: var(--card-2); border: 1px solid var(--line); border-radius: var(--r-ctl); padding: 10px 12px; font-size: 12px;
   white-space: pre-wrap; word-break: break-all; margin: 10px 0 0; }
@@ -291,6 +318,25 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
 .pager .size { display: inline-flex; align-items: center; gap: 6px; }
 .pager .size select { font: inherit; font-size: 12.5px; padding: 4px 6px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: var(--card-2); color: var(--ink); }
 .flash { font-size: 12.5px; margin-left: 8px; }
+/* Our own dropdown over each select: a button that says the choice, and a
+   list in the menu's style. */
+select[data-dd] { display: none !important; }
+.dd { display: inline-flex; align-items: center; justify-content: space-between; gap: 10px; max-width: 100%; font: inherit; font-size: 13px; font-weight: 400;
+  padding: 7px 10px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: var(--card-2); color: var(--ink); cursor: pointer; text-align: left; white-space: nowrap; }
+.dd span { overflow: hidden; text-overflow: ellipsis; }
+.dd svg { width: 10px; height: 6px; flex: none; fill: none; stroke: var(--muted); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.dd:hover { border-color: color-mix(in srgb, var(--ink) 25%, var(--line)); }
+.dd[aria-expanded="true"] { border-color: color-mix(in srgb, var(--ink) 45%, var(--line)); }
+.dd:disabled { opacity: .5; cursor: default; }
+.step .dd { width: 100%; }
+.gate button.dd { width: 100%; margin: 0; padding: 10px 12px; border: 1px solid var(--line); background: var(--card-2); color: var(--ink); font-weight: 400; }
+.pager .size .dd { font-size: 12.5px; padding: 4px 8px; gap: 8px; }
+.ddl { z-index: 120; max-height: min(320px, 60vh); overflow-y: auto; }
+.ddl button { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.ddl button::before { content: ""; width: 12px; flex: none; color: var(--ink-2); }
+.ddl button[aria-selected="true"]::before { content: "✓"; }
+.ddl button:focus { background: var(--card-2); }
+.ddl button:disabled { color: var(--muted); cursor: default; }
 .gate .secret { display: flex; gap: 6px; align-items: stretch; margin-top: 6px; }
 .gate .secret code { flex: 1; background: var(--card-2); border: 1px solid var(--line); border-radius: var(--r-ctl); padding: 8px 10px; font-size: 12px; word-break: break-all; }
 .gate .secret button { margin: 0; width: auto; padding: 0 12px; }
@@ -302,7 +348,11 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
    and the charts draw to the box they are given. */
 @media (min-width: 1201px) and (min-height: 620px) {
   body.tab-overview main { height: calc(100vh - var(--head, 64px)); min-height: 560px; padding-top: 14px; padding-bottom: 14px; gap: 12px;
-    grid-template-rows: auto auto minmax(0, 1fr); }
+    grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr); }
+  body.tab-overview .flowsec { grid-row: span 2; }
+  body.tab-overview .topo { grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); row-gap: clamp(36px, 7vh, 64px); padding-top: 42px; }
+  body.tab-overview .tnode .tc { font-size: clamp(26px, 4.2vh, 38px); margin: 4px 0 6px; }
+  body.tab-overview .tnode svg.tsp { min-height: 0; }
   body.tab-overview main > .card:not(.kpi) { display: flex; flex-direction: column; min-height: 0; padding: 14px 18px; }
   body.tab-overview main > .card .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 6px; }
   body.tab-overview .legend { margin-bottom: 4px; }
@@ -325,15 +375,15 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
 /* The snapshot builder: three steps across, a terminal under them. */
 .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 6px; }
 @media (max-width: 960px) { .steps { grid-template-columns: 1fr; } }
-.step { border: 1px solid var(--line); border-radius: var(--r-ctl); padding: 12px 14px; background: var(--card-2); display: flex; flex-direction: column; gap: 8px; transition: opacity .3s, border-color .3s; }
+.step { border: 1px solid var(--line); border-radius: var(--r-ctl); padding: 12px 14px; background: transparent; display: flex; flex-direction: column; gap: 8px; transition: opacity .3s, border-color .3s; }
 .step.off { opacity: .45; pointer-events: none; }
-.step.now { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+.step.now { border-color: color-mix(in srgb, var(--ink) 28%, var(--line)); }
 .step .n { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--line); color: var(--ink); font-size: 11.5px; font-weight: 700; margin-right: 6px; }
 .step.done .n { background: var(--good); color: #fff; }
 .step.now .n { background: var(--accent); color: var(--on-accent); }
 .step h3 { margin: 0; font-size: 13.5px; font-weight: 600; display: flex; align-items: center; }
 .step label { font-size: 12px; color: var(--ink-2); }
-.step select, .step input[type=text], .step textarea { font: inherit; font-size: 13px; padding: 7px 10px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: var(--card); color: var(--ink); width: 100%; }
+.step select, .step input[type=text], .step textarea { font: inherit; font-size: 13px; padding: 7px 10px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: var(--card-2); color: var(--ink); width: 100%; }
 .step textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; min-height: 92px; resize: vertical; }
 .step .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .step .row .btn { flex: none; }
@@ -381,22 +431,26 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
   <section data-tab="overview" class="card kpi span-2" style="animation-delay:.18s"><div class="label">Creates / min</div><div class="value num" id="k-creates">0</div><div class="foot" id="k-creates-f"></div><svg class="spark" id="s-creates"></svg></section>
   <section data-tab="overview" class="card kpi span-2 last" style="animation-delay:.22s"><div class="label">API p99</div><div class="value num" id="k-p99">–</div><div class="foot" id="k-p99-f"></div><svg class="spark" id="s-p99"></svg></section>
 
-  <section data-tab="overview" class="card span-12 flowsec" style="animation-delay:.25s">
+  <section data-tab="overview" class="card span-6 flowsec" style="animation-delay:.25s">
     <h2>Tier flow</h2>
     <div class="sub" id="flowSub">Where the sandboxes are now, and how fast they have moved between tiers over the last half-minute.</div>
-    <div class="tiers" id="flow" role="group" aria-label="Sandboxes by tier, and the rates between tiers"></div>
+    <div class="topo" id="flow" role="group" aria-label="Sandboxes by tier, and the rates between tiers"></div>
     <div class="flowfoot" id="flowFoot"></div>
   </section>
 
-  <section data-tab="overview" class="card span-4 chartsec first" style="animation-delay:.34s">
+  <section data-tab="overview" class="card span-3 chartsec" style="animation-delay:.34s">
     <h2>Sandboxes by tier</h2><div class="sub" id="tiersSub">Over the selected range</div>
     <div class="legend" id="tiersLegend"></div>
     <svg class="chart" id="c-tiers" height="250"></svg>
   </section>
-  <section data-tab="overview" class="card span-4 chartsec" style="animation-delay:.38s">
+  <section data-tab="overview" class="card span-3 chartsec" style="animation-delay:.38s">
     <h2>Lifecycle rates</h2><div class="sub">Per second</div>
     <div class="legend" id="ratesLegend"></div>
     <svg class="chart" id="c-rates" height="250"></svg>
+  </section>
+  <section data-tab="overview" class="card span-3 chartsec" style="animation-delay:.42s">
+    <h2>Node headroom</h2><div class="sub" id="roomSub">Free memory, tightest first</div>
+    <div class="room" id="room"></div>
   </section>
 
   <section data-tab="nodes" class="card span-12" style="animation-delay:.42s">
@@ -473,7 +527,7 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
     <div class="tbl-wrap"><table class="tbl" id="snapTable"></table></div>
   </section>
 
-  <section data-tab="overview" class="card span-4 chartsec last" style="animation-delay:.5s">
+  <section data-tab="overview" class="card span-3 chartsec" style="animation-delay:.46s">
     <h2>Latency</h2><div class="sub">Milliseconds, log scale. The API, creates, and waiting for the store lock.</div>
     <div class="legend" id="latLegend"></div>
     <svg class="chart" id="c-lat" height="210"></svg>
@@ -516,7 +570,7 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
     <div id="paneDial">
       <p>For a machine the master cannot connect to, behind NAT or a firewall. Run one line on it; it dials in and joins.</p>
       <label for="dialPool">Pool</label><input id="dialPool" value="default">
-      <button type="button" id="mint">Make the command</button>
+      <button type="button" class="go" id="mint">Make the command</button>
       <pre id="mintCmd" hidden></pre>
       <div class="note" id="mintNote" hidden></div>
     </div>
@@ -529,7 +583,7 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
       <label for="addCode">Pairing code</label><input id="addCode" type="password" placeholder="64 hex characters, a dot, then the secret">
       <div class="hint" id="addCodeHint" hidden></div>
       <label for="addPool">Pool</label><input id="addPool" value="default">
-      <button type="submit" id="addGo">Add it</button>
+      <button type="submit" class="go" id="addGo">Add it</button>
       <div class="ok" id="addOk" hidden></div>
     </div>
     <div class="err" id="addErr"></div>
@@ -544,7 +598,7 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
     <label for="newTpl">Template</label><select id="newTpl"></select>
     <label for="newNode">Node</label><select id="newNode"><option value="">Any node with room</option></select>
     <label for="newPort">Port inside the sandbox</label><input id="newPort" type="number" min="1" max="65535" placeholder="the template's default">
-    <button type="submit" id="newGo">Create it</button>
+    <button type="submit" class="go" id="newGo">Create it</button>
     <div id="newOut" hidden>
       <div class="ok" id="newOk"></div>
       <div class="note">Its token is shown once. Requests to the sandbox's gateway port carry it in <code>x-sandstorm-sandbox-token</code>.</div>
@@ -807,29 +861,32 @@ function showTip(e, title, rows) {
 function hideTip() { $("tip").classList.remove("on"); }
 
 // ---- the tier flow ------------------------------------------------------------
-// The four tiers in a row and the moves between them, every number measured
-// over the last half-minute. What enters awake -- created, and woken by a
-// request from frozen or on disk -- is written under it; deletes leave from
-// any tier, so they are a footnote rather than an arrow.
+// A map of the tiers: idle carries a sandbox clockwise round the square --
+// awake, frozen, on disk, detached -- and a request wakes it back across the
+// middle to awake. Every rate is measured over the last half-minute. The
+// master counts wakes, not where they came from, so the three wake lines
+// meet in the middle and carry one rate on to awake. Deletes leave from any
+// tier, so they are a footnote rather than a line.
 const flow = { counts: { hot: 0, frozen: 0, snapshot: 0, detached: 0 }, rates: {} };
 // [rate key, the tier it goes to, verb, what it means]
-const FLOW_MOVES = [["frozen", "frozen", "freeze", "Awake sandboxes left idle are frozen: paused in memory."],
+const FLOW_MOVES = [["create", "hot", "new", "Sandboxes start awake when they are created."],
+  ["frozen", "frozen", "freeze", "Awake sandboxes left idle are frozen: paused in memory."],
   ["snapshot", "snapshot", "to disk", "Frozen sandboxes left idle longer are checkpointed to disk and leave memory."],
-  ["detached", "detached", "detach", "Sandboxes on disk left idle longest are detached from their node."]];
+  ["detached", "detached", "detach", "Sandboxes on disk left idle longest are detached from their node."],
+  ["wake", "hot", "wake", "A request to a frozen, on-disk or detached sandbox wakes it."]];
 function dur(s) { return s < 120 ? s + " s" : s < 7200 ? Math.round(s / 60) + " min" : Math.round(s / 3600) + " h"; }
 const perSec = (v) => v >= 1 ? fmt(v, 1) + "/s" : v > 0 ? fmt(v * 60, v * 60 < 10 ? 1 : 0) + "/min" : "none";
 function flowBuild() {
-  const tier = (t) => `<div class="tier" data-t="${t}">
+  const tier = (t) => `<div class="tnode" data-t="${t}" style="grid-area:${t}">
       <div class="th"><i style="background:var(--${t})"></i>${TIER_LABEL[t]}<span class="ti" id="f-hint-${t}"></span></div>
       <div class="tc num" id="f-cnt-${t}">0</div>
       <div class="tb"><span class="track"><i id="f-bar-${t}" style="background:var(--${t})"></i></span><span class="tp" id="f-pct-${t}"></span></div>
-      <div class="tin" id="f-in-${t}"></div></div>`;
-  const move = ([k, to, verb]) => `<div class="move" data-k="${k}" id="f-m-${k}" style="color:var(--${to})">
-      <div class="lab">${verb} <b id="f-r-${k}">–</b></div><div class="ln"></div></div>`;
-  $("flow").innerHTML = tier("hot") + move(FLOW_MOVES[0]) + tier("frozen") + move(FLOW_MOVES[1]) + tier("snapshot") + move(FLOW_MOVES[2]) + tier("detached");
+      <svg class="tsp" id="f-sp-${t}" aria-hidden="true"></svg></div>`;
+  const lab = ([k, , verb]) => `<div class="elab" data-k="${k}" id="f-l-${k}">${verb} <b id="f-r-${k}">–</b></div>`;
+  $("flow").innerHTML = `<svg class="edges" aria-hidden="true"></svg>` + TIERS.map(tier).join("") + FLOW_MOVES.map(lab).join("");
   $("flow").addEventListener("mousemove", (e) => {
     const c = flow.counts, r = flow.rates, total = TIERS.reduce((a, t) => a + (c[t] || 0), 0);
-    const t = e.target.closest(".tier"), m = e.target.closest(".move");
+    const t = e.target.closest(".tnode"), m = e.target.closest(".elab");
     if (t) {
       const id = t.dataset.t, idle = NOW ? NOW.idle : null, i = TIERS.indexOf(id);
       const rows = [["sandboxes", tierColor(id), fmt(c[id] || 0)], ["of the fleet", tierColor(id), total ? fmt(100 * (c[id] || 0) / total, 1) + "%" : "–"]];
@@ -846,6 +903,36 @@ function flowBuild() {
   $("flow").addEventListener("mouseleave", hideTip);
 }
 flowBuild();
+// The lines, from where the boxes are now: the grid sizes them, this joins them.
+function flowEdges() {
+  const box = $("flow"), svg = box.querySelector("svg.edges");
+  if (!box.offsetWidth) return;
+  svg.innerHTML = "";
+  if (getComputedStyle(svg).display === "none") return;
+  const o = box.getBoundingClientRect();
+  const R = (t) => {
+    const b = box.querySelector(`.tnode[data-t="${t}"]`).getBoundingClientRect();
+    return { l: b.left - o.left, r: b.right - o.left, t: b.top - o.top, b: b.bottom - o.top, cx: (b.left + b.right) / 2 - o.left, cy: (b.top + b.bottom) / 2 - o.top };
+  };
+  const A = R("hot"), B = R("frozen"), C = R("detached"), D = R("snapshot"), r = flow.rates, g = 5;
+  const H = [(A.r + B.l) / 2, (A.b + C.t) / 2];
+  const line = (p, q, k, head = true) => {
+    const on = r[k] > 0, color = on ? tierColor(FLOW_MOVES.find((x) => x[0] === k)[1]) : css("--axis");
+    const L = Math.hypot(q[0] - p[0], q[1] - p[1]) || 1, ux = (q[0] - p[0]) / L, uy = (q[1] - p[1]) / L;
+    let d = `M${p[0]},${p[1]}L${q[0]},${q[1]}`;
+    if (head) d += `M${q[0] - 7 * ux - 4 * uy},${q[1] - 7 * uy + 4 * ux}L${q[0]},${q[1]}L${q[0] - 7 * ux + 4 * uy},${q[1] - 7 * uy - 4 * ux}`;
+    const a = { d, fill: "none", stroke: color, "stroke-width": 1.5, "stroke-linecap": "round", "stroke-linejoin": "round" };
+    if (!on) a["stroke-dasharray"] = "3 4";
+    el("path", a, svg);
+  };
+  const at = (k, x, y) => { const l = $("f-l-" + k); l.style.left = x + "px"; l.style.top = y + "px"; };
+  line([A.cx, 12], [A.cx, A.t - g], "create"); at("create", A.cx, 12);
+  line([A.r + g, A.cy], [B.l - g, B.cy], "frozen"); at("frozen", H[0], A.cy);
+  line([B.cx, B.b + g], [D.cx, D.t - g], "snapshot"); at("snapshot", B.cx, H[1]);
+  line([D.l - g, D.cy], [C.r + g, C.cy], "detached"); at("detached", H[0], D.cy);
+  for (const p of [[B.l - 3, B.b + 3], [D.l - 3, D.t - 3], [C.r + 3, C.t - 3]]) line(p, H, "wake", false);
+  line(H, [A.r + 3, A.b + 3], "wake"); at("wake", H[0], H[1]);
+}
 function drawFlow() {
   const c = flow.counts, r = flow.rates, idle = NOW ? NOW.idle : null;
   const total = TIERS.reduce((a, t) => a + (c[t] || 0), 0);
@@ -856,16 +943,45 @@ function drawFlow() {
     $("f-hint-" + t).textContent = hint[t];
     $("f-pct-" + t).textContent = total ? `${fmt(100 * share, share > 0 && share < 0.01 ? 1 : 0)}%` : "";
     $("f-bar-" + t).style.width = (share > 0 ? Math.max(1.5, 100 * share) : 0) + "%";
+    spark($("f-sp-" + t), line("fleet.sandboxes", t), tierColor(t), true);
   }
-  $("f-in-hot").innerHTML = `new <b>${perSec(r.create || 0)}</b> · woken <b>${perSec(r.wake || 0)}</b>`;
   for (const [k] of FLOW_MOVES) {
     $("f-r-" + k).textContent = perSec(r[k] || 0);
-    $("f-m-" + k).classList.toggle("none", !(r[k] > 0));
+    $("f-l-" + k).classList.toggle("none", !(r[k] > 0));
   }
+  flowEdges();
   $("flowFoot").innerHTML = `deleted <b>${perSec(r.delete || 0)}</b> · from any tier`;
   $("flow").setAttribute("aria-label", TIERS.map((t) => `${TIER_LABEL[t]} ${fmt(c[t] || 0)}`).join(", ") +
-    `; freezing ${perSec(r.frozen || 0)}, to disk ${perSec(r.snapshot || 0)}, woken ${perSec(r.wake || 0)}`);
+    `; new ${perSec(r.create || 0)}, freezing ${perSec(r.frozen || 0)}, to disk ${perSec(r.snapshot || 0)}, detaching ${perSec(r.detached || 0)}, woken ${perSec(r.wake || 0)}`);
 }
+
+// ---- node headroom ------------------------------------------------------------
+// Free memory on each node now, tightest first, on one scale with the floor
+// marked; as many rows as the card holds, and the rest a link to Nodes.
+function drawRoom() {
+  const box = $("room"), floor = floorMib(), nodes = [...NOW.nodes].sort((a, b) => (b.connected - a.connected) || a.free_mib - b.free_mib);
+  if (!nodes.length) { box.innerHTML = `<div class="empty">No nodes yet.</div>`; return; }
+  const vmax = Math.max(2 * floor, ...nodes.map((n) => n.free_mib)) || 1;
+  const fits = box.clientHeight > 40 ? Math.max(1, Math.floor((box.clientHeight + 2) / 26)) : 8;
+  const shown = nodes.length > fits ? nodes.slice(0, fits - 1) : nodes;
+  box.innerHTML = shown.map((n) => {
+    const col = !n.connected ? "var(--axis)" : n.free_mib < floor ? "var(--bad)" : n.free_mib < 2 * floor ? "var(--warn)" : "color-mix(in srgb, var(--ink) 38%, transparent)";
+    return `<div class="rrow${n.connected ? "" : " down"}" data-id="${escapeHtml(n.id)}">
+      <span class="rid"><span class="dot${n.connected ? "" : " dead"}"></span>${escapeHtml(n.id)}</span>
+      <span class="rbar"><i style="width:${Math.min(100, 100 * n.free_mib / vmax)}%;background:${col}"></i>${floor > 0 ? `<u style="left:${100 * floor / vmax}%"></u>` : ""}</span>
+      <span class="rv">${n.connected ? gib(n.free_mib) : "silent"}</span></div>`;
+  }).join("") + (shown.length < nodes.length ? `<a class="more" href="#nodes">${nodes.length - shown.length} more on Nodes →</a>` : "");
+  const low = nodes.filter((n) => n.connected && n.free_mib < floor).length;
+  $("roomSub").textContent = (low ? `${low} under the floor` : "Tightest first") + (floor > 0 ? ` · line: ${fmt(floor)} MiB floor` : "");
+}
+$("room").addEventListener("mousemove", (e) => {
+  const row = e.target.closest(".rrow"); if (!row) return hideTip();
+  const n = NOW.nodes.find((x) => x.id === row.dataset.id); if (!n) return hideTip();
+  const total = TIERS.reduce((a, t) => a + (n.tiers[t] || 0), 0);
+  showTip(e, n.id, [["free", css("--ink-2"), fmt(n.free_mib) + " MiB"], ["sandboxes", css("--ink-2"), fmt(total)],
+    ["awake", tierColor("hot"), fmt(n.tiers.hot || 0)], ["pressure", css("--ink-2"), fmt(n.psi, 1)]]);
+});
+$("room").addEventListener("mouseleave", hideTip);
 
 // ---- nodes ----------------------------------------------------------------
 // Filtered and paged here: the master sends every node with each refresh,
@@ -920,7 +1036,7 @@ function nodeView(all) {
 }
 function nodeRows(all, nodes) {
   const floor = floorMib(), ceil = maxPsi();
-  $("ndTable").innerHTML = `<thead><tr><th>Node</th><th class="r">Free</th><th>Sandboxes</th><th>Pressure</th><th>Features</th><th class="r">Seen</th></tr></thead><tbody>` +
+  $("ndTable").innerHTML = `<thead><tr><th>Node</th><th class="r">Free</th><th>Sandboxes</th><th class="psi">Pressure</th><th>Features</th><th class="r">Seen</th></tr></thead><tbody>` +
     (nodes.length ? nodes.map((n) => {
       const total = TIERS.reduce((a, t) => a + (n.tiers[t] || 0), 0);
       const scale = hasCeil() ? 2 * ceil : 16;
@@ -930,7 +1046,7 @@ function nodeRows(all, nodes) {
         <td class="r num ${n.free_mib < floor ? "bad" : ""}" title="${fmt(n.free_mib)} MiB free">${gib(n.free_mib)}</td>
         <td><b class="num">${fmt(total)}</b> <span class="sub inline">${fmt(n.tiers.hot || 0)} awake</span>
           <div class="stack">${TIERS.map((t) => `<i title="${TIER_LABEL[t]}: ${fmt(n.tiers[t] || 0)}" style="flex-grow:${n.tiers[t] || 0};background:var(--${t})"></i>`).join("")}</div></td>
-        <td><span class="num">${fmt(n.psi, 1)}</span><div class="meter" title="memory pressure ${fmt(n.psi, 1)} (10 s average)${hasCeil() ? ` against ${fmt(ceil, 1)}` : ""}"><i style="width:${Math.min(100, n.psi / scale * 100)}%;background:${psiCol}"></i>${hasCeil() ? '<u style="left:50%"></u>' : ""}</div></td>
+        <td><div class="meter" title="memory pressure ${fmt(n.psi, 1)} (10 s average)${hasCeil() ? ` against ${fmt(ceil, 1)}` : ""}"><i style="width:${Math.min(100, n.psi / scale * 100)}%;background:${psiCol}"></i>${hasCeil() ? '<u style="left:50%"></u>' : ""}</div></td>
         <td><span class="feats">${n.features.map((f) => `<span>${escapeHtml(f)}</span>`).join("")}</span></td>
         <td class="r when">${n.connected ? ago(n.last_seen_age) : `silent ${ago(n.last_seen_age).replace(" ago", "")}`}</td></tr>`;
     }).join("")
@@ -1123,7 +1239,7 @@ function redrawAll(first = false) {
   ];
   legend($("latLegend"), lat.map((r) => [r.label, r.color, r.dash]));
   timeChart($("c-lat"), lat, { log: true, unit: " ms", first });
-  if (tab === "overview") drawFlow();
+  if (tab === "overview") { drawFlow(); drawRoom(); }
   if (tab === "nodes") nodeView(NOW.nodes);
   // KPI sparklines: a quiet grey, but for Awake, which is its tier's line,
   // and for a figure that has gone wrong, which takes the colour that says so.
@@ -1742,6 +1858,96 @@ showTab(tab);
 setTimeout(() => document.body.classList.add("settled"), 1500);
 if (!token) showGate(); else refresh(true);
 setInterval(() => refresh(false), 5000);
+
+// ---- dropdowns --------------------------------------------------------------
+// Every <select> wears our own button and list instead of the system's menu.
+// The select stays underneath as the value and the change event, so the code
+// that fills and reads it does not know the difference.
+const ddValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value");
+const ddIndex = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "selectedIndex");
+const ddList = document.createElement("div");
+ddList.className = "menu ddl"; ddList.hidden = true; ddList.setAttribute("role", "listbox");
+document.body.appendChild(ddList);
+let ddOpen = null;
+function ddSync(s) {
+  const o = s.options[s.selectedIndex];
+  s._dd.firstChild.textContent = o ? o.textContent : "";
+  s._dd.disabled = s.disabled;
+}
+function ddEnhance(s) {
+  if (s._dd) return;
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "dd";
+  b.setAttribute("aria-haspopup", "listbox"); b.setAttribute("aria-expanded", "false");
+  const label = s.id && document.querySelector(`label[for="${s.id}"]`);
+  const name = s.getAttribute("aria-label") || (label && label.textContent);
+  if (name) b.setAttribute("aria-label", name);
+  b.innerHTML = `<span></span><svg viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1l4 4 4-4"/></svg>`;
+  s._dd = b; s.dataset.dd = "";
+  s.after(b);
+  // Code that sets the value directly moves the button's label with it.
+  Object.defineProperty(s, "value", { configurable: true, get() { return ddValue.get.call(this); }, set(v) { ddValue.set.call(this, v); ddSync(this); } });
+  Object.defineProperty(s, "selectedIndex", { configurable: true, get() { return ddIndex.get.call(this); }, set(v) { ddIndex.set.call(this, v); ddSync(this); } });
+  new MutationObserver(() => ddSync(s)).observe(s, { childList: true, subtree: true, attributes: true, characterData: true });
+  s.addEventListener("change", () => ddSync(s));
+  b.addEventListener("click", () => (ddOpen === s ? ddClose() : ddShow(s)));
+  b.addEventListener("keydown", (e) => { if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); ddShow(s); } });
+  if (label) label.addEventListener("click", (e) => { e.preventDefault(); b.focus(); });
+  ddSync(s);
+}
+function ddShow(s) {
+  ddClose();
+  const b = s._dd, cur = s.selectedIndex;
+  ddList.innerHTML = [...s.options].map((o, i) =>
+    `<button type="button" role="option" data-i="${i}" aria-selected="${i === cur}"${o.disabled ? " disabled" : ""}>${escapeHtml(o.textContent)}</button>`).join("");
+  ddList.hidden = false; ddOpen = s; b.setAttribute("aria-expanded", "true");
+  const r = b.getBoundingClientRect();
+  ddList.style.minWidth = r.width + "px";
+  const h = ddList.offsetHeight, below = innerHeight - r.bottom - 8;
+  ddList.style.left = Math.max(8, Math.min(r.left, innerWidth - ddList.offsetWidth - 8)) + "px";
+  ddList.style.top = (h > below && r.top > below ? r.top - h - 4 : r.bottom + 4) + "px";
+  (ddList.querySelector('[aria-selected="true"]') || ddList.querySelector("button")).focus();
+}
+function ddClose(refocus) {
+  if (!ddOpen) return;
+  const b = ddOpen._dd;
+  ddOpen = null; ddList.hidden = true; b.setAttribute("aria-expanded", "false");
+  if (refocus) b.focus();
+}
+function ddPick(i) {
+  const s = ddOpen;
+  ddClose(true);
+  if (s.selectedIndex === i) return;
+  s.selectedIndex = i;
+  s.dispatchEvent(new Event("input", { bubbles: true }));
+  s.dispatchEvent(new Event("change", { bubbles: true }));
+}
+ddList.addEventListener("click", (e) => { const o = e.target.closest("button[data-i]"); if (o) ddPick(Number(o.dataset.i)); });
+ddList.addEventListener("keydown", (e) => {
+  const items = [...ddList.querySelectorAll("button:not(:disabled)")], at = items.indexOf(document.activeElement);
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    items[(at + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length].focus();
+  } else if (e.key === "Home" || e.key === "End") {
+    e.preventDefault(); items[e.key === "Home" ? 0 : items.length - 1].focus();
+  } else if (e.key === "Escape" || e.key === "Tab") {
+    // Escape closes the list, not the dialog under it.
+    e.preventDefault(); e.stopPropagation(); ddClose(true);
+  }
+});
+document.addEventListener("pointerdown", (e) => {
+  if (ddOpen && !ddList.contains(e.target) && !ddOpen._dd.contains(e.target)) ddClose();
+});
+addEventListener("scroll", (e) => { if (ddOpen && !ddList.contains(e.target)) ddClose(); }, true);
+addEventListener("resize", () => ddClose());
+for (const s of document.querySelectorAll("select")) ddEnhance(s);
+// The pager draws its own select with each page.
+new MutationObserver((ms) => {
+  for (const m of ms) for (const n of m.addedNodes) {
+    if (n.nodeType !== 1) continue;
+    for (const s of n.matches("select") ? [n] : n.querySelectorAll("select")) ddEnhance(s);
+  }
+}).observe(document.body, { childList: true, subtree: true });
 </script>
 </body>
 </html>

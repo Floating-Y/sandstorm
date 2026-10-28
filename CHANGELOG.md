@@ -49,16 +49,26 @@ fetched only while their tab is open.
 
 The overview fits one screen wherever the window is at least 1201 by 620:
 the cards share the height under the header, and the charts draw to the box
-they get. Smaller, it scrolls as before. Its tier flow is the four tiers in
-equal columns -- count, share of the fleet, how long idle puts a sandbox
-there -- with a connector between each pair carrying that move's measured
-rate, and what enters awake (created, and woken by a request) written under
-it. It replaces an animation of random particles, whose tanks filled
-relative to the largest tier, and the donut beside it, which showed the same
-four counts again. The KPI sparklines are a quiet grey but for Awake, in its
+they get. Smaller, it scrolls as before. Its tier flow is a map: the four
+tiers in a square, each with its count, share of the fleet, how long idle
+puts a sandbox there and its count over the range; idle carries sandboxes
+clockwise round it -- freeze, to disk, detach -- and wakes come back across
+the middle to awake, every line written with its measured rate. It takes the
+left half of the overview; beside it are sandboxes by tier, lifecycle rates,
+latency, and a new **Node headroom**: free memory on each node now, tightest
+first, against the floor. It replaces an animation of random particles,
+whose tanks filled relative to the largest tier, and a donut that showed the
+same four counts again. The KPI sparklines are a quiet grey but for Awake, in its
 tier's colour, and for a figure gone wrong -- a silent node, refused
 creates, an API p99 over 250 ms -- in the colour that says so; hovering a
-KPI, a tier or a move says what it is, like the charts.
+KPI, a tier, a move or a node says what it is, like the charts.
+
+Every choice list is the console's own dropdown rather than the system's
+menu, focus is shown in the theme's ink rather than the browser's blue, a
+dialog's two ways are a segmented control with its action a button its own
+size, the snapshot builder's steps are outlines like every other box, and a
+node's memory pressure is one thin bar across its column, as the node cards
+had it, with the figure in its hover.
 
 Sandboxes that will not start are a line above the sandbox table and a
 count on its Failing filter, which lists them with their errors -- not a
