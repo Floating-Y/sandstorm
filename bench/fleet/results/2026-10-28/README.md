@@ -1,9 +1,9 @@
 # Fleet run, 2026-10-28
 
 The same six nodes and master as [2026-10-26](../2026-10-26/README.md), with
-the wake fixes in [#360](https://github.com/deeplethe/sandstorm/pull/360), run
-again with every measurement repeated, and the same apps run on the same
-machines without Sandstorm.
+the wake fixes in [#360](https://github.com/deeplethe/sandstorm/pull/360) and
+[#361](https://github.com/deeplethe/sandstorm/pull/361), run again with every
+measurement repeated, and the same apps run on the same machines without Sandstorm.
 
 ## Setup
 
@@ -21,25 +21,28 @@ Builds:
 
 - **v6** ran the node suite ([`suite-node.sh`](../../suite-node.sh), every node at once): a wake makes room, reports what it put away, waits out memory pressure; held-back creates are never quarantined.
 - **v7** ran the walls, the fills and two more 80-per-node runs. It adds only the clearing away of sandboxes that died (the last bug below); wake and admission are v6's.
+- **v12** is `dev` at 872682b, with #360 and #361 merged, and ran the traffic runs again on the same parameters (`v12/`). #361 spares a sandbox only while a request is in flight, puts away the one least in demand, and refuses a wake that cannot start within 2 s instead of queueing it.
 
 ## Results
 
-`summary.py` prints every table below from the files here (`python3 bench/fleet/summary.py v6/*/mixed40-*.jsonl.gz`, ...).
+`summary.py` prints every table below from the files here (`python3 bench/fleet/summary.py v12/*/mixed40-*.jsonl.gz`, ...).
 
 ### Under traffic
 
 40 app64 per node, Zipf 1.1 popularity, open-loop arrivals at 1, 2, 4 and 8 req/s per node for 150 s each, three runs on six nodes. The same parameters as round 3, which ran on five nodes.
 
-| Per node | Round 3: refused | v6: refused | v6: p50 | v6: p99 |
-|---|---:|---:|---:|---:|
-| 1 req/s | 13% | **1.2%** | 10.8 ms | 2.4 s |
-| 2 req/s | 26% | **0.0%** | 7.3 ms | 2.0 s |
-| 4 req/s | 32% | **0.1%** | 10.3 ms | 2.4 s |
-| 8 req/s | 33% | **2.6%** | 13.8 ms | 12.1 s |
+| Per node | Round 3: refused | v6: refused | v6: p99 | v12: refused | v12: p50 | v12: p99 |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 req/s | 13% | 1.2% | 2.4 s | **1.1%** | 11.2 ms | 2.4 s |
+| 2 req/s | 26% | 0.0% | 2.0 s | **0.1%** | 7.2 ms | 2.0 s |
+| 4 req/s | 32% | 0.1% | 2.4 s | **0.2%** | 6.6 ms | 1.9 s |
+| 8 req/s | 33% | 2.6% | 12.1 s | **2.5%** | 8.0 ms | 2.3 s |
 
-What remains at 8 req/s is a node under its floor with nothing left that it may put away. The tail is the price of not refusing: a request that has to wait for a restore, and at 8 req/s for other restores ahead of it.
+40,506 requests at v12. p50 and p99 are of the requests answered. Run by run, 8 req/s refused 3.0%, 2.5% and 2.0%, and 1 req/s 1.7%, 0.9% and 0.9%.
 
-With 80 per node (two runs): 1.2%, 0.1%, 0.0% and 12.5% refused, p99 4.6 s, 2.3 s, 4.2 s and 58 s. At 8 req/s that is past what a node with room for about 12 awake can turn over.
+What remains at 8 req/s is a node under its floor with nothing left that it may put away. At v6 the tail was the price of not refusing: a request waited for a restore, and at 8 req/s for other restores ahead of it, up to 12 s. At v12 a wake that cannot start within 2 s is refused instead, and refusals did not rise for it: 2.6% then, 2.5% now, while the p99 at 8 req/s fell from 12.1 s to 2.3 s.
+
+With 80 per node (two runs): 1.1%, 0.1%, 0.3% and 10.6% refused at v12, p99 2.9 s, 1.9 s, 1.9 s and 3.2 s. v6 refused 12.5% at 8 req/s with a p99 of 58 s. At 8 req/s that is past what a node with room for about 12 awake can turn over.
 
 The builds in between, on the same parameters:
 
@@ -113,10 +116,10 @@ Docker's daemons are up only while Docker is measured and counted against it. Sa
 
 All fixed in [#360](https://github.com/deeplethe/sandstorm/pull/360) unless said otherwise.
 
-1. **A wake refused instead of making room.** The 13–33% above. A wake now puts the longest-idle sandboxes to disk first.
+1. **A wake refused instead of making room.** The 13–33% above. A wake now puts sandboxes to disk first: the longest-idle at #360, the least in demand since #361.
 2. **An eviction the master did not hear about was undone.** A report's observed tiers and its eviction list were read apart; one eviction fell between, and the master restored the sandbox 0.3 s after it went to disk. Evictions are now reported on every report for 15 s, and a restore of one is deferred meanwhile.
-3. **Making room was too timid.** It first spared anything that had answered in the last 15 s, which at 4 req/s was nearly everything hot; now 2 s.
-4. **Memory pressure refused wakes the node's own restores had caused.** A wake now waits up to 8 s for it to ease.
+3. **Making room was too timid.** It first spared anything that had answered in the last 15 s, which at 4 req/s was nearly everything hot; #360 made it 2 s, and #361 spares a sandbox only while a request to it is in flight.
+4. **Memory pressure refused wakes the node's own restores had caused.** #360 let a wake wait up to 8 s for it to ease; #361 bounds the whole wake, pressure included, to 2 s.
 5. **A held-back create was quarantined.** Counted as a failure, five hold-backs and the master stopped asking: 1,246 and 1,565 of 20,000 never started. Now reported as held back, never counted, retried within 5 s.
 6. **An error outlived the sandbox coming up.** `last_error` now clears when a report shows the sandbox up.
 7. **A sandbox that died kept its network, and its slot went to the next one.** A sandbox killed by the OOM killer left a bundle with nothing running, which a node does not report, so the master never asked for it to be destroyed; it handed the slot on, both veths held the same address, and the new sandbox ran for fifteen minutes unreachable. The node now clears away a sandbox dead for a minute, network included, and a slot's setup removes any veth still holding its address.

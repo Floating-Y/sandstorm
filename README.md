@@ -56,7 +56,7 @@ Every sandbox is in one of four tiers. It drops a tier at a time as it stays idl
 The four smaller panels in the figure at the top, in order:
 
 - **Waking.** Timed on the node, so no network is in the path. A hot sandbox answers in 3.8 ms. Frozen, the thaw takes 11 ms and reading its heap back from zswap takes most of the rest: about 100 ms. On disk, the restore is about 230 ms for a 64 MiB heap.
-- **Under traffic.** 40 sandboxes per node, where about 12 fit awake, with a few of them getting most requests. A wake that finds the node out of memory puts its longest-idle sandboxes to disk to make room, and one that finds memory under pressure waits for it to ease, so at 1, 2, 4 and 8 requests a second per node **1.2%, 0.0%, 0.1% and 2.6%** of requests were refused, against 13%, 26%, 32% and 33% before (three runs, 41,000 requests). The cost is in the tail: a request that has to wait for a restore takes 2 to 2.4 s at p99 up to 4 req/s, and 12 s at 8. Past what a node can turn over — 80 per node at 8 req/s — it refuses 12.5% and the p99 is close to a minute.
+- **Under traffic.** 40 sandboxes per node, where about 12 fit awake, with a few of them getting most requests. A wake that finds the node out of memory puts the sandboxes least in demand to disk to make room, and one that cannot start within 2 s is refused rather than queued, so at 1, 2, 4 and 8 requests a second per node **1.1%, 0.1%, 0.2% and 2.5%** of requests were refused, against 13%, 26%, 32% and 33% before (three runs, 40,500 requests). The cost is in the tail: a request that has to wait for a restore takes about 2 s at p99, at every rate. Past what a node can turn over — 80 per node at 8 req/s — it refuses 10.6%, with a p99 of 3.2 s.
 - **Heavier sandboxes.** With a large heap, a sandbox costs about what the same program does as a plain process: 13 against 11 per node at 64 MiB, 6 against 4 at 256 MiB, because the node squeezes idle pages into zswap and the test heap compresses well. With a small one, gVisor's own overhead dominates, which is what tiering makes up for. Waking from disk grows with the heap: 0.2 s at 64 MiB, 1 s at 256 and 512 MiB, 3.6 s at 1 GiB.
 
 ## Against the same machines without Sandstorm
@@ -148,7 +148,7 @@ v0.6 is not released yet, and it changes a lot: the backend moves from Firecrack
 
 Next, from what the fleet runs found:
 
-- [x] Make room on wake: put the least recently used sandbox to disk instead of refusing the request.
+- [x] Make room on wake: put the sandbox least in demand to disk instead of refusing the request.
 - [x] Retry a create the node held back once memory frees, instead of parking it; and clear its error once it runs.
 - [x] Clear away a sandbox that dies, network included, and restart it if it is still wanted.
 - [ ] Reserve capacity on the master as it places, so a burst cannot overshoot a node's last report.

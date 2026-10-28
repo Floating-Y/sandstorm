@@ -217,19 +217,20 @@ def jsonl(path):
     return []
 
 
-def runs(src, name, later=None):
+def runs(src, name, later=None, build="v6"):
     """Every row of one kind of run.
 
     Round 3 kept one file per kind (r3/sleep.jsonl). Later rounds keep each
     node's runs apart (v6/<node>/sleep-1.jsonl.gz, ...): each row is tagged
     with the run it came from, so times are never compared across runs.
+    `build` picks which build's runs: the traffic runs were taken again on v12.
     """
     rows = jsonl(src / "r3" / f"{name}.jsonl")
     if rows:
         return rows
     out = []
     stem = later or name
-    files = sorted(src.glob(f"v6/*/{stem}-*.jsonl.gz")) + sorted(src.glob(f"v6/*/{stem}.jsonl.gz"))
+    files = sorted(src.glob(f"{build}/*/{stem}-*.jsonl.gz")) + sorted(src.glob(f"{build}/*/{stem}.jsonl.gz"))
     for i, f in enumerate(files):
         out += [{**r, "_run": i} for r in jsonl(f)]
     return out
@@ -396,7 +397,7 @@ def herd(src, theme):
 
 
 def mixed(src, theme, w, h):
-    rows = [r for r in runs(src, "mixed", "mixed40") if r["kind"] == "req"]
+    rows = [r for r in runs(src, "mixed", "mixed40", build="v12") if r["kind"] == "req"]
     if not rows:
         return None
     t = THEMES[theme]
