@@ -86,7 +86,7 @@ screen, the logo's grains swirling, rather than a page of zeros; it says so
 if the master cannot be reached, and comes back if a new time range is slow
 to arrive. An answer for a range already left is dropped rather than drawn.
 Activity's icons are line drawings like the header's, not emoji.
-The tab's icon is the logo's swirl, its grains grown so it reads at 16 px,
+The tab's icon and the header's mark are the logo's swirl, its grains grown so it reads at 16 px,
 in the lighter orange on a dark system; the old one never loaded, its quotes
 ending the attribute early.
 
