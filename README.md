@@ -82,7 +82,7 @@ The same Python HTTP server on the same six nodes, each runtime kept in memory u
 | **Sandstorm, all awake** | **48** | **13** |
 | **Sandstorm, idle ones tiered** | **3,333** | |
 
-Starting, timed on one machine (bm: AMD EPYC 9K65, 2 vCPU, 3.6 GB) the way the baselines are: one at a time, polled every 50 ms until it answers ([`starttime.py`](bench/fleet/starttime.py)). Sandstorm's time includes the master placing the sandbox and the node setting up its network.
+Starting, timed on one machine (bm: AMD EPYC 9K65, 2 vCPU, 3.6 GB; dev at 872682b) the way the baselines are: one at a time, polled every 50 ms until it answers ([`starttime.py`](bench/fleet/starttime.py)). Sandstorm's time includes the master placing the sandbox and the node setting up its network.
 
 | Start to first answer, p50 | web | 64 MiB app |
 |---|---:|---:|

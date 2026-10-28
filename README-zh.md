@@ -82,7 +82,7 @@
 | **Sandstorm，全部常驻** | **48** | **13** |
 | **Sandstorm，闲置的分档** | **3,333** | |
 
-启动速度在同一台机器上测（bm：AMD EPYC 9K65，2 vCPU，3.6 GB），方法和基线一样：一次启动一个，每 50 ms 请求一次，直到它响应（[`starttime.py`](bench/fleet/starttime.py)）。Sandstorm 的时间包括 master 调度和节点建网络。
+启动速度在同一台机器上测（bm：AMD EPYC 9K65，2 vCPU，3.6 GB；dev 872682b），方法和基线一样：一次启动一个，每 50 ms 请求一次，直到它响应（[`starttime.py`](bench/fleet/starttime.py)）。Sandstorm 的时间包括 master 调度和节点建网络。
 
 | 启动到首次响应，p50 | web | 64 MiB 应用 |
 |---|---:|---:|

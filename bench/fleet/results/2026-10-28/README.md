@@ -92,7 +92,7 @@ The two that failed in fill 5 waited out the pressure for 8 s, but it stayed at 
 
 ### Start to first answer, one machine
 
-The create times above are not comparable with the baselines' start times: those start one instance at a time and poll every 50 ms, while `sizes` starts five at once per node and polls every 0.25 s, twice over. [`starttime.py`](../../starttime.py) times Sandstorm the baselines' way, and `baselines.py` ran again beside it, on bm (AMD EPYC 9K65, 2 vCPU, 3.6 GB; a faster CPU than the fleet nodes, so these are not the fleet's numbers). Twenty of each, p50, in `starttime/`:
+The create times above are not comparable with the baselines' start times: those start one instance at a time and poll every 50 ms, while `sizes` starts five at once per node and polls every 0.25 s, twice over. [`starttime.py`](../../starttime.py) times Sandstorm the baselines' way, and `baselines.py` ran again beside it, on bm (AMD EPYC 9K65, 2 vCPU, 3.6 GB; a faster CPU than the fleet nodes, so these are not the fleet's numbers), with `sandstormd` built from dev at 872682b, which has #360 and #361, and runsc `release-20261019.0`. Twenty of each, p50, in `starttime/`:
 
 | | web | app64 |
 |---|---:|---:|
