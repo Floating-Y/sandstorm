@@ -73,9 +73,6 @@ header { position: sticky; top: 0; z-index: 10; display: flex; align-items: cent
   background: var(--card-2); box-shadow: inset 0 0 0 1px var(--line), 0 1px 3px rgba(0,0,0,.2);
   transition: transform .42s cubic-bezier(.3,1.3,.4,1), width .42s cubic-bezier(.3,1.3,.4,1); }
 .tabs-nav .ind.still { transition: none; }
-main.entering > [data-tab]:not([hidden]) { animation: tabin .34s cubic-bezier(.2,.8,.2,1) both; }
-main.entering > [data-tab]:not([hidden]):nth-child(n+7) { animation-delay: .04s; }
-@keyframes tabin { from { opacity: 0; transform: translateY(8px) scale(.995); } }
 [data-tab][hidden] { display: none !important; }
 /* The cards rise in once, when the page opens; switching tabs just shows them. */
 body.settled .card { animation: none; }
@@ -112,14 +109,22 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .tip .t { color: var(--muted); margin-bottom: 4px; }
 .tip .r { display: flex; justify-content: space-between; gap: 14px; }
 .tip .r b { font-weight: 600; }
-#flow { width: 100%; height: 300px; display: block; }
-.donutwrap { display: flex; align-items: center; gap: 18px; }
-.donutwrap svg { flex: none; }
-.dlist { display: grid; gap: 8px; flex: 1; }
-.dlist .row { display: grid; grid-template-columns: 12px 1fr auto; gap: 8px; align-items: center; font-size: 13px; }
-.dlist .row .pct { color: var(--muted); font-size: 12px; }
-.dlist .bar { grid-column: 2 / 4; height: 4px; border-radius: 3px; background: var(--grid); overflow: hidden; margin-top: -4px; }
-.dlist .bar i { display: block; height: 100%; border-radius: 3px; transition: width .8s cubic-bezier(.2,.8,.2,1); }
+/* The tier flow: four tiers, and an arrow for each move between them whose
+   width, label and moving dashes are the measured rate. */
+#flow { width: 100%; height: 230px; display: block; overflow: visible; }
+#flow .box { fill: var(--card-2); stroke: var(--line); }
+#flow .lbl { fill: var(--ink-2); font-size: 12.5px; font-weight: 600; }
+#flow .hint, #flow .pct, #flow .verb, #flow .why { fill: var(--muted); font-size: 11.5px; }
+#flow .cnt { fill: var(--ink); font-weight: 700; letter-spacing: -.5px; }
+#flow .track { fill: var(--grid); }
+#flow .bar { transition: width .8s cubic-bezier(.2,.8,.2,1); }
+#flow .rate { fill: var(--ink); font-size: 12.5px; font-weight: 600; }
+#flow .pipe { fill: none; stroke-linecap: round; stroke-linejoin: round; opacity: .7; transition: stroke-width .6s; }
+#flow .pipe.none { stroke: var(--axis) !important; opacity: 1; }
+#flow .head { transition: d .6s; }
+#flow .head.none { fill: var(--axis) !important; }
+#flow .pulse { fill: none; stroke: #fff; stroke-opacity: .55; stroke-linecap: round; stroke-dasharray: 2 12; animation: flowdash 1s linear infinite; }
+@keyframes flowdash { to { stroke-dashoffset: -14; } }
 .nodes { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 12px; }
 .node { background: var(--card-2); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; position: relative;
   transition: opacity .4s, filter .4s, transform .25s; }
@@ -246,7 +251,7 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
    and the charts draw to the box they are given. */
 @media (min-width: 1201px) and (min-height: 620px) {
   body.tab-overview main { height: calc(100vh - var(--head, 64px)); min-height: 560px; padding-top: 14px; padding-bottom: 14px; gap: 12px;
-    grid-template-rows: auto minmax(0, 1.15fr) minmax(0, 1fr); }
+    grid-template-rows: auto minmax(0, .9fr) minmax(0, 1fr); }
   body.tab-overview main > .card:not(.kpi) { display: flex; flex-direction: column; min-height: 0; padding: 14px 16px; }
   body.tab-overview main > .card .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 6px; }
   body.tab-overview .legend { margin-bottom: 4px; }
@@ -255,8 +260,6 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
   body.tab-overview .kpi svg.spark { height: 36px; }
   body.tab-overview .kpi .foot { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   body.tab-overview #flow, body.tab-overview .chart { flex: 1 1 0; min-height: 0; height: auto; }
-  body.tab-overview .donutwrap { flex: 1 1 0; min-height: 0; }
-  body.tab-overview #donut { height: 100%; width: auto; max-height: 168px; max-width: 46%; }
 }
 /* Activity: the same table as the sandboxes. */
 table.tbl td.when { color: var(--muted); font-size: 12px; }
@@ -322,15 +325,10 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
   <section data-tab="overview" class="card kpi span-2" style="animation-delay:.18s"><div class="label">Creates / min</div><div class="value num" id="k-creates">0</div><div class="foot" id="k-creates-f"></div><svg class="spark" id="s-creates"></svg></section>
   <section data-tab="overview" class="card kpi span-2" style="animation-delay:.22s"><div class="label">API p99</div><div class="value num" id="k-p99">–</div><div class="foot" id="k-p99-f"></div><svg class="spark" id="s-p99"></svg></section>
 
-  <section data-tab="overview" class="card span-8" style="animation-delay:.25s">
+  <section data-tab="overview" class="card span-12" style="animation-delay:.25s">
     <h2>Tier flow</h2>
-    <div class="sub" id="flowSub">Sandboxes move right as they idle and jump back to awake when a request arrives. Each dot is a sandbox moving now.</div>
-    <canvas id="flow" aria-label="Animated flow of sandboxes between tiers"></canvas>
-  </section>
-  <section data-tab="overview" class="card span-4" style="animation-delay:.3s">
-    <h2>Where the sandboxes are</h2>
-    <div class="sub">Desired tier, right now</div>
-    <div class="donutwrap"><svg id="donut" width="168" height="168" viewBox="0 0 168 168" role="img" aria-label="Sandboxes by tier"></svg><div class="dlist" id="dlist"></div></div>
+    <div class="sub" id="flowSub">Where the sandboxes are now, and how fast they move between tiers. Each arrow is as wide as its rate over the last half-minute.</div>
+    <svg id="flow" role="img" aria-label="Sandboxes by tier, and the rates between tiers"></svg>
   </section>
 
   <section data-tab="overview" class="card span-5" style="animation-delay:.34s">
@@ -728,139 +726,90 @@ function showTip(e, title, rows) {
 }
 function hideTip() { $("tip").classList.remove("on"); }
 
-// ---- the tier flow: a particle system ---------------------------------------
-const flow = { particles: [], counts: { hot: 0, frozen: 0, snapshot: 0, detached: 0 }, shownCounts: { hot: 0, frozen: 0, snapshot: 0, detached: 0 }, rates: {}, acc: {}, last: performance.now() };
-function flowGeom() {
-  const c = $("flow"), dpr = devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
-  if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
-  const pad = 70, colW = Math.min(110, (w - pad * 2) / 6), gap = (w - pad * 2 - colW * 4) / 3;
-  const top = 38, bottom = h - 54;
-  const cols = {};
-  TIERS.forEach((t, i) => { cols[t] = { x: pad + i * (colW + gap), w: colW, top, bottom }; });
-  return { c, ctx: c.getContext("2d"), dpr, w, h, cols, pad };
-}
-function spawn(kind, n) {
-  for (let i = 0; i < n; i++) flow.particles.push({ kind, t: 0, dur: 1100 + Math.random() * 700, jitter: Math.random() - 0.5, size: 2 + Math.random() * 1.8 });
-}
-function flowRoute(g, kind) {
-  const C = g.cols, fill = (t) => { const c = C[t]; const max = Math.max(1, ...Object.values(flow.shownCounts)); return c.bottom - (c.bottom - c.top) * Math.max(0.04, flow.shownCounts[t] / max); };
-  const mid = (t) => C[t].x + C[t].w / 2;
-  const yIn = (t, j) => (fill(t) + C[t].bottom) / 2 + j * 30;
-  switch (kind) {
-    case "create": return { from: [g.pad * 0.35, C.hot.bottom - 40], to: [mid("hot"), yIn("hot", 0.3)], arc: -30, color: "hot" };
-    case "frozen": return { from: [mid("hot"), yIn("hot", 0)], to: [mid("frozen"), yIn("frozen", 0)], arc: -18, color: "frozen" };
-    case "snapshot": return { from: [mid("frozen"), yIn("frozen", 0)], to: [mid("snapshot"), yIn("snapshot", 0)], arc: -18, color: "snapshot" };
-    case "detached": return { from: [mid("snapshot"), yIn("snapshot", 0)], to: [mid("detached"), yIn("detached", 0)], arc: -18, color: "detached" };
-    case "wake": return { from: [mid("snapshot") - 20, C.snapshot.top + 10], to: [mid("hot"), C.hot.top + 10], arc: -60, color: "hot" };
-    case "delete": return { from: [mid("hot"), yIn("hot", 0)], to: [mid("hot") + 30, g.h - 6], arc: 0, color: "muted" };
-  }
-}
-function drawFlow(now) {
-  if (tab !== "overview") { flow.last = now; requestAnimationFrame(drawFlow); return; }
-  const g = flowGeom(), { ctx, dpr, w, h, cols } = g;
-  const dt = Math.min(100, now - flow.last); flow.last = now;
-  // counts ease toward their targets
-  for (const t of TIERS) flow.shownCounts[t] += (flow.counts[t] - flow.shownCounts[t]) * Math.min(1, dt / 350);
-  // emit at the measured rates, scaled so a quiet fleet still visibly moves
-  const scale = 1.0;
-  for (const [kind, r] of Object.entries(flow.rates)) {
-    flow.acc[kind] = (flow.acc[kind] || 0) + Math.min(40, r * scale) * dt / 1000;
-    const n = Math.floor(flow.acc[kind]); if (n > 0) { flow.acc[kind] -= n; spawn(kind, n); }
-  }
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, w, h);
-  const max = Math.max(1, ...Object.values(flow.shownCounts));
-  ctx.font = "600 12px system-ui, -apple-system, Segoe UI, sans-serif";
-  for (const t of TIERS) {
-    const c = cols[t], col = tierColor(t), level = c.bottom - (c.bottom - c.top) * (flow.shownCounts[t] / max);
-    // the tank
-    ctx.fillStyle = css("--card-2"); roundRect(ctx, c.x, c.top, c.w, c.bottom - c.top, 12); ctx.fill();
-    ctx.strokeStyle = css("--line"); ctx.lineWidth = 1; ctx.stroke();
-    // the liquid, with a slow wave on top
-    ctx.save(); roundRect(ctx, c.x, c.top, c.w, c.bottom - c.top, 12); ctx.clip();
-    const grad = ctx.createLinearGradient(0, level, 0, c.bottom);
-    grad.addColorStop(0, col); grad.addColorStop(1, col + "55");
-    ctx.fillStyle = grad; ctx.beginPath(); ctx.moveTo(c.x, c.bottom);
-    for (let x = 0; x <= c.w; x += 4) ctx.lineTo(c.x + x, level + Math.sin((x / c.w) * Math.PI * 2 + now / 600 + c.x) * (flow.shownCounts[t] > 0 ? 3 : 0));
-    ctx.lineTo(c.x + c.w, c.bottom); ctx.closePath(); ctx.fill(); ctx.restore();
-    // labels
-    ctx.fillStyle = css("--ink"); ctx.textAlign = "center";
-    ctx.font = "700 18px system-ui, -apple-system, Segoe UI, sans-serif";
-    ctx.fillText(fmt(Math.round(flow.shownCounts[t])), c.x + c.w / 2, c.top - 12);
-    ctx.font = "600 12px system-ui, -apple-system, Segoe UI, sans-serif";
-    ctx.fillStyle = css("--ink-2"); ctx.fillText(TIER_LABEL[t], c.x + c.w / 2, c.bottom + 20);
-    ctx.fillStyle = css("--muted"); ctx.font = "11px system-ui, -apple-system, Segoe UI, sans-serif";
-    const idle = NOW ? NOW.idle : null;
-    const hint = { hot: "running", frozen: idle ? `idle ${dur(idle[0])}` : "", snapshot: idle ? `idle ${dur(idle[1])}` : "", detached: idle ? `idle ${dur(idle[2])}` : "" }[t];
-    ctx.fillText(hint, c.x + c.w / 2, c.bottom + 36);
-  }
-  // arrows between tanks
-  ctx.strokeStyle = css("--axis"); ctx.lineWidth = 1.2;
-  for (let i = 0; i < 3; i++) {
-    const a = cols[TIERS[i]], b = cols[TIERS[i + 1]], y = (a.top + a.bottom) / 2;
-    ctx.beginPath(); ctx.moveTo(a.x + a.w + 10, y); ctx.lineTo(b.x - 10, y); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(b.x - 16, y - 4); ctx.lineTo(b.x - 10, y); ctx.lineTo(b.x - 16, y + 4); ctx.stroke();
-  }
-  // particles
-  const keep = [];
-  for (const p of flow.particles) {
-    p.t += dt / p.dur; if (p.t >= 1) continue; keep.push(p);
-    const r = flowRoute(g, p.kind); if (!r) continue;
-    const k = ease(p.t), [x0, y0] = r.from, [x1, y1] = r.to;
-    const cx = (x0 + x1) / 2 + p.jitter * 20, cy = Math.min(y0, y1) + r.arc + p.jitter * 26;
-    const x = (1 - k) * (1 - k) * x0 + 2 * (1 - k) * k * cx + k * k * x1;
-    const y = (1 - k) * (1 - k) * y0 + 2 * (1 - k) * k * cy + k * k * y1;
-    const color = r.color === "muted" ? css("--muted") : tierColor(r.color);
-    ctx.globalAlpha = Math.sin(Math.PI * Math.min(1, p.t * 1.1)) * 0.95;
-    ctx.shadowColor = color; ctx.shadowBlur = 10; ctx.fillStyle = color;
-    ctx.beginPath(); ctx.arc(x, y, p.size, 0, Math.PI * 2); ctx.fill();
-  }
-  ctx.globalAlpha = 1; ctx.shadowBlur = 0;
-  flow.particles = keep.slice(-1500);
-  // what is moving now
-  ctx.textAlign = "left"; ctx.fillStyle = css("--muted"); ctx.font = "11px system-ui, -apple-system, Segoe UI, sans-serif";
-  const r = flow.rates, per = (v) => v >= 1 ? fmt(v, 1) + "/s" : v > 0 ? fmt(v * 60, 0) + "/min" : "0";
-  ctx.fillText(`new ${per(r.create || 0)}`, 8, cols.hot.bottom - 46);
-  ctx.textAlign = "right";
-  ctx.fillText(`woken ${per(r.wake || 0)}  ·  frozen ${per(r.frozen || 0)}  ·  to disk ${per(r.snapshot || 0)}  ·  deleted ${per(r.delete || 0)}`, w - 8, h - 4);
-  requestAnimationFrame(drawFlow);
-}
-function roundRect(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+// ---- the tier flow ------------------------------------------------------------
+// Four tiers and the moves between them, every number a measured one: an
+// arrow's width and label are the rate over the last half-minute, its dashes
+// move faster as it does, and a wake is the arrow back to awake. The master
+// counts wakes, not where they came from, so that arrow leaves both cold
+// tiers it can come from.
+const flow = { counts: { hot: 0, frozen: 0, snapshot: 0, detached: 0 }, rates: {}, size: "", g: null };
+// [rate key, from tier, to tier, verb]
+const FLOW_MOVES = [["frozen", 0, 1, "freeze"], ["snapshot", 1, 2, "to disk"], ["detached", 2, 3, "detach"]];
 function dur(s) { return s < 120 ? s + " s" : s < 7200 ? Math.round(s / 60) + " min" : Math.round(s / 3600) + " h"; }
-
-// ---- donut ----------------------------------------------------------------
-const donutShown = { hot: 0, frozen: 0, snapshot: 0, detached: 0 };
-function donut(tiers) {
-  const svg = $("donut"), total = TIERS.reduce((a, t) => a + (tiers[t] || 0), 0);
-  const from = { ...donutShown }; Object.assign(donutShown, Object.fromEntries(TIERS.map((t) => [t, tiers[t] || 0])));
-  const t0 = performance.now();
-  const frame = (now) => {
-    const k = ease(Math.min(1, (now - t0) / 900));
-    const cur = Object.fromEntries(TIERS.map((t) => [t, from[t] + (donutShown[t] - from[t]) * k]));
-    const sum = TIERS.reduce((a, t) => a + cur[t], 0) || 1;
-    svg.innerHTML = "";
-    const cx = 84, cy = 84, r = 66, sw = 18;
-    el("circle", { cx, cy, r, fill: "none", stroke: css("--grid"), "stroke-width": sw }, svg);
-    let a0 = -Math.PI / 2;
-    for (const t of TIERS) {
-      const frac = cur[t] / sum; if (frac <= 0.0005) continue;
-      const a1 = a0 + frac * Math.PI * 2 - (frac < 1 ? 0.02 : 0);
-      const large = a1 - a0 > Math.PI ? 1 : 0;
-      const p = el("path", { d: `M${cx + r * Math.cos(a0)},${cy + r * Math.sin(a0)} A${r},${r} 0 ${large} 1 ${cx + r * Math.cos(a1)},${cy + r * Math.sin(a1)}`, fill: "none", stroke: tierColor(t), "stroke-width": sw, "stroke-linecap": "butt" }, svg);
-      p.addEventListener("mousemove", (e) => showTip(e, TIER_LABEL[t], [[TIER_LABEL[t], tierColor(t), fmt(donutShown[t]) + " · " + fmt(100 * donutShown[t] / (total || 1), 1) + "%"]]));
-      p.addEventListener("mouseleave", hideTip);
-      a0 = a1 + 0.02;
-    }
-    const tt = el("text", { x: cx, y: cy + 2, "text-anchor": "middle", "font-size": 24, "font-weight": 700, fill: css("--ink") }, svg);
-    tt.textContent = compact(Math.round(sum));
-    el("text", { x: cx, y: cy + 20, "text-anchor": "middle", "font-size": 11, fill: css("--muted") }, svg).textContent = "sandboxes";
-    if (k < 1) requestAnimationFrame(frame);
+const perSec = (v) => v >= 1 ? fmt(v, 1) + "/s" : v > 0 ? fmt(v * 60, 0) + "/min" : "none";
+const pipeW = (r) => r > 0 ? Math.min(11, 1.5 + 3 * Math.sqrt(r)) : 1.2;
+const headRight = (x, y, w) => { const s = 4 + w * 0.9; return `M${x - 1},${y - s * 0.8}L${x + s},${y}L${x - 1},${y + s * 0.8}Z`; };
+const headUp = (x, y, w) => { const s = 4 + w * 0.9; return `M${x - s * 0.8},${y + 1}L${x},${y - s}L${x + s * 0.8},${y + 1}Z`; };
+function flowBuild(svg, w, h) {
+  const L = 96, R = 8, top = 4, bottom = 50;
+  const G = Math.max(84, Math.min(150, w * 0.09));
+  const bw = (w - L - R - 3 * G) / 4, bh = Math.max(76, h - top - bottom);
+  const x = (i) => L + i * (bw + G), cx = (i) => x(i) + bw / 2;
+  const yMid = top + bh * 0.52, yBot = top + bh, yW = yBot + 22;
+  const fs = Math.max(20, Math.min(34, bh * 0.25));
+  const g = { x, cx, bw, bh, top, yMid, yBot, yW, L };
+  let m = "";
+  TIERS.forEach((t, i) => {
+    const X = x(i), pad = 16;
+    m += `<rect class="box" x="${X}" y="${top}" width="${bw}" height="${bh}" rx="12"/>
+      <rect x="${X}" y="${top + 12}" width="3" height="${bh - 24}" rx="1.5" style="fill:var(--${t})"/>
+      <text class="lbl" x="${X + pad}" y="${top + 24}">${TIER_LABEL[t]}</text>
+      <text class="hint" id="f-hint-${t}" x="${X + bw - 12}" y="${top + 24}" text-anchor="end"></text>
+      <text class="cnt num" id="f-cnt-${t}" x="${X + pad}" y="${top + 24 + fs + 8}" style="font-size:${fs}px">0</text>
+      ${bh > 104 ? `<text class="pct" id="f-pct-${t}" x="${X + pad}" y="${top + 24 + fs + 26}"></text>` : ""}
+      <rect class="track" x="${X + pad}" y="${yBot - 16}" width="${bw - pad * 2}" height="4" rx="2"/>
+      <rect class="bar" id="f-bar-${t}" x="${X + pad}" y="${yBot - 16}" width="0" height="4" rx="2" style="fill:var(--${t})"/>`;
+  });
+  const pipe = (k, d, color) => `<path class="pipe" id="f-p-${k}" d="${d}" style="stroke:var(--${color})"/><path class="pulse" id="f-d-${k}" d="${d}"/><path class="head" id="f-h-${k}" style="fill:var(--${color})"/>`;
+  const label = (k, X, Y, verb) => `<text text-anchor="middle" x="${X}" y="${Y}"><tspan class="verb" x="${X}" dy="0">${verb}</tspan><tspan class="rate" id="f-r-${k}" x="${X}" dy="16"></tspan></text>`;
+  // In: created.
+  m += pipe("create", `M8,${yMid}H${x(0) - 12}`, "hot") + label("create", (8 + x(0) - 12) / 2, yMid - 34, "new");
+  // Right, as they idle.
+  for (const [k, a, b, verb] of FLOW_MOVES) {
+    m += pipe(k, `M${x(a) + bw + 10},${yMid}H${x(b) - 12}`, TIERS[b]) + label(k, (x(a) + bw + x(b)) / 2, yMid - 34, verb);
+  }
+  // Back, on a request: out of on disk and frozen, into awake.
+  m += pipe("wake", `M${cx(2)},${yBot + 2}V${yW}H${cx(0)}V${yBot + 14}M${cx(1)},${yBot + 2}V${yW}`, "hot");
+  m += `<text text-anchor="middle" x="${(cx(0) + cx(2)) / 2}" y="${yW + 18}"><tspan class="verb">woken by a request </tspan><tspan class="rate" id="f-r-wake"></tspan><tspan class="why"> · from frozen or on disk</tspan></text>`;
+  m += `<text text-anchor="end" x="${w - R}" y="${yW + 18}"><tspan class="verb">deleted </tspan><tspan class="rate" id="f-r-delete"></tspan><tspan class="why"> · from any tier</tspan></text>`;
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  svg.innerHTML = m;
+  // Numbers carry over a rebuild rather than counting up from zero again.
+  for (const t of TIERS) { const el = $("f-cnt-" + t); shown.set(el, flow.counts[t] || 0); el.textContent = fmt(flow.counts[t] || 0); }
+  flow.g = g;
+}
+function drawFlow() {
+  const svg = $("flow"), w = svg.clientWidth, h = svg.clientHeight;
+  if (!w || !h) return;
+  if (flow.size !== `${w}x${h}`) { flow.size = `${w}x${h}`; flowBuild(svg, w, h); }
+  const g = flow.g, c = flow.counts, r = flow.rates;
+  const total = TIERS.reduce((a, t) => a + (c[t] || 0), 0);
+  const idle = NOW ? NOW.idle : null;
+  const hint = { hot: "running", frozen: idle ? `idle ${dur(idle[0])}+` : "", snapshot: idle ? `idle ${dur(idle[1])}+` : "", detached: idle ? `idle ${dur(idle[2])}+` : "" };
+  for (const t of TIERS) {
+    const share = total ? (c[t] || 0) / total : 0;
+    tweenText($("f-cnt-" + t), c[t] || 0);
+    $("f-hint-" + t).textContent = hint[t];
+    const pct = $("f-pct-" + t);
+    if (pct) pct.textContent = total ? `${fmt(100 * share, share > 0 && share < 0.01 ? 1 : 0)}% of the fleet` : "";
+    $("f-bar-" + t).setAttribute("width", Math.max(share > 0 ? 3 : 0, (g.bw - 32) * share).toFixed(1));
+  }
+  const set = (k, rate, head) => {
+    const wd = pipeW(rate), p = $("f-p-" + k), d = $("f-d-" + k), hd = $("f-h-" + k);
+    p.style.strokeWidth = wd; p.classList.toggle("none", !(rate > 0));
+    hd.setAttribute("d", head(wd)); hd.classList.toggle("none", !(rate > 0));
+    d.style.display = rate > 0 ? "" : "none";
+    d.style.strokeWidth = Math.max(1.2, wd * 0.45);
+    // About a dash a second at one a second, quicker as the rate rises.
+    if (rate > 0) d.style.animationDuration = Math.max(0.25, Math.min(3, 1.4 / Math.sqrt(rate))).toFixed(2) + "s";
+    $("f-r-" + k).textContent = perSec(rate);
   };
-  requestAnimationFrame(frame);
-  $("dlist").innerHTML = TIERS.map((t) => {
-    const v = tiers[t] || 0, pct = total ? 100 * v / total : 0;
-    return `<div class="row"><i class="swatch" style="background:var(--${t})"></i><span>${TIER_LABEL[t]}</span><span class="num">${fmt(v)} <span class="pct">${fmt(pct, 0)}%</span></span><div class="bar"><i style="width:${pct}%;background:var(--${t})"></i></div></div>`;
-  }).join("");
+  set("create", r.create || 0, (wd) => headRight(g.x(0) - 12, g.yMid, wd));
+  for (const [k, , b] of FLOW_MOVES) set(k, r[k] || 0, (wd) => headRight(g.x(b) - 12, g.yMid, wd));
+  set("wake", r.wake || 0, (wd) => headUp(g.cx(0), g.yBot + 14, wd));
+  $("f-r-delete").textContent = perSec(r.delete || 0);
+  $("flow").setAttribute("aria-label", TIERS.map((t) => `${TIER_LABEL[t]} ${fmt(c[t] || 0)}`).join(", ") +
+    `; freezing ${perSec(r.frozen || 0)}, to disk ${perSec(r.snapshot || 0)}, woken ${perSec(r.wake || 0)}`);
 }
 
 // ---- nodes ----------------------------------------------------------------
@@ -1046,7 +995,6 @@ function placeTabInd() {
   ind.style.transform = `translateX(${a.offsetLeft}px)`;
 }
 function showTab(t) {
-  const was = tab;
   tab = TABS.includes(t) ? t : "overview";
   for (const sec of document.querySelectorAll("main > [data-tab]")) sec.hidden = sec.dataset.tab !== tab;
   for (const a of $("tabs").querySelectorAll("a")) {
@@ -1055,11 +1003,6 @@ function showTab(t) {
   for (const x of TABS) document.body.classList.toggle("tab-" + x, x === tab);
   document.documentElement.style.setProperty("--head", document.querySelector("header").offsetHeight + "px");
   placeTabInd();
-  if (was !== tab && document.body.classList.contains("settled")) {
-    const m = document.querySelector("main");
-    m.classList.remove("entering"); void m.offsetWidth; m.classList.add("entering");
-    clearTimeout(showTab.t); showTab.t = setTimeout(() => m.classList.remove("entering"), 500);
-  }
   // The time range only shapes the charts.
   $("range").style.visibility = tab === "overview" || tab === "nodes" ? "" : "hidden";
   // Charts measure their box, which is nothing while hidden.
@@ -1094,6 +1037,7 @@ function redrawAll(first = false) {
   ];
   legend($("latLegend"), lat.map((r) => [r.label, r.color, r.dash]));
   timeChart($("c-lat"), lat, { log: true, unit: " ms", first });
+  if (tab === "overview") drawFlow();
   heat();
   nodeCards(NOW.nodes);
   // KPI sparklines
@@ -1142,7 +1086,6 @@ async function refresh(first = false) {
       wake: recent(line("rate.wakes")),
       delete: recent(line("rate.deletes")),
     };
-    donut(tiers);
     redrawAll(first || firstDraw); firstDraw = false;
     const nodeOpts = ["", ...now.nodes.map((n) => n.id)];
     if ($("sbNode").options.length !== nodeOpts.length) {
@@ -1687,7 +1630,6 @@ showTab(tab);
 setTimeout(() => document.body.classList.add("settled"), 1500);
 if (!token) showGate(); else refresh(true);
 setInterval(() => refresh(false), 5000);
-requestAnimationFrame(drawFlow);
 </script>
 </body>
 </html>

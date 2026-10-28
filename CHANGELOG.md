@@ -36,13 +36,18 @@ the one time the master hands it out; and the snapshots, with delete.
 of them it is the whole list, as before.
 
 It is in five tabs -- Overview, Nodes, Sandboxes, Snapshots and Activity --
-kept in the URL's hash, with counts on the tabs, a highlight that slides to
-the one picked, and the new tab's cards rising in. The sandbox and snapshot
-lists, and the activity, are fetched only while their tab is open.
+kept in the URL's hash, with counts on the tabs and a highlight that slides
+to the one picked. The sandbox and snapshot lists, and the activity, are
+fetched only while their tab is open.
 
 The overview fits one screen wherever the window is at least 1201 by 620:
 the cards share the height under the header, and the charts draw to the box
-they get. Smaller, it scrolls as before.
+they get. Smaller, it scrolls as before. Its tier flow is four tiers with
+their counts and share of the fleet, and an arrow for each move between
+them -- created, frozen, to disk, detached, and woken back to awake -- as
+wide as its measured rate and labelled with it. It replaces an animation of
+random particles, whose tanks filled relative to the largest tier, and the
+donut beside it, which showed the same four counts again.
 
 Sandboxes, nodes and activity share one pager: the range shown, the pages
 within reach, and 25, 50 or 100 a page, remembered per table. Nodes can be
