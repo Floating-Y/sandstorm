@@ -118,6 +118,27 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .card { background: transparent; border: 1px solid var(--line); border-radius: var(--r-card);
   padding: 16px 18px; position: relative; overflow: hidden;
   animation: rise .6s cubic-bezier(.2,.8,.2,1) both; }
+/* Loading: the page under the header, until the master first answers and
+   while a new time range comes in. The mark's grains swirl as they do in
+   the logo; a thin line runs under the header. */
+.loading { position: fixed; left: 0; right: 0; top: var(--head, 64px); bottom: 0; z-index: 9; display: grid; place-items: center;
+  background: var(--page); opacity: 0; transition: opacity .35s ease; pointer-events: none; }
+.loading.on { opacity: 1; pointer-events: auto; }
+.loading[hidden] { display: none; }
+.loading::before { content: ""; position: absolute; top: 0; left: 0; height: 2px; width: 28%; background: var(--brand);
+  animation: load-run 1.3s cubic-bezier(.45,.05,.55,.95) infinite; }
+.loading .lbox { display: grid; justify-items: center; gap: 18px; }
+.loading svg { width: 76px; height: 76px; overflow: visible; color: var(--brand); }
+.loading svg g { transform-box: fill-box; transform-origin: center; animation: spin 2.6s linear infinite; }
+.loading svg rect { fill: currentColor; animation: grain 1.3s ease-in-out infinite; }
+.loading .lmsg { font-size: 13px; color: var(--muted); letter-spacing: .2px; }
+.loading .lmsg::after { content: ""; display: inline-block; width: 1.2em; text-align: left; animation: dots 1.2s steps(4) infinite; }
+.loading.err::before, .loading.err svg g, .loading.err svg rect { animation-play-state: paused; }
+.loading.err .lmsg { color: var(--ink-2); }
+.loading.err .lmsg::after { content: none; }
+@keyframes load-run { 0% { left: -28%; } 100% { left: 100%; } }
+@keyframes grain { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+@keyframes dots { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75% { content: "..."; } }
 @keyframes rise { from { opacity: 0; transform: translateY(10px); } }
 .card h2 { margin: 0 0 2px; font-family: var(--serif); font-size: 18px; font-weight: 500; letter-spacing: -.1px; }
 .card { scroll-margin-top: calc(var(--head, 64px) + 12px); }
@@ -395,7 +416,10 @@ body.tab-overview main > .kpi { padding-bottom: 46px; }
 /* Activity: the same table as the sandboxes. */
 table.tbl td.when { color: var(--muted); font-size: 12px; }
 .evk { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; }
-.evk .ic { width: 22px; height: 22px; border-radius: var(--r-ctl); display: grid; place-items: center; font-size: 12px; }
+.evk .ic { width: 22px; height: 22px; border-radius: var(--r-ctl); display: grid; place-items: center; }
+.evk .ic svg { width: 13px; height: 13px; display: block; }
+.chips .kic { display: grid; place-items: center; }
+.chips .kic svg { width: 12px; height: 12px; display: block; }
 table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
 @keyframes rowin { from { background: color-mix(in srgb, var(--accent) 16%, transparent); } }
 /* The snapshot builder: three steps across, a terminal under them. */
@@ -450,6 +474,7 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
   <button class="iconbtn" id="signout" title="Forget the token">Sign out</button>
 </header>
 
+<div class="loading on" id="loading" role="status" aria-live="polite"><div class="lbox"><svg id="loadMark" aria-hidden="true"></svg><div class="lmsg" id="loadMsg">Loading the fleet</div></div></div>
 <main>
   <section data-tab="overview" class="card kpi span-2 first" style="animation-delay:.02s"><div class="label">Sandboxes</div><div class="value num" id="k-total">0</div><div class="foot" id="k-total-f"></div><svg class="spark" id="s-total"></svg></section>
   <section data-tab="overview" class="card kpi span-2" style="animation-delay:.06s"><div class="label"><span class="swatch" style="background:var(--hot)"></span>Awake</div><div class="value num" id="k-hot">0</div><div class="foot" id="k-hot-f"></div><svg class="spark" id="s-hot"></svg></section>
@@ -1159,7 +1184,18 @@ const hex = (s) => { s = s.replace("#", ""); return [0, 2, 4].map((i) => parseIn
 const mix = (a, b, k) => a.map((v, i) => Math.round(v + (b[i] - v) * Math.max(0, Math.min(1, k))));
 
 // ---- failures ------------------------------------------------------------------
-const ICON = { node_down: ["⏻", "--bad"], node_up: ["⏻", "--good"], failing: ["!", "--warn"], quarantined: ["⛔", "--bad"], refused: ["⊘", "--warn"], woken: ["↺", "--hot"], to_disk: ["⤓", "--snapshot"] };
+// Line icons in the same hand as the header's, coloured by what happened.
+const ico = (d) => `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+const I_POWER = ico('<path d="M8 2.2v5.3"/><path d="M4.7 4.3a5 5 0 1 0 6.6 0"/>');
+const ICON = {
+  node_down: [I_POWER, "--bad"], node_up: [I_POWER, "--good"],
+  failing: [ico('<path d="M8 2.5 14 13H2z"/><path d="M8 6.6v2.9"/><path d="M8 11.5h0"/>'), "--warn"],
+  quarantined: [ico('<circle cx="8" cy="8" r="5.8"/><path d="M5.2 8h5.6"/>'), "--bad"],
+  refused: [ico('<circle cx="8" cy="8" r="5.8"/><path d="M3.9 12.1l8.2-8.2"/>'), "--warn"],
+  woken: [ico('<path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9"/><path d="M2.5 2.5v3h3"/>'), "--hot"],
+  to_disk: [ico('<path d="M8 2.2v7.6"/><path d="M4.6 6.6 8 10l3.4-3.4"/><path d="M3 13.6h10"/>'), "--snapshot"],
+};
+const I_DOT = ico('<circle cx="8" cy="8" r="2" fill="currentColor" stroke="none"/>');
 const EV_LABEL = { node_down: "Node silent", node_up: "Node back", failing: "Not starting", quarantined: "Quarantined", refused: "Refused", woken: "Woken", to_disk: "To disk" };
 const ACT_KINDS = [["", "All"], ["node_down,node_up", "Nodes"], ["failing,quarantined", "Not starting"], ["refused", "Refused"], ["woken", "Woken"], ["to_disk", "To disk"]];
 
@@ -1169,7 +1205,7 @@ const ACT_KINDS = [["", "All"], ["node_down,node_up", "Nodes"], ["failing,quaran
 const act = { kind: "", q: "", since: 86400, offset: 0, size: pageSize("activity", 20), total: 0, rows: [], busy: false, seen: null };
 $("actKinds").innerHTML = ACT_KINDS.map(([k, l]) => {
   const [ic, col] = ICON[k.split(",")[0]] || [];
-  return `<button type="button" data-k="${k}" aria-pressed="${k === ""}">${ic ? `<span style="color:var(${col})">${ic}</span>` : ""}${l}</button>`;
+  return `<button type="button" data-k="${k}" aria-pressed="${k === ""}">${ic ? `<span class="kic" style="color:var(${col})">${ic}</span>` : ""}${l}</button>`;
 }).join("");
 $("actKinds").addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b) return;
@@ -1204,7 +1240,7 @@ function renderActivity() {
   const fresh = act.offset === 0 && act.seen ? (e) => !act.seen.has(key(e)) : () => false;
   $("actTable").innerHTML = `<thead><tr><th>When</th><th>What</th><th>Node or sandbox</th><th>Detail</th></tr></thead><tbody>` +
     (act.rows.length ? act.rows.map((e) => {
-      const [ic, col] = ICON[e.kind] || ["•", "--muted"];
+      const [ic, col] = ICON[e.kind] || [I_DOT, "--muted"];
       return `<tr${fresh(e) ? ' class="new"' : ""}>
         <td class="when" title="${escapeHtml(new Date(e.ts * 1000).toLocaleString())}">${ago(Math.max(0, nowS - e.ts))}</td>
         <td><span class="evk"><span class="ic" style="background:color-mix(in srgb, var(${col}) 18%, transparent);color:var(${col})">${ic}</span>${escapeHtml(EV_LABEL[e.kind] || e.kind)}</span></td>
@@ -1307,14 +1343,40 @@ function redrawAll(first = false) {
 // writes of its own store, normally a few milliseconds.
 const API_P99_WARN_MS = 250;
 
+// The loading screen: at once on the first load, and only if a new range
+// is slow to come (a quick one would just flash). It closes on an answer
+// from the refresh that opened it or a later one, never an older one.
+let loadT = 0, seq = 0, openedBy = 0;
+const rangeName = () => ($("range").querySelector(".on") || {}).textContent || "";
+function loading(on, msg, err = false) {
+  const L = $("loading");
+  clearTimeout(loadT);
+  if (on) {
+    $("loadMsg").textContent = msg || "Loading the fleet"; L.classList.toggle("err", err);
+    L.hidden = false; void L.offsetWidth; L.classList.add("on");
+  }
+  else if (!L.hidden) { L.classList.remove("on"); loadT = setTimeout(() => { L.hidden = true; }, 360); }
+}
+{
+  const g = $("brandMark").querySelector(".mark").cloneNode(true), svg = $("loadMark");
+  g.removeAttribute("transform"); svg.appendChild(g);
+  [...g.children].forEach((r, i, all) => { r.style.animationDelay = `${-(i % (all.length / 3)) * 0.09}s`; });
+  const b = g.getBBox(); svg.setAttribute("viewBox", `${b.x - 2} ${b.y - 2} ${b.width + 4} ${b.height + 4}`);
+}
 async function refresh(first = false) {
   if (!token) { showGate(); return; }
+  let slow = 0;
+  const r0 = range, id = ++seq;
+  const open = (msg) => { openedBy = id; loading(true, msg); };
+  if (first) { if (!lastOk) open(); else slow = setTimeout(() => open("Loading the last " + rangeName()), 220); }
   try {
     const step = range <= 900 ? 5 : undefined;
     const [now, series] = await Promise.all([
       api("/v1/console/now"),
       api(`/v1/console/series?since=${range}` + (step ? `&step=${step}` : "")),
     ]);
+    // An answer for a range the user has since left would undo the new one.
+    if (r0 !== range) { clearTimeout(slow); return; }
     NOW = now; S = series; lastOk = Date.now();
     const tiers = Object.fromEntries(TIERS.map((t) => [t, now.tiers[t] || 0]));
     const total = TIERS.reduce((a, t) => a + tiers[t], 0);
@@ -1360,8 +1422,12 @@ async function refresh(first = false) {
     $("n-nodes").classList.toggle("bad", up < now.nodes.length);
     failing(now.failing, now.failed);
     setLive(null);
+    clearTimeout(slow);
+    if (id >= openedBy) { openedBy = 0; loading(false); }
   } catch (e) {
+    clearTimeout(slow);
     if (String(e.message) !== "401") { console.warn(e); setLive(e); }
+    if (!lastOk) { openedBy = 0; loading(true, "Cannot reach the master. Trying again every 5 seconds.", true); }
   }
 }
 // The time of the last good refresh, which changes only when there is a new

@@ -81,6 +81,12 @@ control with the failing count in red text rather than a pill, and the
 failing-sandbox line is an outline with a warning edge. The header has a
 sun or moon for the theme and a link to the repository.
 
+Until the master first answers, the page under the header is a loading
+screen, the logo's grains swirling, rather than a page of zeros; it says so
+if the master cannot be reached, and comes back if a new time range is slow
+to arrive. An answer for a range already left is dropped rather than drawn.
+Activity's icons are line drawings like the header's, not emoji.
+
 Sandboxes that will not start are a line above the sandbox table and a
 count on its Failing filter, which lists them with their errors -- not a
 second list of the same rows under it. The Nodes tab shows its nodes as a table --
