@@ -285,29 +285,22 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
    share the height under the header instead of each taking what it likes,
    and the charts draw to the box they are given. */
 @media (min-width: 1201px) and (min-height: 620px) {
-  body.tab-overview main { height: calc(100vh - var(--head, 64px)); min-height: 560px; padding-top: 14px; padding-bottom: 14px; gap: 0;
+  body.tab-overview main { height: calc(100vh - var(--head, 64px)); min-height: 560px; padding-top: 14px; padding-bottom: 14px; gap: 12px;
     grid-template-rows: auto auto minmax(0, 1fr); }
-  body.tab-overview main > .card:not(.kpi) { display: flex; flex-direction: column; min-height: 0; }
+  body.tab-overview main > .card:not(.kpi) { display: flex; flex-direction: column; min-height: 0; padding: 14px 18px; }
   body.tab-overview main > .card .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 6px; }
   body.tab-overview .legend { margin-bottom: 4px; }
-  body.tab-overview main > .kpi { padding-top: 2px; padding-bottom: 40px; }
+  body.tab-overview main > .kpi { padding: 12px 18px 40px; }
   body.tab-overview .kpi .value { font-size: 30px; margin: 4px 0 0; }
   body.tab-overview .kpi svg.spark { height: 30px; }
   body.tab-overview .kpi .foot { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   body.tab-overview .chart { flex: 1 1 0; min-height: 0; height: auto; }
 }
-/* The overview without boxes: a strip of figures, then two sections, each
-   under a hairline. Other tabs keep their cards, which hold their tables. */
-body.tab-overview main { gap: 0; }
-body.tab-overview main > .card { background: none; border: 0; border-radius: 0; padding: 18px 0; overflow: visible; }
-body.tab-overview main > .kpi { padding: 4px 0 46px; }
-body.tab-overview main > .flowsec, body.tab-overview main > .chartsec { border-top: 1px solid var(--line); }
-@media (min-width: 1201px) {
-  /* Columns side by side: a hairline between them, not a gap. */
-  body.tab-overview main > .kpi, body.tab-overview main > .chartsec { padding-left: 22px; padding-right: 22px; border-left: 1px solid var(--line); }
-  body.tab-overview main > .kpi.first, body.tab-overview main > .chartsec.first { padding-left: 0; border-left: 0; }
-  body.tab-overview main > .kpi.last, body.tab-overview main > .chartsec.last { padding-right: 0; }
-}
+/* The overview's cards are outlines with no fill: each holds its own lines
+   and figures, the gaps between them are one size, and the columns of the
+   two rows meet at the same edges. */
+body.tab-overview main > .card { background: transparent; }
+body.tab-overview main > .kpi { padding-bottom: 46px; }
 /* Activity: the same table as the sandboxes. */
 table.tbl td.when { color: var(--muted); font-size: 12px; }
 .evk { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; }
@@ -378,7 +371,7 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
     <svg id="flow" role="img" aria-label="Sandboxes by tier, and the rates between tiers"></svg>
   </section>
 
-  <section data-tab="overview" class="card span-5 chartsec first" style="animation-delay:.34s">
+  <section data-tab="overview" class="card span-4 chartsec first" style="animation-delay:.34s">
     <h2>Sandboxes by tier</h2><div class="sub" id="tiersSub">Over the selected range</div>
     <div class="legend" id="tiersLegend"></div>
     <svg class="chart" id="c-tiers" height="250"></svg>
@@ -463,7 +456,7 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
     <div class="tbl-wrap"><table class="tbl" id="snapTable"></table></div>
   </section>
 
-  <section data-tab="overview" class="card span-3 chartsec last" style="animation-delay:.5s">
+  <section data-tab="overview" class="card span-4 chartsec last" style="animation-delay:.5s">
     <h2>Latency</h2><div class="sub">Milliseconds, log scale. The API, creates, and waiting for the store lock.</div>
     <div class="legend" id="latLegend"></div>
     <svg class="chart" id="c-lat" height="210"></svg>
