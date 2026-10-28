@@ -132,31 +132,19 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 #flow .pulse { fill: none; stroke: #fff; stroke-opacity: .32; stroke-linecap: round; stroke-dasharray: 12 48; animation: flowdash 1s linear infinite; }
 @keyframes flowdash { to { stroke-dashoffset: -60; } }
 #flow .rate.none { fill: var(--muted); font-weight: 500; }
-.nodes { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 12px; }
-.nodes[hidden] { display: none; }
-.node { background: var(--card-2); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; position: relative;
-  transition: opacity .4s, filter .4s, transform .25s; }
-.node:hover { transform: translateY(-2px); }
-.node.down { opacity: .55; filter: grayscale(.7); animation: shake .5s; }
-@keyframes shake { 20%, 60% { transform: translateX(-3px); } 40%, 80% { transform: translateX(3px); } }
-.node .top { display: flex; align-items: center; gap: 8px; }
-.node .name { font-weight: 600; }
-.node .pool { color: var(--muted); font-size: 11.5px; margin-left: auto; }
-.node .mid { display: flex; align-items: center; gap: 12px; margin: 10px 0 8px; }
-.ring { width: 64px; height: 64px; flex: none; }
-.ring .track { stroke: var(--grid); }
-.ring .fill { transition: stroke-dashoffset 1s cubic-bezier(.2,.8,.2,1), stroke .4s; }
-.ring text { font-size: 13px; font-weight: 700; fill: var(--ink); }
-.ring text.s { font-size: 9px; font-weight: 500; fill: var(--muted); }
-.node .facts { font-size: 12px; color: var(--ink-2); display: grid; gap: 2px; }
-.node .facts b { color: var(--ink); font-weight: 600; }
-.stack { display: flex; height: 7px; border-radius: 4px; overflow: hidden; gap: 2px; background: transparent; }
-.stack i { display: block; height: 100%; transition: flex-grow .8s cubic-bezier(.2,.8,.2,1); min-width: 0; }
-.psi { height: 4px; background: var(--grid); border-radius: 3px; position: relative; margin-top: 8px; }
-.psi i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; transition: width .8s, background .4s; }
-.psi u { position: absolute; top: -3px; bottom: -3px; width: 1px; background: var(--ink-2); }
-.feats { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+/* Nodes, a row each. Their memory over time is the other view. */
+table.nodes-tbl td { vertical-align: middle; }
+table.nodes-tbl tr.down td { opacity: .6; }
+.ndname { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.ndname .dot { flex: none; }
+.ndname .dot::after { display: none; }
+.feats { display: inline-flex; gap: 4px; flex-wrap: wrap; }
 .feats span { font-size: 10.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; }
+.stack { display: flex; height: 6px; border-radius: 3px; overflow: hidden; gap: 2px; width: 160px; margin-top: 5px; }
+.stack i { display: block; height: 100%; min-width: 0; }
+.meter { position: relative; width: 96px; height: 5px; border-radius: 3px; background: var(--grid); margin-top: 6px; }
+.meter i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; }
+.meter u { position: absolute; top: -3px; bottom: -3px; width: 1px; background: var(--ink-2); }
 /* The same nodes' free memory over the range: a strip each, on one scale and
    one time axis, so a column read down is one moment across the fleet. */
 .hrows { display: grid; gap: 6px; }
@@ -383,9 +371,9 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
     <div class="bar">
       <input id="ndQ" type="search" placeholder="Search by node or pool">
       <div class="chips" id="ndState"></div>
-      <div class="seg" id="ndView" role="group" aria-label="View"><button type="button" data-v="cards">Cards</button><button type="button" data-v="history">Memory over time</button></div>
+      <div class="seg" id="ndView" role="group" aria-label="View"><button type="button" data-v="table">Table</button><button type="button" data-v="history">Memory over time</button></div>
     </div>
-    <div class="nodes" id="nodes"></div>
+    <div class="tbl-wrap" id="ndTableWrap"><table class="tbl nodes-tbl" id="ndTable"></table></div>
     <div id="ndHist" hidden>
       <div class="heatlegend" id="ndLegend"></div>
       <div class="hrows" id="ndRows"></div>
@@ -875,9 +863,9 @@ const floorMib = () => (NOW && NOW.floor_mib != null ? NOW.floor_mib : 512);
 const maxPsi = () => (NOW && NOW.max_psi != null ? NOW.max_psi : 8);
 const hasCeil = () => maxPsi() < 100;
 const gib = (m) => m >= 1024 ? fmt(m / 1024, m >= 10240 ? 0 : 1) + "G" : fmt(m) + "M";
-// Cards or their memory over time: one view at a time, on the same search,
-// filter and page, remembered in this browser.
-nd.view = "cards";
+// A table of the nodes or their memory over time: one view at a time, on
+// the same search, filter and page, remembered in this browser.
+nd.view = "table";
 try { if (localStorage.getItem("sandstorm-console-nodes-view") === "history") nd.view = "history"; } catch (e) {}
 function markView() { for (const b of $("ndView").children) b.classList.toggle("on", b.dataset.v === nd.view); }
 markView();
@@ -890,7 +878,7 @@ $("ndView").addEventListener("click", (e) => {
 function nodeView(all) {
   const up = all.filter((n) => n.connected).length, floor = floorMib(), ceil = maxPsi();
   const limits = [floor > 0 ? `under ${fmt(floor)} MiB free` : "", hasCeil() ? `over ${fmt(ceil, 1)} memory pressure` : ""].filter(Boolean);
-  $("nodesSub").textContent = `${up} of ${all.length} answering.` + (nd.view === "cards" ? " Ring: free memory. Bar: memory pressure." : "") +
+  $("nodesSub").textContent = `${up} of ${all.length} answering.` +
     (limits.length ? ` The master holds back work from a node ${limits.join(" or ")}.` : "");
   const match = all.filter((n) => (!nd.q || n.id.toLowerCase().includes(nd.q) || n.pool.toLowerCase().includes(nd.q))
     && (nd.state === "" || (nd.state === "up" ? n.connected : nd.state === "down" ? !n.connected : n.connected && ((hasCeil() && n.psi > ceil / 2) || n.free_mib < floor))))
@@ -901,53 +889,28 @@ function nodeView(all) {
     if (size !== nd.size) { nd.size = size; keepPageSize("nodes", size); }
     nd.offset = off; nodeView(all);
   });
-  $("nodes").hidden = nd.view !== "cards";
+  $("ndTableWrap").hidden = nd.view !== "table";
   $("ndHist").hidden = nd.view !== "history";
-  if (nd.view === "cards") nodeCards(all, match, nodes);
+  if (nd.view === "table") nodeRows(all, nodes);
   else nodeHistory(all, match, nodes);
 }
-function nodeCards(all, match, nodes) {
-  const box = $("nodes"), floor = floorMib(), ceil = maxPsi();
-  if (!match.length) box.innerHTML = `<div class="empty">${all.length ? "No node matches." : "No nodes yet. Use “+ Add a node”."}</div>`;
-  else box.querySelector(".empty")?.remove();
-  const seen = new Set();
-  for (const n of nodes) {
-    seen.add(n.id);
-    let card = box.querySelector(`[data-id="${CSS.escape(n.id)}"]`);
-    if (!card) {
-      card = document.createElement("div"); card.className = "node"; card.dataset.id = n.id;
-      card.innerHTML = `<div class="top"><span class="dot"></span><span class="name"></span><span class="pool"></span></div>
-        <div class="mid"><svg class="ring" viewBox="0 0 64 64"><circle class="track" cx="32" cy="32" r="26" fill="none" stroke-width="7"/><circle class="fill" cx="32" cy="32" r="26" fill="none" stroke-width="7" stroke-linecap="round" transform="rotate(-90 32 32)" stroke-dasharray="163.4" stroke-dashoffset="163.4"/><text x="32" y="33" text-anchor="middle" class="v"></text><text x="32" y="44" text-anchor="middle" class="s">free</text></svg>
-        <div class="facts"><div><b class="cnt num"></b> sandboxes</div><div><b class="hot num"></b> awake</div><div class="seen"></div></div></div>
-        <div class="stack"></div><div class="psi"><i></i><u></u></div><div class="feats"></div>`;
-      box.appendChild(card);
-    }
-    const total = TIERS.reduce((a, t) => a + (n.tiers[t] || 0), 0);
-    const freeLine = line("node.free_mib", n.id);
-    const memMax = Math.max(n.free_mib, ...freeLine.map((p) => p[1]), 1) * 1.05;
-    const frac = Math.max(0, Math.min(1, n.free_mib / memMax));
-    card.classList.toggle("down", !n.connected);
-    card.querySelector(".dot").className = "dot" + (n.connected ? (hasCeil() && n.psi > ceil ? " stale" : "") : " dead");
-    card.querySelector(".name").textContent = n.id;
-    card.querySelector(".pool").textContent = n.pool;
-    const ring = card.querySelector(".fill");
-    ring.style.strokeDashoffset = (163.4 * (1 - frac)).toFixed(1);
-    ring.style.stroke = n.free_mib < floor ? "var(--bad)" : n.free_mib < Math.max(floor * 1.75, 1) ? "var(--warn)" : "var(--snapshot)";
-    card.querySelector(".v").textContent = n.free_mib >= 1024 ? (n.free_mib / 1024).toFixed(1) + "G" : n.free_mib + "M";
-    tweenText(card.querySelector(".cnt"), total);
-    tweenText(card.querySelector(".hot"), n.tiers.hot || 0);
-    card.querySelector(".seen").textContent = n.connected ? `seen ${ago(n.last_seen_age)}` : `silent for ${ago(n.last_seen_age).replace(" ago", "")}`;
-    card.querySelector(".stack").innerHTML = TIERS.map((t) => `<i title="${TIER_LABEL[t]}: ${n.tiers[t] || 0}" style="flex-grow:${n.tiers[t] || 0};background:var(--${t})"></i>`).join("") || "";
-    const psi = card.querySelector(".psi i");
-    const scale = hasCeil() ? 2 * ceil : 16;
-    psi.style.width = Math.min(100, n.psi / scale * 100) + "%";
-    psi.style.background = hasCeil() && n.psi > ceil ? "var(--bad)" : hasCeil() && n.psi > ceil / 2 ? "var(--warn)" : "var(--frozen)";
-    card.querySelector(".psi u").style.display = hasCeil() ? "" : "none";
-    card.querySelector(".psi u").style.left = "50%";
-    card.querySelector(".psi").title = `memory pressure ${fmt(n.psi, 1)} (10 s average)`;
-    card.querySelector(".feats").innerHTML = n.features.map((f) => `<span>${escapeHtml(f)}</span>`).join("");
-  }
-  for (const c of [...box.children]) if (c.dataset.id && !seen.has(c.dataset.id)) c.remove();
+function nodeRows(all, nodes) {
+  const floor = floorMib(), ceil = maxPsi();
+  $("ndTable").innerHTML = `<thead><tr><th>Node</th><th class="r">Free</th><th>Sandboxes</th><th>Pressure</th><th>Features</th><th class="r">Seen</th></tr></thead><tbody>` +
+    (nodes.length ? nodes.map((n) => {
+      const total = TIERS.reduce((a, t) => a + (n.tiers[t] || 0), 0);
+      const scale = hasCeil() ? 2 * ceil : 16;
+      const psiCol = hasCeil() && n.psi > ceil ? "var(--bad)" : hasCeil() && n.psi > ceil / 2 ? "var(--warn)" : "var(--frozen)";
+      return `<tr class="${n.connected ? "" : "down"}">
+        <td><div class="ndname"><span class="dot${n.connected ? (hasCeil() && n.psi > ceil ? " stale" : "") : " dead"}"></span>${escapeHtml(n.id)}</div><div class="sub">${escapeHtml(n.pool)}</div></td>
+        <td class="r num ${n.free_mib < floor ? "bad" : ""}" title="${fmt(n.free_mib)} MiB free">${gib(n.free_mib)}</td>
+        <td><b class="num">${fmt(total)}</b> <span class="sub inline">${fmt(n.tiers.hot || 0)} awake</span>
+          <div class="stack">${TIERS.map((t) => `<i title="${TIER_LABEL[t]}: ${fmt(n.tiers[t] || 0)}" style="flex-grow:${n.tiers[t] || 0};background:var(--${t})"></i>`).join("")}</div></td>
+        <td><span class="num">${fmt(n.psi, 1)}</span><div class="meter" title="memory pressure ${fmt(n.psi, 1)} (10 s average)${hasCeil() ? ` against ${fmt(ceil, 1)}` : ""}"><i style="width:${Math.min(100, n.psi / scale * 100)}%;background:${psiCol}"></i>${hasCeil() ? '<u style="left:50%"></u>' : ""}</div></td>
+        <td><span class="feats">${n.features.map((f) => `<span>${escapeHtml(f)}</span>`).join("")}</span></td>
+        <td class="r when">${n.connected ? ago(n.last_seen_age) : `silent ${ago(n.last_seen_age).replace(" ago", "")}`}</td></tr>`;
+    }).join("")
+    : `<tr><td colspan="6"><div class="empty">${all.length ? "No node matches." : "No nodes yet. Use “+ Add a node”."}</div></td></tr>`) + "</tbody>";
 }
 function nodeHistory(all, match, nodes) {
   $("ndRows").innerHTML = nodes.length ? nodes.map((n) => `<div class="hrow${n.connected ? "" : " down"}">

@@ -52,12 +52,13 @@ donut beside it, which showed the same four counts again.
 
 Sandboxes that will not start are a line above the sandbox table and a
 count on its Failing filter, which lists them with their errors -- not a
-second list of the same rows under it. The Nodes tab shows its nodes as cards or
-as their memory over time, one view at a time on the same search, filter
-and page. Over time is a strip a node on one scale and one time axis, with
+second list of the same rows under it. The Nodes tab shows its nodes as a table --
+free memory, sandboxes by tier, pressure, features, when last seen -- or as
+their memory over time, one view at a time on the same search, filter and
+page. Over time is a strip a node on one scale and one time axis, with
 a legend in MiB, so a column read down is one moment across the fleet; time
 under the master's floor is red. The floor and the pressure ceiling the
-cards and strips mark are the master's own, now in `GET /v1/console/now`
+table and strips mark are the master's own, now in `GET /v1/console/now`
 as `floor_mib` and `max_psi`.
 
 Sandboxes, nodes and activity share one pager: the range shown, the pages
