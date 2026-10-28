@@ -127,22 +127,40 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 #flow .pulse { fill: none; stroke: #fff; stroke-opacity: .32; stroke-linecap: round; stroke-dasharray: 12 48; animation: flowdash 1s linear infinite; }
 @keyframes flowdash { to { stroke-dashoffset: -60; } }
 #flow .rate.none { fill: var(--muted); font-weight: 500; }
-/* Nodes: one row each, and its free memory over the range as a strip on a
-   scale shared by every row, so a column read down is one moment across
-   the fleet. */
-table.nodes-tbl td { vertical-align: middle; }
-table.nodes-tbl th.hist, table.nodes-tbl td.hist { width: 38%; min-width: 240px; }
-table.nodes-tbl tr.down td { opacity: .6; }
-.ndname { display: flex; align-items: center; gap: 8px; font-weight: 600; }
-.ndname .dot { flex: none; }
-.ndname .dot::after { display: none; }
-.feats { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.nodes { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 12px; }
+.nodes[hidden] { display: none; }
+.node { background: var(--card-2); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; position: relative;
+  transition: opacity .4s, filter .4s, transform .25s; }
+.node:hover { transform: translateY(-2px); }
+.node.down { opacity: .55; filter: grayscale(.7); animation: shake .5s; }
+@keyframes shake { 20%, 60% { transform: translateX(-3px); } 40%, 80% { transform: translateX(3px); } }
+.node .top { display: flex; align-items: center; gap: 8px; }
+.node .name { font-weight: 600; }
+.node .pool { color: var(--muted); font-size: 11.5px; margin-left: auto; }
+.node .mid { display: flex; align-items: center; gap: 12px; margin: 10px 0 8px; }
+.ring { width: 64px; height: 64px; flex: none; }
+.ring .track { stroke: var(--grid); }
+.ring .fill { transition: stroke-dashoffset 1s cubic-bezier(.2,.8,.2,1), stroke .4s; }
+.ring text { font-size: 13px; font-weight: 700; fill: var(--ink); }
+.ring text.s { font-size: 9px; font-weight: 500; fill: var(--muted); }
+.node .facts { font-size: 12px; color: var(--ink-2); display: grid; gap: 2px; }
+.node .facts b { color: var(--ink); font-weight: 600; }
+.stack { display: flex; height: 7px; border-radius: 4px; overflow: hidden; gap: 2px; background: transparent; }
+.stack i { display: block; height: 100%; transition: flex-grow .8s cubic-bezier(.2,.8,.2,1); min-width: 0; }
+.psi { height: 4px; background: var(--grid); border-radius: 3px; position: relative; margin-top: 8px; }
+.psi i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; transition: width .8s, background .4s; }
+.psi u { position: absolute; top: -3px; bottom: -3px; width: 1px; background: var(--ink-2); }
+.feats { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
 .feats span { font-size: 10.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; }
-.stack { display: flex; height: 6px; border-radius: 3px; overflow: hidden; gap: 2px; width: 140px; margin-top: 5px; }
-.stack i { display: block; height: 100%; min-width: 0; }
-.meter { position: relative; width: 84px; height: 5px; border-radius: 3px; background: var(--grid); margin-top: 6px; }
-.meter i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; }
-.meter u { position: absolute; top: -3px; bottom: -3px; width: 1px; background: var(--ink-2); }
+/* The same nodes' free memory over the range: a strip each, on one scale and
+   one time axis, so a column read down is one moment across the fleet. */
+.hrows { display: grid; gap: 6px; }
+.hrow { display: grid; grid-template-columns: 96px 1fr; gap: 10px; align-items: center; font-size: 12.5px; }
+.hrow .hid { display: flex; align-items: center; gap: 7px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hrow .hid .dot::after { display: none; }
+.hrow.down .hid { color: var(--muted); }
+.haxis { display: flex; justify-content: space-between; margin: 4px 0 0 106px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+#ndView { margin-left: auto; }
 canvas.strip { display: block; width: 100%; height: 20px; border-radius: 4px; cursor: crosshair; }
 .heatlegend { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin: 0 0 10px; font-size: 12px; color: var(--ink-2); }
 .heatlegend .scale { display: grid; gap: 4px; width: 260px; }
@@ -355,9 +373,14 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
     <div class="bar">
       <input id="ndQ" type="search" placeholder="Search by node or pool">
       <div class="chips" id="ndState"></div>
+      <div class="seg" id="ndView" role="group" aria-label="View"><button type="button" data-v="cards">Cards</button><button type="button" data-v="history">Memory over time</button></div>
     </div>
-    <div class="heatlegend" id="ndLegend"></div>
-    <div class="tbl-wrap"><table class="tbl nodes-tbl" id="ndTable"></table></div>
+    <div class="nodes" id="nodes"></div>
+    <div id="ndHist" hidden>
+      <div class="heatlegend" id="ndLegend"></div>
+      <div class="hrows" id="ndRows"></div>
+      <div class="haxis"><span id="ndT0"></span><span id="ndT1"></span></div>
+    </div>
     <div class="pager" id="ndPager"></div>
   </section>
 
@@ -831,20 +854,33 @@ $("ndState").addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b) return;
   nd.state = b.dataset.v; nd.offset = 0;
   for (const x of $("ndState").children) x.setAttribute("aria-pressed", String(x === b));
-  if (NOW) nodeTable(NOW.nodes);
+  if (NOW) nodeView(NOW.nodes);
 });
 let ndTyping;
-$("ndQ").addEventListener("input", () => { clearTimeout(ndTyping); ndTyping = setTimeout(() => { nd.q = $("ndQ").value.trim().toLowerCase(); nd.offset = 0; if (NOW) nodeTable(NOW.nodes); }, 150); });
+$("ndQ").addEventListener("input", () => { clearTimeout(ndTyping); ndTyping = setTimeout(() => { nd.q = $("ndQ").value.trim().toLowerCase(); nd.offset = 0; if (NOW) nodeView(NOW.nodes); }, 150); });
 // The admission thresholds the master refuses at, from the master. A floor
 // of 0 is none, and a ceiling past any real reading is none either.
 const floorMib = () => (NOW && NOW.floor_mib != null ? NOW.floor_mib : 512);
 const maxPsi = () => (NOW && NOW.max_psi != null ? NOW.max_psi : 8);
 const hasCeil = () => maxPsi() < 100;
 const gib = (m) => m >= 1024 ? fmt(m / 1024, m >= 10240 ? 0 : 1) + "G" : fmt(m) + "M";
-function nodeTable(all) {
+// Cards or their memory over time: one view at a time, on the same search,
+// filter and page, remembered in this browser.
+nd.view = "cards";
+try { if (localStorage.getItem("sandstorm-console-nodes-view") === "history") nd.view = "history"; } catch (e) {}
+function markView() { for (const b of $("ndView").children) b.classList.toggle("on", b.dataset.v === nd.view); }
+markView();
+$("ndView").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b || b.dataset.v === nd.view) return;
+  nd.view = b.dataset.v; markView();
+  try { localStorage.setItem("sandstorm-console-nodes-view", nd.view); } catch (x) {}
+  if (NOW) nodeView(NOW.nodes);
+});
+function nodeView(all) {
   const up = all.filter((n) => n.connected).length, floor = floorMib(), ceil = maxPsi();
   const limits = [floor > 0 ? `under ${fmt(floor)} MiB free` : "", hasCeil() ? `over ${fmt(ceil, 1)} memory pressure` : ""].filter(Boolean);
-  $("nodesSub").textContent = `${up} of ${all.length} answering.` + (limits.length ? ` The master holds back work from a node ${limits.join(" or ")}.` : " The master admits work whatever a node's memory.");
+  $("nodesSub").textContent = `${up} of ${all.length} answering.` + (nd.view === "cards" ? " Ring: free memory. Bar: memory pressure." : "") +
+    (limits.length ? ` The master holds back work from a node ${limits.join(" or ")}.` : "");
   const match = all.filter((n) => (!nd.q || n.id.toLowerCase().includes(nd.q) || n.pool.toLowerCase().includes(nd.q))
     && (nd.state === "" || (nd.state === "up" ? n.connected : nd.state === "down" ? !n.connected : n.connected && ((hasCeil() && n.psi > ceil / 2) || n.free_mib < floor))))
     .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
@@ -852,26 +888,62 @@ function nodeTable(all) {
   const nodes = match.slice(nd.offset, nd.offset + nd.size);
   pager($("ndPager"), { offset: nd.offset, size: nd.size, total: match.length, shown: nodes.length }, (off, size) => {
     if (size !== nd.size) { nd.size = size; keepPageSize("nodes", size); }
-    nd.offset = off; nodeTable(all);
+    nd.offset = off; nodeView(all);
   });
-  const span = S ? `${clock(S.since)} – ${clock(S.now)}` : "";
-  $("ndTable").innerHTML = `<thead><tr><th>Node</th><th class="r">Free</th><th>Sandboxes</th><th>Pressure</th><th class="hist">Free memory, ${span}</th><th class="r">Seen</th></tr></thead><tbody>` +
-    (nodes.length ? nodes.map((n) => {
-      const total = TIERS.reduce((a, t) => a + (n.tiers[t] || 0), 0);
-      const freeCls = n.free_mib < floor ? "bad" : "";
-      const scale = hasCeil() ? 2 * ceil : 16;
-      const psiCol = hasCeil() && n.psi > ceil ? "var(--bad)" : hasCeil() && n.psi > ceil / 2 ? "var(--warn)" : "var(--frozen)";
-      return `<tr class="${n.connected ? "" : "down"}">
-        <td><div class="ndname"><span class="dot${n.connected ? (hasCeil() && n.psi > ceil ? " stale" : "") : " dead"}"></span>${escapeHtml(n.id)}</div>
-          <div class="sub">${escapeHtml(n.pool)}${n.features.length ? ` · <span class="feats">${n.features.map((f) => `<span>${escapeHtml(f)}</span>`).join("")}</span>` : ""}</div></td>
-        <td class="r num ${freeCls}" title="${fmt(n.free_mib)} MiB free">${gib(n.free_mib)}</td>
-        <td><b class="num">${fmt(total)}</b> <span class="sub" style="display:inline">${fmt(n.tiers.hot || 0)} awake</span>
-          <div class="stack">${TIERS.map((t) => `<i title="${TIER_LABEL[t]}: ${fmt(n.tiers[t] || 0)}" style="flex-grow:${n.tiers[t] || 0};background:var(--${t})"></i>`).join("")}</div></td>
-        <td><span class="num">${fmt(n.psi, 1)}</span><div class="meter" title="memory pressure ${fmt(n.psi, 1)} (10 s average)${hasCeil() ? ` against ${fmt(ceil, 1)}` : ""}"><i style="width:${Math.min(100, n.psi / scale * 100)}%;background:${psiCol}"></i>${hasCeil() ? '<u style="left:50%"></u>' : ""}</div></td>
-        <td class="hist"><canvas class="strip" data-id="${escapeHtml(n.id)}"></canvas></td>
-        <td class="r when">${n.connected ? ago(n.last_seen_age) : `silent ${ago(n.last_seen_age).replace(" ago", "")}`}</td></tr>`;
-    }).join("")
-    : `<tr><td colspan="6"><div class="empty">${all.length ? "No node matches." : "No nodes yet. Use “+ Add a node”."}</div></td></tr>`) + "</tbody>";
+  $("nodes").hidden = nd.view !== "cards";
+  $("ndHist").hidden = nd.view !== "history";
+  if (nd.view === "cards") nodeCards(all, match, nodes);
+  else nodeHistory(all, match, nodes);
+}
+function nodeCards(all, match, nodes) {
+  const box = $("nodes"), floor = floorMib(), ceil = maxPsi();
+  if (!match.length) box.innerHTML = `<div class="empty">${all.length ? "No node matches." : "No nodes yet. Use “+ Add a node”."}</div>`;
+  else box.querySelector(".empty")?.remove();
+  const seen = new Set();
+  for (const n of nodes) {
+    seen.add(n.id);
+    let card = box.querySelector(`[data-id="${CSS.escape(n.id)}"]`);
+    if (!card) {
+      card = document.createElement("div"); card.className = "node"; card.dataset.id = n.id;
+      card.innerHTML = `<div class="top"><span class="dot"></span><span class="name"></span><span class="pool"></span></div>
+        <div class="mid"><svg class="ring" viewBox="0 0 64 64"><circle class="track" cx="32" cy="32" r="26" fill="none" stroke-width="7"/><circle class="fill" cx="32" cy="32" r="26" fill="none" stroke-width="7" stroke-linecap="round" transform="rotate(-90 32 32)" stroke-dasharray="163.4" stroke-dashoffset="163.4"/><text x="32" y="33" text-anchor="middle" class="v"></text><text x="32" y="44" text-anchor="middle" class="s">free</text></svg>
+        <div class="facts"><div><b class="cnt num"></b> sandboxes</div><div><b class="hot num"></b> awake</div><div class="seen"></div></div></div>
+        <div class="stack"></div><div class="psi"><i></i><u></u></div><div class="feats"></div>`;
+      box.appendChild(card);
+    }
+    const total = TIERS.reduce((a, t) => a + (n.tiers[t] || 0), 0);
+    const freeLine = line("node.free_mib", n.id);
+    const memMax = Math.max(n.free_mib, ...freeLine.map((p) => p[1]), 1) * 1.05;
+    const frac = Math.max(0, Math.min(1, n.free_mib / memMax));
+    card.classList.toggle("down", !n.connected);
+    card.querySelector(".dot").className = "dot" + (n.connected ? (hasCeil() && n.psi > ceil ? " stale" : "") : " dead");
+    card.querySelector(".name").textContent = n.id;
+    card.querySelector(".pool").textContent = n.pool;
+    const ring = card.querySelector(".fill");
+    ring.style.strokeDashoffset = (163.4 * (1 - frac)).toFixed(1);
+    ring.style.stroke = n.free_mib < floor ? "var(--bad)" : n.free_mib < Math.max(floor * 1.75, 1) ? "var(--warn)" : "var(--snapshot)";
+    card.querySelector(".v").textContent = n.free_mib >= 1024 ? (n.free_mib / 1024).toFixed(1) + "G" : n.free_mib + "M";
+    tweenText(card.querySelector(".cnt"), total);
+    tweenText(card.querySelector(".hot"), n.tiers.hot || 0);
+    card.querySelector(".seen").textContent = n.connected ? `seen ${ago(n.last_seen_age)}` : `silent for ${ago(n.last_seen_age).replace(" ago", "")}`;
+    card.querySelector(".stack").innerHTML = TIERS.map((t) => `<i title="${TIER_LABEL[t]}: ${n.tiers[t] || 0}" style="flex-grow:${n.tiers[t] || 0};background:var(--${t})"></i>`).join("") || "";
+    const psi = card.querySelector(".psi i");
+    const scale = hasCeil() ? 2 * ceil : 16;
+    psi.style.width = Math.min(100, n.psi / scale * 100) + "%";
+    psi.style.background = hasCeil() && n.psi > ceil ? "var(--bad)" : hasCeil() && n.psi > ceil / 2 ? "var(--warn)" : "var(--frozen)";
+    card.querySelector(".psi u").style.display = hasCeil() ? "" : "none";
+    card.querySelector(".psi u").style.left = "50%";
+    card.querySelector(".psi").title = `memory pressure ${fmt(n.psi, 1)} (10 s average)`;
+    card.querySelector(".feats").innerHTML = n.features.map((f) => `<span>${escapeHtml(f)}</span>`).join("");
+  }
+  for (const c of [...box.children]) if (c.dataset.id && !seen.has(c.dataset.id)) c.remove();
+}
+function nodeHistory(all, match, nodes) {
+  $("ndRows").innerHTML = nodes.length ? nodes.map((n) => `<div class="hrow${n.connected ? "" : " down"}">
+      <span class="hid" title="${escapeHtml(n.id)}"><span class="dot${n.connected ? "" : " dead"}"></span>${escapeHtml(n.id)}</span>
+      <canvas class="strip" data-id="${escapeHtml(n.id)}"></canvas></div>`).join("")
+    : `<div class="empty">${all.length ? "No node matches." : "No nodes yet. Use “+ Add a node”."}</div>`;
+  $("ndT0").textContent = S ? clock(S.since) : ""; $("ndT1").textContent = S ? clock(S.now) : "";
   strips(all);
 }
 // One scale for every strip: the most free memory any node had in the range.
@@ -890,7 +962,7 @@ function heatColor(v, vmax) {
 function strips(all) {
   if (!S) return;
   const vmax = heatScale(all), floor = floorMib(), t0 = S.since, t1 = S.now, dpr = devicePixelRatio || 1;
-  for (const c of $("ndTable").querySelectorAll("canvas.strip")) {
+  for (const c of $("ndRows").querySelectorAll("canvas.strip")) {
     const id = c.dataset.id, w = c.clientWidth, h = c.clientHeight;
     c.width = w * dpr; c.height = h * dpr;
     const ctx = c.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -933,7 +1005,9 @@ const ACT_KINDS = [["", "All"], ["node_down,node_up", "Nodes"], ["failing,quaran
 // ---- activity ---------------------------------------------------------------------
 // Paged and filtered on the master, like the sandboxes: two days of a busy
 // fleet is far more than one page.
-const act = { kind: "", q: "", since: 86400, offset: 0, size: pageSize("activity", 50), total: 0, rows: [], busy: false, seen: null };
+// Twenty a page: a screenful of the newest, which is what is usually wanted.
+const ACT_SIZES = [20, 50, 100];
+const act = { kind: "", q: "", since: 86400, offset: 0, size: pageSize("activity", 20, ACT_SIZES), total: 0, rows: [], busy: false, seen: null };
 $("actKinds").innerHTML = ACT_KINDS.map(([k, l]) => {
   const [ic, col] = ICON[k.split(",")[0]] || [];
   return `<button type="button" data-k="${k}" aria-pressed="${k === ""}">${ic ? `<span style="color:var(${col})">${ic}</span>` : ""}${l}</button>`;
@@ -980,7 +1054,7 @@ function renderActivity() {
     }).join("")
     : `<tr><td colspan="4"><div class="empty">${act.kind || act.q ? "Nothing matches." : "Nothing in this window. Node changes, refusals, wakes and failures land here."}</div></td></tr>`) + "</tbody>";
   if (act.offset === 0) act.seen = new Set(act.rows.map(key));
-  pager($("actPager"), { offset: act.offset, size: act.size, total: act.total, shown: act.rows.length }, (off, size) => {
+  pager($("actPager"), { offset: act.offset, size: act.size, total: act.total, shown: act.rows.length, sizes: ACT_SIZES }, (off, size) => {
     if (size !== act.size) { act.size = size; keepPageSize("activity", size); }
     act.offset = off; loadActivity();
   });
@@ -1054,7 +1128,7 @@ function redrawAll(first = false) {
   legend($("latLegend"), lat.map((r) => [r.label, r.color, r.dash]));
   timeChart($("c-lat"), lat, { log: true, unit: " ms", first });
   if (tab === "overview") drawFlow();
-  if (tab === "nodes") nodeTable(NOW.nodes);
+  if (tab === "nodes") nodeView(NOW.nodes);
   // KPI sparklines
   const total = sumAt("fleet.sandboxes", TIERS);
   spark($("s-total"), total, css("--frozen"));
@@ -1148,8 +1222,9 @@ $("sbNode").addEventListener("change", () => { sb.node = $("sbNode").value; sb.o
 // ---- pager ---------------------------------------------------------------------
 // Shared by every table. The size a page holds is remembered per table, in
 // this browser only.
-function pageSize(name, dflt) {
-  try { const v = Number(localStorage.getItem("sandstorm-console-page-" + name)); return PAGE_SIZES.includes(v) ? v : dflt; } catch (e) { return dflt; }
+// Each table may offer its own sizes; the default is one of them.
+function pageSize(name, dflt, sizes = PAGE_SIZES) {
+  try { const v = Number(localStorage.getItem("sandstorm-console-page-" + name)); return sizes.includes(v) ? v : dflt; } catch (e) { return dflt; }
 }
 function keepPageSize(name, v) { try { localStorage.setItem("sandstorm-console-page-" + name, String(v)); } catch (e) {} }
 // The first and last page, the ones either side of this one, and gaps.
@@ -1159,7 +1234,7 @@ function pageList(cur, pages) {
   if (cur >= pages - 4) for (let p = pages - 5; p < pages - 1; p++) want.add(p);
   return [...want].filter((p) => p >= 0 && p < pages).sort((a, b) => a - b);
 }
-function pager(node, { offset, size, total, shown }, go) {
+function pager(node, { offset, size, total, shown, sizes = PAGE_SIZES }, go) {
   if (!total) { node.innerHTML = ""; return; }
   const pages = Math.max(1, Math.ceil(total / size)), cur = Math.min(pages - 1, Math.floor(offset / size));
   let nums = "", prev = -1;
@@ -1170,7 +1245,7 @@ function pager(node, { offset, size, total, shown }, go) {
   }
   node.innerHTML = `<span class="count">${fmt(offset + 1)}–${fmt(Math.min(total, offset + shown))} of ${fmt(total)}</span>
     <span class="pages"><button type="button" data-p="${cur - 1}"${cur === 0 ? " disabled" : ""} aria-label="Previous page">‹</button>${nums}<button type="button" data-p="${cur + 1}"${cur >= pages - 1 ? " disabled" : ""} aria-label="Next page">›</button></span>
-    <label class="size"><select aria-label="Rows a page">${PAGE_SIZES.map((n) => `<option${n === size ? " selected" : ""}>${n}</option>`).join("")}</select> a page</label>`;
+    <label class="size"><select aria-label="Rows a page">${sizes.map((n) => `<option${n === size ? " selected" : ""}>${n}</option>`).join("")}</select> a page</label>`;
   node.onclick = (e) => { const b = e.target.closest("button[data-p]"); if (b && !b.disabled) { go(Number(b.dataset.p) * size, size); toTableTop(node); } };
   node.querySelector("select").onchange = (e) => { go(0, Number(e.target.value)); toTableTop(node); };
 }
