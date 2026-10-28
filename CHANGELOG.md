@@ -49,6 +49,12 @@ wide as its measured rate and labelled with it. It replaces an animation of
 random particles, whose tanks filled relative to the largest tier, and the
 donut beside it, which showed the same four counts again.
 
+Sandboxes that will not start are a line above the sandbox table and a
+count on its Failing filter, which lists them with their errors -- not a
+second list of the same rows under it. On the Nodes tab, free memory over
+time is one heatmap across the page, a row for each node shown above it,
+rather than a sparkline on every card as well.
+
 Sandboxes, nodes and activity share one pager: the range shown, the pages
 within reach, and 25, 50 or 100 a page, remembered per table. Nodes can be
 searched and narrowed to answering, silent or under pressure. Activity is a

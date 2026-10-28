@@ -111,7 +111,7 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .tip .r b { font-weight: 600; }
 /* The tier flow: four tiers, and an arrow for each move between them whose
    width, label and moving dashes are the measured rate. */
-#flow { width: 100%; height: 230px; display: block; overflow: visible; }
+#flow { width: 100%; height: 184px; display: block; overflow: visible; }
 #flow .box { fill: var(--card-2); stroke: var(--line); }
 #flow .lbl { fill: var(--ink-2); font-size: 12.5px; font-weight: 600; }
 #flow .hint, #flow .pct, #flow .verb, #flow .why { fill: var(--muted); font-size: 11.5px; }
@@ -119,12 +119,14 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 #flow .track { fill: var(--grid); }
 #flow .bar { transition: width .8s cubic-bezier(.2,.8,.2,1); }
 #flow .rate { fill: var(--ink); font-size: 12.5px; font-weight: 600; }
-#flow .pipe { fill: none; stroke-linecap: round; stroke-linejoin: round; opacity: .7; transition: stroke-width .6s; }
-#flow .pipe.none { stroke: var(--axis) !important; opacity: 1; }
+#flow .pipe { fill: none; stroke-linecap: round; stroke-linejoin: round; opacity: .85; transition: stroke-width .6s; }
+#flow .pipe.none { stroke: var(--axis) !important; opacity: 1; stroke-dasharray: 3 4; }
 #flow .head { transition: d .6s; }
 #flow .head.none { fill: var(--axis) !important; }
-#flow .pulse { fill: none; stroke: #fff; stroke-opacity: .55; stroke-linecap: round; stroke-dasharray: 2 12; animation: flowdash 1s linear infinite; }
-@keyframes flowdash { to { stroke-dashoffset: -14; } }
+/* A short glint that travels the arrow, quicker as the rate rises. */
+#flow .pulse { fill: none; stroke: #fff; stroke-opacity: .32; stroke-linecap: round; stroke-dasharray: 12 48; animation: flowdash 1s linear infinite; }
+@keyframes flowdash { to { stroke-dashoffset: -60; } }
+#flow .rate.none { fill: var(--muted); font-weight: 500; }
 .nodes { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 12px; }
 .node { background: var(--card-2); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; position: relative;
   transition: opacity .4s, filter .4s, transform .25s; }
@@ -147,14 +149,18 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .psi { height: 4px; background: var(--grid); border-radius: 3px; position: relative; margin-top: 8px; }
 .psi i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; transition: width .8s, background .4s; }
 .psi u { position: absolute; top: -3px; bottom: -3px; width: 1px; background: var(--ink-2); }
-.node svg.nspark { width: 100%; height: 28px; display: block; margin-top: 6px; }
 .feats { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
 .feats span { font-size: 10.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; }
 #heat { width: 100%; display: block; }
-.fail { display: grid; gap: 6px; }
-.fail .f { border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; font-size: 12.5px; background: var(--card-2); }
-.fail .f code { font-size: 11.5px; color: var(--ink-2); }
-.fail .f .e { color: var(--ink-2); margin-top: 2px; }
+/* Sandboxes that will not start: a line above the table and a count on the
+   Failing filter, rather than a second list of the same rows. */
+.notice { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 12px; margin: 0 0 10px; font-size: 13px; color: var(--ink);
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line)); background: color-mix(in srgb, var(--warn) 9%, transparent); border-radius: 10px; }
+.notice[hidden] { display: none; }
+.notice .ic { color: var(--warn); font-weight: 700; }
+.notice .why { color: var(--ink-2); }
+.notice button { margin-left: auto; font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+.chips .cnt { font-size: 11px; font-weight: 600; color: #fff; background: var(--bad); border-radius: 999px; padding: 0 6px; min-width: 18px; text-align: center; }
 .badge { font-size: 11px; border-radius: 5px; padding: 0 6px; }
 .empty { color: var(--muted); font-size: 13px; padding: 18px 0; text-align: center; }
 .gate { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: rgba(0,0,0,.55); backdrop-filter: blur(6px); }
@@ -251,7 +257,7 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
    and the charts draw to the box they are given. */
 @media (min-width: 1201px) and (min-height: 620px) {
   body.tab-overview main { height: calc(100vh - var(--head, 64px)); min-height: 560px; padding-top: 14px; padding-bottom: 14px; gap: 12px;
-    grid-template-rows: auto minmax(0, .9fr) minmax(0, 1fr); }
+    grid-template-rows: auto auto minmax(0, 1fr); }
   body.tab-overview main > .card:not(.kpi) { display: flex; flex-direction: column; min-height: 0; padding: 14px 16px; }
   body.tab-overview main > .card .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 6px; }
   body.tab-overview .legend { margin-bottom: 4px; }
@@ -259,7 +265,7 @@ table.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transpare
   body.tab-overview .kpi .value { font-size: 26px; margin: 2px 0 0; }
   body.tab-overview .kpi svg.spark { height: 36px; }
   body.tab-overview .kpi .foot { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  body.tab-overview #flow, body.tab-overview .chart { flex: 1 1 0; min-height: 0; height: auto; }
+  body.tab-overview .chart { flex: 1 1 0; min-height: 0; height: auto; }
 }
 /* Activity: the same table as the sandboxes. */
 table.tbl td.when { color: var(--muted); font-size: 12px; }
@@ -360,6 +366,7 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
       <select id="sbNode"><option value="">All nodes</option></select>
       <span class="flash" id="sbFlash"></span>
     </div>
+    <div class="notice" id="sbFailNote" hidden><span class="ic">!</span><span id="sbFailText"></span><button type="button" id="sbFailShow">Show them</button></div>
     <div class="selbar" id="sbSel" hidden>
       <b id="sbSelN"></b>
       <button type="button" data-bulk="hot">Wake</button><button type="button" data-bulk="frozen">Freeze</button><button type="button" data-bulk="snapshot">To disk</button><button type="button" data-bulk="retry">Retry</button><button type="button" data-bulk="delete" class="danger">Delete</button>
@@ -409,9 +416,9 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
     <div class="tbl-wrap"><table class="tbl" id="snapTable"></table></div>
   </section>
 
-  <section data-tab="nodes" class="card span-7" style="animation-delay:.46s">
-    <h2>Free memory by node</h2><div class="sub">Each row a node, each column a moment. Darker is fuller.</div>
-    <canvas id="heat" data-h="210"></canvas>
+  <section data-tab="nodes" class="card span-12" style="animation-delay:.46s">
+    <h2>Free memory by node</h2><div class="sub">The nodes above, a row each, over the selected range. Darker is fuller; grey is a node that was silent.</div>
+    <canvas id="heat"></canvas>
   </section>
   <section data-tab="overview" class="card span-3" style="animation-delay:.5s">
     <h2>Latency</h2><div class="sub">Milliseconds, log scale. The API, creates, and waiting for the store lock.</div>
@@ -430,10 +437,6 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
     </div>
     <div class="tbl-wrap"><table class="tbl" id="actTable"></table></div>
     <div class="pager" id="actPager"></div>
-  </section>
-  <section data-tab="sandboxes" class="card span-5" style="animation-delay:.58s">
-    <h2>Not starting</h2><div class="sub" id="failSub"></div>
-    <div class="fail" id="fail"></div>
   </section>
 </main>
 
@@ -737,39 +740,41 @@ const flow = { counts: { hot: 0, frozen: 0, snapshot: 0, detached: 0 }, rates: {
 const FLOW_MOVES = [["frozen", 0, 1, "freeze"], ["snapshot", 1, 2, "to disk"], ["detached", 2, 3, "detach"]];
 function dur(s) { return s < 120 ? s + " s" : s < 7200 ? Math.round(s / 60) + " min" : Math.round(s / 3600) + " h"; }
 const perSec = (v) => v >= 1 ? fmt(v, 1) + "/s" : v > 0 ? fmt(v * 60, 0) + "/min" : "none";
-const pipeW = (r) => r > 0 ? Math.min(11, 1.5 + 3 * Math.sqrt(r)) : 1.2;
-const headRight = (x, y, w) => { const s = 4 + w * 0.9; return `M${x - 1},${y - s * 0.8}L${x + s},${y}L${x - 1},${y + s * 0.8}Z`; };
-const headUp = (x, y, w) => { const s = 4 + w * 0.9; return `M${x - s * 0.8},${y + 1}L${x},${y - s}L${x + s * 0.8},${y + 1}Z`; };
+const pipeW = (r) => r > 0 ? Math.min(6, 1.6 + 1.5 * Math.sqrt(r)) : 1.2;
+const headRight = (x, y, w) => { const s = 5 + w * 0.6; return `M${x - s},${y - s * 0.7}L${x + 1},${y}L${x - s},${y + s * 0.7}Z`; };
+const headUp = (x, y, w) => { const s = 5 + w * 0.6; return `M${x - s * 0.7},${y + s}L${x},${y - 1}L${x + s * 0.7},${y + s}Z`; };
 function flowBuild(svg, w, h) {
-  const L = 96, R = 8, top = 4, bottom = 50;
-  const G = Math.max(84, Math.min(150, w * 0.09));
-  const bw = (w - L - R - 3 * G) / 4, bh = Math.max(76, h - top - bottom);
+  const L = 92, R = 4, bottom = 46;
+  const G = Math.max(84, Math.min(140, w * 0.085));
+  const bw = (w - L - R - 3 * G) / 4, bh = Math.max(92, Math.min(124, h - bottom - 4));
+  const top = Math.max(2, (h - bottom - bh) / 2);
   const x = (i) => L + i * (bw + G), cx = (i) => x(i) + bw / 2;
-  const yMid = top + bh * 0.52, yBot = top + bh, yW = yBot + 22;
-  const fs = Math.max(20, Math.min(34, bh * 0.25));
-  const g = { x, cx, bw, bh, top, yMid, yBot, yW, L };
+  const yMid = top + bh / 2, yBot = top + bh, yW = yBot + 22, rc = 10;
+  const fs = Math.max(24, Math.min(32, bh * 0.27));
+  const g = { x, cx, bw, bh, top, yMid, yBot, yW };
   let m = "";
   TIERS.forEach((t, i) => {
-    const X = x(i), pad = 16;
-    m += `<rect class="box" x="${X}" y="${top}" width="${bw}" height="${bh}" rx="12"/>
-      <rect x="${X}" y="${top + 12}" width="3" height="${bh - 24}" rx="1.5" style="fill:var(--${t})"/>
-      <text class="lbl" x="${X + pad}" y="${top + 24}">${TIER_LABEL[t]}</text>
-      <text class="hint" id="f-hint-${t}" x="${X + bw - 12}" y="${top + 24}" text-anchor="end"></text>
-      <text class="cnt num" id="f-cnt-${t}" x="${X + pad}" y="${top + 24 + fs + 8}" style="font-size:${fs}px">0</text>
-      ${bh > 104 ? `<text class="pct" id="f-pct-${t}" x="${X + pad}" y="${top + 24 + fs + 26}"></text>` : ""}
-      <rect class="track" x="${X + pad}" y="${yBot - 16}" width="${bw - pad * 2}" height="4" rx="2"/>
-      <rect class="bar" id="f-bar-${t}" x="${X + pad}" y="${yBot - 16}" width="0" height="4" rx="2" style="fill:var(--${t})"/>`;
+    const X = x(i), pad = 16, barW = bw - pad * 2 - 46;
+    m += `<g id="f-box-${t}"><title></title><rect class="box" x="${X}" y="${top}" width="${bw}" height="${bh}" rx="12"/>
+      <circle cx="${X + pad + 4}" cy="${top + 21}" r="4" style="fill:var(--${t})"/>
+      <text class="lbl" x="${X + pad + 14}" y="${top + 25}">${TIER_LABEL[t]}</text>
+      <text class="hint" id="f-hint-${t}" x="${X + bw - pad}" y="${top + 25}" text-anchor="end"></text>
+      <text class="cnt num" id="f-cnt-${t}" x="${X + pad}" y="${top + 34 + fs}" style="font-size:${fs}px">0</text>
+      <rect class="track" x="${X + pad}" y="${yBot - 20}" width="${barW}" height="5" rx="2.5"/>
+      <rect class="bar" id="f-bar-${t}" x="${X + pad}" y="${yBot - 20}" width="0" height="5" rx="2.5" style="fill:var(--${t})"/>
+      <text class="pct num" id="f-pct-${t}" x="${X + bw - pad}" y="${yBot - 15}" text-anchor="end"></text></g>`;
   });
   const pipe = (k, d, color) => `<path class="pipe" id="f-p-${k}" d="${d}" style="stroke:var(--${color})"/><path class="pulse" id="f-d-${k}" d="${d}"/><path class="head" id="f-h-${k}" style="fill:var(--${color})"/>`;
-  const label = (k, X, Y, verb) => `<text text-anchor="middle" x="${X}" y="${Y}"><tspan class="verb" x="${X}" dy="0">${verb}</tspan><tspan class="rate" id="f-r-${k}" x="${X}" dy="16"></tspan></text>`;
+  const label = (k, X, verb) => `<text text-anchor="middle" x="${X}" y="${yMid - 26}"><tspan class="verb" x="${X}">${verb}</tspan><tspan class="rate" id="f-r-${k}" x="${X}" dy="16"></tspan></text>`;
   // In: created.
-  m += pipe("create", `M8,${yMid}H${x(0) - 12}`, "hot") + label("create", (8 + x(0) - 12) / 2, yMid - 34, "new");
+  m += pipe("create", `M10,${yMid}H${x(0) - 10}`, "hot") + label("create", (10 + x(0) - 10) / 2, "new");
   // Right, as they idle.
   for (const [k, a, b, verb] of FLOW_MOVES) {
-    m += pipe(k, `M${x(a) + bw + 10},${yMid}H${x(b) - 12}`, TIERS[b]) + label(k, (x(a) + bw + x(b)) / 2, yMid - 34, verb);
+    m += pipe(k, `M${x(a) + bw + 12},${yMid}H${x(b) - 10}`, TIERS[b]) + label(k, (x(a) + bw + x(b)) / 2, verb);
   }
-  // Back, on a request: out of on disk and frozen, into awake.
-  m += pipe("wake", `M${cx(2)},${yBot + 2}V${yW}H${cx(0)}V${yBot + 14}M${cx(1)},${yBot + 2}V${yW}`, "hot");
+  // Back, on a request: out of on disk and of frozen, into awake.
+  m += pipe("wake", `M${cx(2)},${yBot}V${yW - rc}Q${cx(2)},${yW} ${cx(2) - rc},${yW}H${cx(0) + rc}Q${cx(0)},${yW} ${cx(0)},${yW - rc}V${yBot + 12}` +
+    `M${cx(1)},${yBot}V${yW - rc}Q${cx(1)},${yW} ${cx(1) - rc},${yW}`, "hot");
   m += `<text text-anchor="middle" x="${(cx(0) + cx(2)) / 2}" y="${yW + 18}"><tspan class="verb">woken by a request </tspan><tspan class="rate" id="f-r-wake"></tspan><tspan class="why"> · from frozen or on disk</tspan></text>`;
   m += `<text text-anchor="end" x="${w - R}" y="${yW + 18}"><tspan class="verb">deleted </tspan><tspan class="rate" id="f-r-delete"></tspan><tspan class="why"> · from any tier</tspan></text>`;
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
@@ -790,9 +795,10 @@ function drawFlow() {
     const share = total ? (c[t] || 0) / total : 0;
     tweenText($("f-cnt-" + t), c[t] || 0);
     $("f-hint-" + t).textContent = hint[t];
-    const pct = $("f-pct-" + t);
-    if (pct) pct.textContent = total ? `${fmt(100 * share, share > 0 && share < 0.01 ? 1 : 0)}% of the fleet` : "";
-    $("f-bar-" + t).setAttribute("width", Math.max(share > 0 ? 3 : 0, (g.bw - 32) * share).toFixed(1));
+    const pctText = total ? `${fmt(100 * share, share > 0 && share < 0.01 ? 1 : 0)}%` : "";
+    $("f-pct-" + t).textContent = pctText;
+    $("f-bar-" + t).setAttribute("width", Math.max(share > 0 ? 3 : 0, (g.bw - 78) * share).toFixed(1));
+    $("f-box-" + t).querySelector("title").textContent = `${TIER_LABEL[t]}: ${fmt(c[t] || 0)} sandboxes, ${pctText} of the fleet`;
   }
   const set = (k, rate, head) => {
     const wd = pipeW(rate), p = $("f-p-" + k), d = $("f-d-" + k), hd = $("f-h-" + k);
@@ -801,12 +807,13 @@ function drawFlow() {
     d.style.display = rate > 0 ? "" : "none";
     d.style.strokeWidth = Math.max(1.2, wd * 0.45);
     // About a dash a second at one a second, quicker as the rate rises.
-    if (rate > 0) d.style.animationDuration = Math.max(0.25, Math.min(3, 1.4 / Math.sqrt(rate))).toFixed(2) + "s";
+    if (rate > 0) d.style.animationDuration = Math.max(0.6, Math.min(4, 3 / Math.sqrt(rate))).toFixed(2) + "s";
     $("f-r-" + k).textContent = perSec(rate);
+    $("f-r-" + k).classList.toggle("none", !(rate > 0));
   };
-  set("create", r.create || 0, (wd) => headRight(g.x(0) - 12, g.yMid, wd));
-  for (const [k, , b] of FLOW_MOVES) set(k, r[k] || 0, (wd) => headRight(g.x(b) - 12, g.yMid, wd));
-  set("wake", r.wake || 0, (wd) => headUp(g.cx(0), g.yBot + 14, wd));
+  set("create", r.create || 0, (wd) => headRight(g.x(0) - 4, g.yMid, wd));
+  for (const [k, , b] of FLOW_MOVES) set(k, r[k] || 0, (wd) => headRight(g.x(b) - 4, g.yMid, wd));
+  set("wake", r.wake || 0, (wd) => headUp(g.cx(0), g.yBot + 4, wd));
   $("f-r-delete").textContent = perSec(r.delete || 0);
   $("flow").setAttribute("aria-label", TIERS.map((t) => `${TIER_LABEL[t]} ${fmt(c[t] || 0)}`).join(", ") +
     `; freezing ${perSec(r.frozen || 0)}, to disk ${perSec(r.snapshot || 0)}, woken ${perSec(r.wake || 0)}`);
@@ -849,7 +856,7 @@ function nodeCards(all) {
       card.innerHTML = `<div class="top"><span class="dot"></span><span class="name"></span><span class="pool"></span></div>
         <div class="mid"><svg class="ring" viewBox="0 0 64 64"><circle class="track" cx="32" cy="32" r="26" fill="none" stroke-width="7"/><circle class="fill" cx="32" cy="32" r="26" fill="none" stroke-width="7" stroke-linecap="round" transform="rotate(-90 32 32)" stroke-dasharray="163.4" stroke-dashoffset="163.4"/><text x="32" y="33" text-anchor="middle" class="v"></text><text x="32" y="44" text-anchor="middle" class="s">free</text></svg>
         <div class="facts"><div><b class="cnt num"></b> sandboxes</div><div><b class="hot num"></b> awake</div><div class="seen"></div></div></div>
-        <div class="stack"></div><div class="psi"><i></i><u></u></div><svg class="nspark"></svg><div class="feats"></div>`;
+        <div class="stack"></div><div class="psi"><i></i><u></u></div><div class="feats"></div>`;
       box.appendChild(card);
     }
     const total = TIERS.reduce((a, t) => a + (n.tiers[t] || 0), 0);
@@ -873,20 +880,21 @@ function nodeCards(all) {
     psi.style.background = n.psi > 8 ? "var(--bad)" : n.psi > 4 ? "var(--warn)" : "var(--frozen)";
     card.querySelector(".psi u").style.left = (8 / 16 * 100) + "%";
     card.querySelector(".psi").title = `memory pressure ${fmt(n.psi, 1)} (10 s average)`;
-    spark(card.querySelector(".nspark"), freeLine, css("--frozen"));
     card.querySelector(".feats").innerHTML = n.features.map((f) => `<span>${f}</span>`).join("");
   }
   for (const c of [...box.children]) if (c.dataset.id && !seen.has(c.dataset.id)) c.remove();
+  // The history of the same nodes, in the same order.
+  nd.shown = nodes.map((n) => n.id);
+  if (tab === "nodes") heat();
 }
 
 // ---- heatmap --------------------------------------------------------------
 function heat() {
-  const c = $("heat"), dpr = devicePixelRatio || 1, w = c.clientWidth, h = Number(c.dataset.h);
+  const ids = nd.shown || [], L = 64, B = 20, rowH = 26;
+  const c = $("heat"), dpr = devicePixelRatio || 1, w = c.clientWidth, h = B + Math.max(1, ids.length) * rowH;
   c.width = w * dpr; c.height = h * dpr; c.style.height = h + "px";
   const ctx = c.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
-  const ids = keys("node.free_mib").sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   if (!ids.length || !S) return;
-  const L = 64, B = 20, rowH = Math.min(30, (h - B) / ids.length);
   const t0 = S.since, t1 = S.now, sx = (t) => L + (t - t0) / (t1 - t0) * (w - L - 6);
   let vmax = 0; for (const id of ids) for (const [, v] of line("node.free_mib", id)) vmax = Math.max(vmax, v);
   const c0 = hex(css("--heat-0")), c1 = hex(css("--heat-1")), c2 = hex(css("--heat-2"));
@@ -978,10 +986,19 @@ function renderActivity() {
     act.offset = off; loadActivity();
   });
 }
+// The sandboxes themselves are in the table, under the Failing filter, each
+// with its error; this only says how many and leads there.
+let failTotal = 0;
 function failing(list, total) {
-  $("failSub").textContent = total ? `${total} sandboxes carry an error from their node` : "Every sandbox the nodes were asked to start is running";
-  $("fail").innerHTML = list.length ? list.map((f) => `<div class="f"><div><code>${escapeHtml(f.id.slice(0, 18))}</code> on <b>${escapeHtml(f.node)}</b> <span class="badge" style="background:color-mix(in srgb, var(${f.attempts >= 5 ? "--bad" : "--warn"}) 20%, transparent)">${f.attempts >= 5 ? "quarantined" : f.attempts + " tries"}</span></div><div class="e">${escapeHtml(f.error)}</div></div>`).join("") : `<div class="empty">All clear</div>`;
+  failTotal = total;
+  const chip = $("sbTiers").querySelector('[data-t="failing"]');
+  if (chip) chip.innerHTML = `Failing${total ? ` <span class="cnt">${compact(total)}</span>` : ""}`;
+  const quarantined = list.filter((f) => f.attempts >= 5).length;
+  $("sbFailText").innerHTML = `<b>${fmt(total)}</b> ${total === 1 ? "sandbox carries" : "sandboxes carry"} an error from their node` +
+    (quarantined ? ` <span class="why">· ${list.length < total ? "at least " : ""}${fmt(quarantined)} quarantined, waiting for a retry</span>` : "");
+  $("sbFailNote").hidden = !total || sb.tier === "failing";
 }
+$("sbFailShow").onclick = () => $("sbTiers").querySelector('[data-t="failing"]').click();
 const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 // ---- tabs -------------------------------------------------------------------
@@ -1038,7 +1055,6 @@ function redrawAll(first = false) {
   legend($("latLegend"), lat.map((r) => [r.label, r.color, r.dash]));
   timeChart($("c-lat"), lat, { log: true, unit: " ms", first });
   if (tab === "overview") drawFlow();
-  heat();
   nodeCards(NOW.nodes);
   // KPI sparklines
   const total = sumAt("fleet.sandboxes", TIERS);
@@ -1122,6 +1138,7 @@ $("sbTiers").innerHTML = SB_CHIPS.map(([t, l]) => `<button type="button" data-t=
 $("sbTiers").addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b) return;
   sb.tier = b.dataset.t; sb.offset = 0; sel.clear();
+  $("sbFailNote").hidden = !failTotal || sb.tier === "failing";
   for (const x of $("sbTiers").children) x.setAttribute("aria-pressed", String(x === b));
   loadSandboxes();
 });
