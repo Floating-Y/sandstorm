@@ -73,6 +73,13 @@ size, the snapshot builder's steps are outlines like every other box, and a
 node's memory pressure is one thin bar across its column, as the node cards
 had it, with the figure in its hover.
 
+A count on the overview that moved since the last refresh says by how much
+beside it, +N or −N, for a few seconds. Table and filter rows read calmer:
+a node's row is centred top to bottom, a page's filters are one segmented
+control with the failing count in red text rather than a pill, and the
+failing-sandbox line is an outline with a warning edge. The header has a
+sun or moon for the theme and a link to the repository.
+
 Sandboxes that will not start are a line above the sandbox table and a
 count on its Failing filter, which lists them with their errors -- not a
 second list of the same rows under it. The Nodes tab shows its nodes as a table --

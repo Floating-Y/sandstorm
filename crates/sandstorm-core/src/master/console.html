@@ -74,6 +74,14 @@ header { position: sticky; top: 0; z-index: 10; display: flex; align-items: cent
 .refresh { padding: 5px; line-height: 0; }
 .refresh svg { width: 14px; height: 14px; display: block; }
 .refresh:hover { color: var(--ink); }
+.iconbtn.gh { padding: 7px 8px; line-height: 0; }
+.iconbtn.gh:hover { color: var(--ink); }
+/* The theme button shows where a click takes you: a sun in the dark, a moon in the light. */
+#theme .moon { display: none; }
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) #theme .sun { display: none; } :root:not([data-theme="dark"]) #theme .moon { display: block; } }
+:root[data-theme="light"] #theme .sun { display: none; }
+:root[data-theme="light"] #theme .moon { display: block; }
+.gh svg { width: 15px; height: 15px; }
 .refresh.spin svg { animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); position: relative; }
@@ -124,6 +132,11 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .kpi { padding-bottom: 46px; }
 .kpi .value { font-family: var(--serif); font-size: 34px; font-weight: 500; letter-spacing: -.4px; line-height: 1.1; margin: 6px 0 2px; }
 .kpi .value small { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 13px; color: var(--muted); font-weight: 400; margin-left: 4px; letter-spacing: 0; }
+.num .nd { display: none; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12.5px; font-weight: 500; letter-spacing: 0;
+  margin-left: 7px; color: var(--ink-2); font-variant-numeric: tabular-nums; vertical-align: 0.35em; }
+.num .nd.up, .num .nd.down { display: inline; animation: nd 4.2s ease-out forwards; }
+.num .nd.down { color: var(--muted); }
+@keyframes nd { 0% { opacity: 0; transform: translateY(3px); } 8%, 70% { opacity: 1; transform: none; } 100% { opacity: 0; } }
 .kpi .foot { color: var(--muted); font-size: 12px; min-height: 18px; }
 .kpi svg.spark { position: absolute; right: 0; bottom: 0; width: 100%; height: 36px; pointer-events: none; }
 .swatch { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
@@ -181,7 +194,7 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .room .more:hover { color: var(--ink); }
 
 /* Nodes, a row each. Their memory over time is the other view. */
-table.nodes-tbl td { vertical-align: middle; }
+table.tbl.nodes-tbl td { vertical-align: middle; }
 table.nodes-tbl tr.down td { opacity: .6; }
 .ndname { display: flex; align-items: center; gap: 8px; font-weight: 600; }
 .ndname .dot { flex: none; }
@@ -219,12 +232,14 @@ canvas.strip { display: block; width: 100%; height: 20px; border-radius: var(--r
 /* Sandboxes that will not start: a line above the table and a count on the
    Failing filter, rather than a second list of the same rows. */
 .notice { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 12px; margin: 0 0 10px; font-size: 13px; color: var(--ink);
-  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line)); background: color-mix(in srgb, var(--warn) 9%, transparent); border-radius: var(--r-ctl); }
+  border: 1px solid var(--line); border-left: 2px solid var(--warn); background: none; border-radius: var(--r-ctl); }
 .notice[hidden] { display: none; }
 .notice .ic { color: var(--warn); font-weight: 700; }
 .notice .why { color: var(--ink-2); }
-.notice button { margin-left: auto; font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
-.chips .cnt { font-size: 11px; font-weight: 600; color: #fff; background: var(--bad); border-radius: var(--r-tag); padding: 0 6px; min-width: 18px; text-align: center; }
+.notice button { margin-left: auto; font: inherit; font-size: 12.5px; padding: 2px 4px; border: 0; background: none; color: var(--ink-2); cursor: pointer; }
+.notice button:hover { color: var(--ink); }
+.notice button::after { content: " →"; }
+.chips .cnt { font-size: 11.5px; font-weight: 600; color: var(--bad); font-variant-numeric: tabular-nums; }
 .badge { font-size: 11px; border-radius: var(--r-tag); padding: 0 6px; }
 .empty { color: var(--muted); font-size: 13px; padding: 18px 0; text-align: center; }
 .gate { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: rgba(0,0,0,.55); backdrop-filter: blur(6px); }
@@ -261,9 +276,12 @@ canvas.strip { display: block; width: 100%; height: 20px; border-radius: var(--r
 .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0 10px; }
 .bar input, .bar select, .gate select { font: inherit; font-size: 13px; padding: 7px 10px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: var(--card-2); color: var(--ink); }
 .bar input { flex: 1; min-width: 180px; }
-.chips { display: flex; gap: 4px; flex-wrap: wrap; }
-.chips button { font: inherit; font-size: 12.5px; padding: 5px 10px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: none; color: var(--ink-2); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
-.chips button[aria-pressed="true"] { background: var(--card-2); color: var(--ink); border-color: var(--accent); }
+/* Filters as one segmented control, like the dialogs' tabs: one outline
+   around the set rather than one round each. */
+.chips { display: flex; gap: 2px; flex-wrap: wrap; padding: 3px; border: 1px solid var(--line); border-radius: var(--r-ctl); background: var(--card-2); }
+.chips button { font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 6px; border: 0; background: none; color: var(--muted); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.chips button:hover { color: var(--ink); }
+.chips button[aria-pressed="true"] { background: var(--line); color: var(--ink); }
 .tbl-wrap { overflow-x: auto; }
 table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.tbl th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
@@ -419,7 +437,8 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
   <div class="seg" id="range" role="group" aria-label="Time range">
     <button data-s="900" class="on">15m</button><button data-s="3600">1h</button><button data-s="21600">6h</button><button data-s="86400">24h</button>
   </div>
-  <button class="iconbtn" id="theme" title="Theme">◐</button>
+  <button class="iconbtn gh" id="theme" type="button" title="Switch light / dark" aria-label="Switch light / dark"><svg class="sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.3M8 13.2v1.3M1.5 8h1.3M13.2 8h1.3M3.4 3.4l.9.9M11.7 11.7l.9.9M3.4 12.6l.9-.9M11.7 4.3l.9-.9"/></svg><svg class="moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13.6 9.9A5.8 5.8 0 0 1 6.1 2.4a5.8 5.8 0 1 0 7.5 7.5z"/></svg></button>
+  <a class="iconbtn refresh gh" href="https://github.com/deeplethe/sandstorm" target="_blank" rel="noopener" title="Sandstorm on GitHub" aria-label="Sandstorm on GitHub"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
   <button class="iconbtn" id="signout" title="Forget the token">Sign out</button>
 </header>
 
@@ -674,14 +693,24 @@ for (const b of $("range").querySelectorAll("button")) {
 
 // ---- numbers that count up ------------------------------------------------
 const shown = new Map();
-function tweenText(el, to, digits = 0, suffix = "") {
-  const from = shown.get(el) ?? 0;
+// A count that moved since the last refresh shows by how much beside it, for
+// a few seconds; rates and latencies move every refresh, so they leave it off.
+function tweenText(el, to, digits = 0, suffix = "", delta = false) {
+  const had = shown.has(el), from = shown.get(el) ?? 0;
   shown.set(el, to);
-  if (to == null || !isFinite(to)) { el.innerHTML = "–"; return; }
+  if (!el._v) { el.innerHTML = '<span class="nv"></span><span class="nd" aria-hidden="true"></span>'; el._v = el.firstChild; }
+  const v = el._v, d = to - from;
+  if (to == null || !isFinite(to)) { v.innerHTML = "–"; return; }
+  if (delta && had && from != null && isFinite(from) && Math.round(d) !== 0) {
+    const n = el.lastChild;
+    n.textContent = (d > 0 ? "+" : "−") + fmt(Math.abs(d), digits);
+    n.className = "nd " + (d > 0 ? "up" : "down");
+    n.style.animation = "none"; void n.offsetWidth; n.style.animation = "";
+  }
   const t0 = performance.now(), dur = 900;
   const step = (now) => {
     const k = Math.min(1, (now - t0) / dur);
-    el.innerHTML = fmt(from + (to - from) * ease(k), digits) + suffix;
+    v.innerHTML = fmt(from + (to - from) * ease(k), digits) + suffix;
     if (k < 1) requestAnimationFrame(step);
   };
   requestAnimationFrame(step);
@@ -948,7 +977,7 @@ function drawFlow() {
   const hint = { hot: "running", frozen: idle ? `idle ${dur(idle[0])}+` : "", snapshot: idle ? `idle ${dur(idle[1])}+` : "", detached: idle ? `idle ${dur(idle[2])}+` : "" };
   for (const t of TIERS) {
     const share = total ? (c[t] || 0) / total : 0;
-    tweenText($("f-cnt-" + t), c[t] || 0);
+    tweenText($("f-cnt-" + t), c[t] || 0, 0, "", true);
     $("f-hint-" + t).textContent = hint[t];
     $("f-pct-" + t).textContent = total ? `${fmt(100 * share, share > 0 && share < 0.01 ? 1 : 0)}%` : "";
     $("f-bar-" + t).style.width = (share > 0 ? Math.max(1.5, 100 * share) : 0) + "%";
@@ -1282,13 +1311,13 @@ async function refresh(first = false) {
     NOW = now; S = series; lastOk = Date.now();
     const tiers = Object.fromEntries(TIERS.map((t) => [t, now.tiers[t] || 0]));
     const total = TIERS.reduce((a, t) => a + tiers[t], 0);
-    tweenText($("k-total"), total);
+    tweenText($("k-total"), total, 0, "", true);
     $("k-total-f").textContent = `${fmt(now.snapshots)} snapshot tags · ${fmt(now.snapshot_bytes / 2 ** 30, 1)} GiB`;
-    tweenText($("k-hot"), tiers.hot);
+    tweenText($("k-hot"), tiers.hot, 0, "", true);
     $("k-hot-f").textContent = total ? `${fmt(100 * tiers.hot / total, 0)}% of the fleet` : "";
     tweenText($("k-ratio"), total / Math.max(1, tiers.hot), 1, "<small>×</small>");
     const up = now.nodes.filter((n) => n.connected).length;
-    $("k-nodes").innerHTML = `${up}<small>/ ${now.nodes.length}</small>`;
+    tweenText($("k-nodes"), up, 0, `<small>/ ${now.nodes.length}</small>`, true);
     $("k-nodes-f").textContent = up === now.nodes.length ? "all answering" : `${now.nodes.length - up} silent`;
     // Refusals over the last half-minute, as the sparkline's colour reads
     // them, so the line and the words never disagree.
