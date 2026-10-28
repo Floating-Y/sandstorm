@@ -85,6 +85,17 @@ caught up. A wake now holds its permit until it ends, and one whose caller
 gives up while still queued never starts. Reproduced on bm with 12
 sandboxes: 12 restores at once before, 2 after.
 
+A sandbox a wake brings up counts as used from then, and so does one that
+has just answered. It counted from when the request arrived, which at 80
+per node and 8 req/s was 24 s (p50) before its wake: it came up looking
+like the longest-idle hot sandbox, the next wake put it to disk 0.24 s
+later, and the request that woke it got a 502 -- 98% of the 502s, 7% of
+all requests. The same stale time let the master's idle demotion through
+its grace period. A restore the master asks for counts as a start, and a
+wake making room checks again, once it holds a sandbox's lock, that the
+sandbox has not just been used. Every 502 the gateway answers is logged
+with the reason.
+
 The node lists what it put away in its reports (`evicted`), and the master
 moves desired state there rather than asking for the sandbox back -- which
 would make the node evict something else to make room for it. The panel's

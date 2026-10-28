@@ -324,11 +324,29 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
         }
     }
 
+    // Every 502 says why in the log as well as to the caller: at 80 per
+    // node and 8 req/s they were 7% of requests, and finding out which step
+    // failed took matching request logs against the node's by hand.
+    let bad_gateway = |why: &str| {
+        tracing::warn!(
+            id = %t.id,
+            woke_ms = woke.map(|d| d.as_millis() as u64),
+            error = %why,
+            "answered 502"
+        );
+    };
+
     match sent {
         Ok(r) => {
             let status = r.status();
             let hdrs = r.headers().clone();
-            match r.bytes().await {
+            let body = r.bytes().await;
+            // It has just been working, however long ago the request
+            // arrived.
+            if let Some(w) = &t.wake {
+                w.in_use(&t.id);
+            }
+            match body {
                 Ok(b) => {
                     let mut out = Response::builder().status(status);
                     for (k, v) in hdrs.iter() {
@@ -337,12 +355,15 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
                     if let Some(took) = woke {
                         out = out.header(WAKE_HEADER, took.as_millis().to_string());
                     }
-                    out.body(Body::from(b))
-                        .unwrap_or_else(|e| {
-                            (StatusCode::BAD_GATEWAY, format!("{e}")).into_response()
-                        })
+                    out.body(Body::from(b)).unwrap_or_else(|e| {
+                        bad_gateway(&format!("building the response: {e}"));
+                        (StatusCode::BAD_GATEWAY, format!("{e}")).into_response()
+                    })
                 }
-                Err(e) => (StatusCode::BAD_GATEWAY, format!("upstream body: {e}")).into_response(),
+                Err(e) => {
+                    bad_gateway(&format!("reading the sandbox's answer: {e:#}"));
+                    (StatusCode::BAD_GATEWAY, format!("upstream body: {e}")).into_response()
+                }
             }
         }
         // A sandbox that is not hot REJECTs with a reset (#327), so this is
@@ -350,7 +371,11 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
         // a timeout. A gateway that wakes has already tried that and only
         // gets here if the sandbox came up and still refused. Said plainly,
         // because a bare 502 would look like the sandbox had crashed.
-        Err(e) if e.is_connect() && woke.is_some() => (
+        Err(e) if e.is_connect() && woke.is_some() => {
+            bad_gateway(&format!(
+                "woken, but connections still refused after {BOOT_WAIT:?}: {e:#}"
+            ));
+            (
             StatusCode::BAD_GATEWAY,
             [("content-type", "application/json")],
             format!(
@@ -359,7 +384,8 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
                 t.upstream.rsplit(':').next().unwrap_or("?")
             ),
         )
-            .into_response(),
+            .into_response()
+        }
         Err(e) if e.is_connect() => (
             StatusCode::SERVICE_UNAVAILABLE,
             [("content-type", "application/json")],
@@ -374,7 +400,10 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
             format!("sandbox {} did not answer within 60s", t.id),
         )
             .into_response(),
-        Err(e) => (StatusCode::BAD_GATEWAY, format!("{e}")).into_response(),
+        Err(e) => {
+            bad_gateway(&format!("forwarding: {e:#}"));
+            (StatusCode::BAD_GATEWAY, format!("{e}")).into_response()
+        }
     }
 }
 
@@ -475,6 +504,22 @@ mod tests {
         });
     }
 
+    /// Answers each request `after` it arrives.
+    fn serve_slowly(port: u16, after: std::time::Duration) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        std::thread::spawn(move || {
+            for mut s in l.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                std::thread::sleep(after);
+                let _ = s.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nhi",
+                );
+            }
+        });
+    }
+
     async fn get(port: u16) -> reqwest::Response {
         reqwest::Client::new()
             .get(format!("http://127.0.0.1:{port}/x"))
@@ -524,6 +569,28 @@ mod tests {
 
         // Both requests are reported to the master, once.
         assert_eq!(w.take_traffic(), vec!["sb-cold".to_string()]);
+        g.reconcile(&[]).await;
+    }
+
+    /// A sandbox counts as used when it answers, not only when the request
+    /// arrived: one that took longer than `KEEP_IF_USED_WITHIN` to answer
+    /// has just been working, and is no candidate to put away.
+    #[tokio::test]
+    async fn a_sandbox_counts_as_used_when_it_answers() {
+        let (gw_port, upstream) = (28465u16, 28466u16);
+        serve_slowly(
+            upstream,
+            super::super::wake::KEEP_IF_USED_WITHIN + std::time::Duration::from_millis(500),
+        );
+        let w = Arc::new(Wakeups::new(|_, _| Ok(())));
+        let mut g = Gateway::waking(w.clone());
+        let mut e = spec("sb-slow", gw_port);
+        e.sandbox_ip = "127.0.0.1".parse().unwrap();
+        e.sandbox_port = upstream;
+        g.reconcile(&[e]).await;
+
+        assert_eq!(get(gw_port).await.status(), 200);
+        assert!(w.recently_used("sb-slow", std::time::Instant::now()));
         g.reconcile(&[]).await;
     }
 

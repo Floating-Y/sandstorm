@@ -350,6 +350,11 @@ fn evict_one(rt: &Runtime, wake: &Wakeups, except: &str) -> Result<bool> {
         let Some(_held) = lock.try_lock() else {
             continue;
         };
+        // The list was drawn before the lock was had: a wake may have
+        // brought this one up, and marked it used, in between.
+        if wake.recently_used(&victim, Instant::now()) {
+            continue;
+        }
         let t0 = Instant::now();
         match rt.set_tier(&victim, Tier::Snapshot) {
             Ok(()) => {
@@ -883,7 +888,14 @@ fn run_one(
     match out {
         Ok(()) => {
             failing.remove(&id);
-            if matches!(cmd, Command::Create { .. }) {
+            if matches!(
+                cmd,
+                Command::Create { .. }
+                    | Command::SetTier {
+                        tier: Tier::Hot,
+                        ..
+                    }
+            ) {
                 wake.started(&id);
             }
             if matches!(cmd, Command::Destroy { .. }) {

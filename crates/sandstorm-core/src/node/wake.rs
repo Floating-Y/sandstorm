@@ -215,10 +215,29 @@ impl Wakeups {
         ids
     }
 
+    /// A sandbox just woke for a request, or just answered one. It counts
+    /// as used from now -- not from when the request arrived, which under
+    /// load can be half a minute earlier -- both for making room and for
+    /// the master's demotions.
+    pub fn in_use(&self, id: &str) {
+        let now = Instant::now();
+        self.seen.lock().insert(id.to_string(), now);
+        self.used.lock().insert(id.to_string(), now);
+    }
+
     /// A sandbox came up here. It counts as used from now, so one that has
     /// just started is not the first to be put away.
     pub fn started(&self, id: &str) {
         self.used.lock().insert(id.to_string(), Instant::now());
+    }
+
+    /// Whether this sandbox was used within `KEEP_IF_USED_WITHIN`, which
+    /// keeps it from being put away to make room.
+    pub fn recently_used(&self, id: &str, now: Instant) -> bool {
+        self.used
+            .lock()
+            .get(id)
+            .is_some_and(|at| now.saturating_duration_since(*at) < KEEP_IF_USED_WITHIN)
     }
 
     /// Which sandboxes a wake may put to disk to make room, best first.
@@ -316,6 +335,9 @@ impl Wakeups {
             let _held = lock.lock();
             let t0 = Instant::now();
             (me.wake)(&me, &id)?;
+            // Before the lock is let go, so a wake making room cannot take
+            // this one between its coming up and its counting as used.
+            me.in_use(&id);
             Ok::<_, anyhow::Error>(t0.elapsed())
         })
         .await
@@ -568,5 +590,30 @@ mod tests {
             "a permit was lost"
         );
         assert!(most.load(Ordering::SeqCst) <= parallel);
+    }
+
+    /// A wake that waited its turn comes up counting as used now, not as of
+    /// the request that asked for it. On 2026-10-28, at 80 per node and
+    /// 8 req/s, requests waited 24 s (p50) for their wake; the sandbox came
+    /// up looking like the longest-idle hot one, and the next wake put it to
+    /// disk 0.24 s later, before the request reached it -- 98% of the 502s.
+    #[tokio::test]
+    async fn a_sandbox_just_woken_is_not_the_next_put_away() {
+        let w = Arc::new(Wakeups::new(|_, _| Ok(())));
+        let asked = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
+        for id in ["a", "b"] {
+            w.seen.lock().insert(id.into(), asked);
+            w.used.lock().insert(id.into(), asked);
+        }
+
+        w.wake("a").await.unwrap();
+
+        let now = Instant::now();
+        let observed = [seen("a", Tier::Hot), seen("b", Tier::Hot)];
+        assert_eq!(w.victims(&observed, "c", now), ["b"]);
+        assert!(
+            w.in_grace("a", now).is_some(),
+            "nor demoted by the master on a view from before it came up"
+        );
     }
 }
