@@ -6,6 +6,21 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### The gateway streams, and one host port reaches every port of a sandbox
+
+The node gateway used to read a request's whole body, send it, then read the
+sandbox's whole answer before replying, with a 60 s limit on all of it. A
+server stream -- envd's `commands.run`, server-sent events, a long download
+-- arrived in one piece at the end or not at all. It now speaks HTTP/1.1 on
+a connection of its own per request and passes both bodies through as they
+arrive, with no overall time limit; a WebSocket upgrade is spliced through.
+The sandbox counts as in flight until its answer has been read to the end,
+not only until its headers arrived.
+
+`x-sandstorm-port: <port>` sends a request to that port inside the sandbox
+instead of the one it was created with. The token check is the same for every
+port, and neither header reaches the sandbox.
+
 ### forkd is now Sandstorm
 
 Everything is renamed at once, with no compatibility layer: the crates
