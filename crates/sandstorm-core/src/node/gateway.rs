@@ -285,6 +285,9 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
     if let Some(w) = &t.wake {
         w.saw(&t.id);
     }
+    // Held to the end of this request, the wake included: a sandbox with a
+    // request in flight is never put away to make room.
+    let _in_flight = t.wake.as_ref().map(|w| w.hold(&t.id));
     let mut sent = send().await;
     let mut woke = None;
     if let (Err(e), Some(w)) = (&sent, &t.wake) {
@@ -572,16 +575,12 @@ mod tests {
         g.reconcile(&[]).await;
     }
 
-    /// A sandbox counts as used when it answers, not only when the request
-    /// arrived: one that took longer than `KEEP_IF_USED_WITHIN` to answer
-    /// has just been working, and is no candidate to put away.
+    /// A sandbox is spared from being put away while a request to it is in
+    /// flight, however long that takes, and is not once it has answered.
     #[tokio::test]
-    async fn a_sandbox_counts_as_used_when_it_answers() {
+    async fn a_sandbox_is_spared_while_it_is_answering() {
         let (gw_port, upstream) = (28465u16, 28466u16);
-        serve_slowly(
-            upstream,
-            super::super::wake::KEEP_IF_USED_WITHIN + std::time::Duration::from_millis(500),
-        );
+        serve_slowly(upstream, std::time::Duration::from_millis(1500));
         let w = Arc::new(Wakeups::new(|_, _| Ok(())));
         let mut g = Gateway::waking(w.clone());
         let mut e = spec("sb-slow", gw_port);
@@ -589,8 +588,11 @@ mod tests {
         e.sandbox_port = upstream;
         g.reconcile(&[e]).await;
 
-        assert_eq!(get(gw_port).await.status(), 200);
-        assert!(w.recently_used("sb-slow", std::time::Instant::now()));
+        let request = tokio::spawn(get(gw_port));
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(w.protected("sb-slow", std::time::Instant::now()));
+        assert_eq!(request.await.unwrap().status(), 200);
+        assert!(!w.protected("sb-slow", std::time::Instant::now()));
         g.reconcile(&[]).await;
     }
 
