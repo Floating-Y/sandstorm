@@ -77,8 +77,7 @@ A count on the overview that moved since the last refresh rolls to its new
 value in green going up or red going down, and the change pops in beside it,
 +N or −N, gone again in under two seconds. Table and filter rows read calmer:
 a node's row is centred top to bottom, a page's filters are one segmented
-control with the failing count in red text rather than a pill, and the
-failing-sandbox line is an outline with a warning edge. The header has a
+control with the failing count in red text rather than a pill. The header has a
 sun or moon for the theme and a link to the repository.
 
 Until the master first answers, the page under the header is a loading
@@ -90,9 +89,9 @@ The tab's icon is the logo's swirl, its grains grown so it reads at 16 px,
 in the lighter orange on a dark system; the old one never loaded, its quotes
 ending the attribute early.
 
-Sandboxes that will not start are a line above the sandbox table and a
-count on its Failing filter, which lists them with their errors -- not a
-second list of the same rows under it. The Nodes tab shows its nodes as a table --
+Sandboxes that will not start are a count on the sandbox table's Failing
+filter, which lists them with their errors -- not a line above the table
+nor a second list of the same rows under it. The Nodes tab shows its nodes as a table --
 free memory, sandboxes by tier, pressure, features, when last seen -- or as
 their memory over time, one view at a time on the same search, filter and
 page. Over time is a strip a node on one scale and one time axis, with

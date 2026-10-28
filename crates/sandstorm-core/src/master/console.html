@@ -258,16 +258,6 @@ canvas.strip { display: block; width: 100%; height: 20px; border-radius: var(--r
 .heatlegend .ticks span:last-child { transform: translateX(-100%); }
 .heatlegend .key { display: inline-flex; align-items: center; gap: 6px; }
 .heatlegend .key i { width: 14px; height: 8px; border-radius: 2px; display: inline-block; }
-/* Sandboxes that will not start: a line above the table and a count on the
-   Failing filter, rather than a second list of the same rows. */
-.notice { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 12px; margin: 0 0 10px; font-size: 13px; color: var(--ink);
-  border: 1px solid var(--line); border-left: 2px solid var(--warn); background: none; border-radius: var(--r-ctl); }
-.notice[hidden] { display: none; }
-.notice .ic { color: var(--warn); font-weight: 700; }
-.notice .why { color: var(--ink-2); }
-.notice button { margin-left: auto; font: inherit; font-size: 12.5px; padding: 2px 4px; border: 0; background: none; color: var(--ink-2); cursor: pointer; }
-.notice button:hover { color: var(--ink); }
-.notice button::after { content: " →"; }
 .chips .cnt { font-size: 11.5px; font-weight: 600; color: var(--bad); font-variant-numeric: tabular-nums; }
 .badge { font-size: 11px; border-radius: var(--r-tag); padding: 0 6px; }
 .empty { color: var(--muted); font-size: 13px; padding: 18px 0; text-align: center; }
@@ -529,7 +519,6 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
       <select id="sbNode"><option value="">All nodes</option></select>
       <span class="flash" id="sbFlash"></span>
     </div>
-    <div class="notice" id="sbFailNote" hidden><span class="ic">!</span><span id="sbFailText"></span><button type="button" id="sbFailShow">Show them</button></div>
     <div class="selbar" id="sbSel" hidden>
       <b id="sbSelN"></b>
       <button type="button" data-bulk="hot">Wake</button><button type="button" data-bulk="frozen">Freeze</button><button type="button" data-bulk="snapshot">To disk</button><button type="button" data-bulk="retry">Retry</button><button type="button" data-bulk="delete" class="danger">Delete</button>
@@ -1254,19 +1243,12 @@ function renderActivity() {
     act.offset = off; loadActivity();
   });
 }
-// The sandboxes themselves are in the table, under the Failing filter, each
-// with its error; this only says how many and leads there.
-let failTotal = 0;
-function failing(list, total) {
-  failTotal = total;
+// Sandboxes that will not start are in the table under the Failing filter,
+// each with its error; the filter carries how many.
+function failing(total) {
   const chip = $("sbTiers").querySelector('[data-t="failing"]');
   if (chip) chip.innerHTML = `Failing${total ? ` <span class="cnt">${compact(total)}</span>` : ""}`;
-  const quarantined = list.filter((f) => f.attempts >= 5).length;
-  $("sbFailText").innerHTML = `<b>${fmt(total)}</b> ${total === 1 ? "sandbox carries" : "sandboxes carry"} an error from their node` +
-    (quarantined ? ` <span class="why">· ${list.length < total ? "at least " : ""}${fmt(quarantined)} quarantined, waiting for a retry</span>` : "");
-  $("sbFailNote").hidden = !total || sb.tier === "failing";
 }
-$("sbFailShow").onclick = () => $("sbTiers").querySelector('[data-t="failing"]').click();
 const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 // ---- tabs -------------------------------------------------------------------
@@ -1420,7 +1402,7 @@ async function refresh(first = false) {
     $("n-nodes").textContent = now.nodes.length ? `${up}/${now.nodes.length}` : "";
     $("n-sandboxes").textContent = total ? compact(total) : "";
     $("n-nodes").classList.toggle("bad", up < now.nodes.length);
-    failing(now.failing, now.failed);
+    failing(now.failed);
     setLive(null);
     clearTimeout(slow);
     if (id >= openedBy) { openedBy = 0; loading(false); }
@@ -1463,7 +1445,6 @@ $("sbTiers").innerHTML = SB_CHIPS.map(([t, l]) => `<button type="button" data-t=
 $("sbTiers").addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b) return;
   sb.tier = b.dataset.t; sb.offset = 0; sel.clear();
-  $("sbFailNote").hidden = !failTotal || sb.tier === "failing";
   for (const x of $("sbTiers").children) x.setAttribute("aria-pressed", String(x === b));
   loadSandboxes();
 });
