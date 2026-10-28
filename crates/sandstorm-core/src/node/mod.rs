@@ -149,7 +149,7 @@ fn holding_back(cfg: &NodeConfig, cmd: &Command) -> Option<String> {
         cfg.admit_min_free_mib,
         cfg.admit_max_psi,
         cmd,
-        runtime::host_pressure(),
+        runtime::host_reading(),
     )
 }
 
@@ -162,8 +162,9 @@ fn holding_back_at(
     min_free_mib: u64,
     max_psi: f64,
     cmd: &Command,
-    (free_mib, psi): (u64, f64),
+    reading: impl Into<runtime::HostReading>,
 ) -> Option<String> {
+    let reading = reading.into();
     let costs_memory = match cmd {
         Command::Create { .. } => true,
         // Hot is the only tier that has to restore something. Frozen,
@@ -175,17 +176,36 @@ fn holding_back_at(
     if !costs_memory {
         return None;
     }
+    if let Some(why) = short_of(min_free_mib, &reading) {
+        return Some(why);
+    }
+    let psi = reading.psi;
+    if psi > max_psi {
+        return Some(format!(
+            "node held it back: memory pressure {psi:.1} above its own {max_psi:.1} ceiling"
+        ));
+    }
+    None
+}
+
+/// Under the floor: too little memory, or too little swap to squeeze
+/// anything more into. What a wake makes room for by putting sandboxes to
+/// disk, which gives back both.
+fn short_of(min_free_mib: u64, reading: &runtime::HostReading) -> Option<String> {
     // 0 means the read failed, not that the machine is full. Failing open
     // on an unreadable /proc keeps a bad read from wedging the fleet --
     // the same convention the master's `Admission::refuse` uses.
+    let free_mib = reading.free_mib;
     if free_mib > 0 && free_mib < min_free_mib {
         return Some(format!(
             "node held it back: {free_mib} MiB free, below its own {min_free_mib} MiB floor"
         ));
     }
-    if psi > max_psi {
+    if reading.swap_short(min_free_mib) {
+        let floor = reading.swap_floor_mib(min_free_mib).unwrap_or_default();
         return Some(format!(
-            "node held it back: memory pressure {psi:.1} above its own {max_psi:.1} ceiling"
+            "node held it back: {} MiB of swap free, below its own {floor} MiB floor",
+            reading.swap_free_mib
         ));
     }
     None
@@ -247,19 +267,19 @@ fn promote(
         wake,
         id,
         patience,
-        &runtime::host_pressure,
+        &runtime::host_reading,
     )
 }
 
 /// `promote`, with the pressure reading passed in so a test can state it.
-fn promote_reading(
+fn promote_reading<R: Into<runtime::HostReading>>(
     min_free: u64,
     max_psi: f64,
     rt: &Runtime,
     wake: &Wakeups,
     id: &str,
     patience: Duration,
-    read: &dyn Fn() -> (u64, f64),
+    read: &dyn Fn() -> R,
 ) -> Result<()> {
     let hot = Command::SetTier {
         id: id.to_string(),
@@ -268,11 +288,11 @@ fn promote_reading(
     let deadline = Instant::now() + patience;
     let mut evicted = 0;
     loop {
-        let (free, psi) = read();
-        let Some(why) = holding_back_at(min_free, max_psi, &hot, (free, psi)) else {
+        let reading = read().into();
+        let Some(why) = holding_back_at(min_free, max_psi, &hot, reading) else {
             return rt.set_tier(id, Tier::Hot);
         };
-        let under_floor = free > 0 && free < min_free;
+        let under_floor = short_of(min_free, &reading).is_some();
         if under_floor && evicted < MAX_EVICTIONS && evict_one(rt, wake, id)? {
             evicted += 1;
             continue;
@@ -1085,6 +1105,36 @@ mod tests {
         assert!(holding_back_at(512, 8.0, &create("sb1"), (0, 0.0)).is_none());
     }
 
+    fn with_swap(free_mib: u64, swap_free_mib: u64, swap_total_mib: u64) -> runtime::HostReading {
+        runtime::HostReading {
+            free_mib,
+            swap_free_mib,
+            swap_total_mib,
+            psi: 0.0,
+        }
+    }
+
+    /// f8 on 2026-10-28: 678 MiB available, swap gone. Pages squeezed into
+    /// zswap cost little RAM but a slot each, so memory alone said yes.
+    #[test]
+    fn a_node_out_of_swap_refuses_however_free_memory_looks() {
+        let why = holding_back_at(512, 8.0, &create("sb1"), with_swap(1500, 100, 2048));
+        let why = why.unwrap();
+        assert!(why.contains("100 MiB of swap free"), "{why}");
+        assert!(why.contains("512 MiB floor"), "{why}");
+        assert!(holding_back_at(512, 8.0, &create("sb1"), with_swap(1500, 900, 2048)).is_none());
+    }
+
+    /// A quarter of a small swap, not the whole memory floor: a node with
+    /// 256 MiB of swap must not be short for ever.
+    #[test]
+    fn a_small_swap_keeps_a_smaller_floor() {
+        assert!(holding_back_at(512, 8.0, &create("sb1"), with_swap(1500, 100, 256)).is_none());
+        assert!(holding_back_at(512, 8.0, &create("sb1"), with_swap(1500, 40, 256)).is_some());
+        // No swap at all: nothing to run short of.
+        assert!(holding_back_at(512, 8.0, &create("sb1"), with_swap(1500, 0, 0)).is_none());
+    }
+
     #[test]
     fn backoff_grows_then_caps() {
         assert_eq!(backoff_for(1), Duration::from_millis(1000));
@@ -1218,6 +1268,29 @@ mod wake_tests {
             rt.dead(Duration::from_secs(3600)).is_empty(),
             "too young to call dead"
         );
+    }
+
+    /// Short of swap is a floor, not pressure: it does not pass on its own,
+    /// so a wake makes room for it or is refused at once rather than
+    /// waiting out its patience.
+    #[test]
+    fn a_wake_short_of_swap_is_not_waited_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, rt) = node(dir.path());
+        let w = Wakeups::new(|_, _| Ok(()));
+        let t0 = Instant::now();
+        let r = promote_reading(512, 8.0, &rt, &w, "sb", Duration::from_secs(5), &|| {
+            runtime::HostReading {
+                free_mib: 1500,
+                swap_free_mib: 100,
+                swap_total_mib: 2048,
+                psi: 0.0,
+            }
+        });
+        let e = r.unwrap_err();
+        assert!(e.downcast_ref::<HeldBack>().is_some(), "{e:#}");
+        assert!(format!("{e:#}").contains("of swap free"), "{e:#}");
+        assert!(t0.elapsed() < Duration::from_millis(200));
     }
 
     /// A wake waits out memory pressure rather than being refused for it,

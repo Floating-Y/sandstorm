@@ -440,6 +440,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
                 reclaim_hot,
                 prefetch_snapshots: a.prefetch_snapshots != node::Lever::Off,
                 pin_in_zswap: node::pin_in_zswap(),
+                reclaim_floor_mib: a.admit_min_free_mib,
             },
             hold: Duration::from_secs(a.hold_secs),
             // The same two numbers the master places with, applied here
