@@ -35,17 +35,24 @@ use std::time::{Duration, Instant};
 use crate::proto::ObservedSandbox;
 use crate::tier::Tier;
 
-/// How recently a sandbox must have served a request for a wake not to put
-/// it away to make room: one that answered in the last moment is likely
-/// part of a conversation still going on.
+/// How long a sandbox that has just come up -- created, or restored for the
+/// master -- is spared from being put away to make room, so that the
+/// request it came up for has time to reach it. Past that, only a request
+/// in flight keeps a sandbox from being put away.
 ///
-/// Much shorter than `GRACE`, which guards against something else -- the
-/// master demoting on a view that predates a request. Measured on bm with
-/// `GRACE` here instead: at 4 req/s over 40 app64 sandboxes, most hot ones
-/// had served something in the last 15 s, so a wake under the floor found
-/// nothing it was allowed to put away and 7.5% of requests were refused,
-/// with sandboxes idle for 5 to 15 s holding the memory.
-pub const KEEP_IF_USED_WITHIN: Duration = Duration::from_secs(2);
+/// This used to be how long ANY sandbox that had served a request was
+/// spared, a stand-in for "in use". On 2026-10-28, at 80 per node and
+/// 8 req/s, it spared nearly every hot sandbox at once -- one that had
+/// answered its only request a second ago as much as a busy one -- and 26%
+/// of requests were refused for want of anything to put away.
+pub const JUST_STARTED: Duration = Duration::from_secs(2);
+
+/// The time constant of a sandbox's demand: each request adds one, and the
+/// total decays by `e` every this long. Ranks how frequently and how
+/// recently a sandbox is asked for in one number, so a wake puts away the
+/// sandbox least likely to be asked for next: one called once before one
+/// called often, and of two called once, the one called longer ago.
+pub const DEMAND_WINDOW: Duration = Duration::from_secs(30);
 
 /// How long after a request a sandbox is safe from demotion.
 ///
@@ -92,6 +99,15 @@ pub struct Wakeups {
     /// it is kept for the sandbox's life: it is how a wake that needs
     /// memory picks which idle sandbox to put away.
     used: Mutex<HashMap<String, Instant>>,
+    /// Requests through the gateway not yet answered. A sandbox with any is
+    /// never put away to make room.
+    in_flight: Mutex<HashMap<String, usize>>,
+    /// When each sandbox came up without a request: created, or restored
+    /// for the master. See `JUST_STARTED`.
+    fresh: Mutex<HashMap<String, Instant>>,
+    /// Each sandbox's decaying request count, and when it was last brought
+    /// up to date. See `DEMAND_WINDOW`.
+    demand: Mutex<HashMap<String, (f64, Instant)>>,
     /// Sandboxes put to disk here to make room for a wake, and when.
     evicted: Mutex<HashMap<String, Instant>>,
     /// Restores read whole images from disk, so a burst of wakes for
@@ -123,6 +139,9 @@ impl Wakeups {
             seen: Mutex::default(),
             unreported: Mutex::default(),
             used: Mutex::default(),
+            in_flight: Mutex::default(),
+            fresh: Mutex::default(),
+            demand: Mutex::default(),
             evicted: Mutex::default(),
             restores: Arc::new(tokio::sync::Semaphore::new(parallel)),
             wake: Box::new(wake),
@@ -139,7 +158,14 @@ impl Wakeups {
 
     /// A request for this sandbox reached the gateway.
     pub fn saw(&self, id: &str) {
-        let now = Instant::now();
+        self.saw_at(id, Instant::now());
+    }
+
+    fn saw_at(&self, id: &str, now: Instant) {
+        let mut demand = self.demand.lock();
+        let d = demand.entry(id.to_string()).or_insert((0.0, now));
+        *d = (decayed(*d, now) + 1.0, now);
+        drop(demand);
         let prev = self.seen.lock().insert(id.to_string(), now);
         self.used.lock().insert(id.to_string(), now);
         self.unreported.lock().insert(id.to_string());
@@ -225,44 +251,72 @@ impl Wakeups {
         self.used.lock().insert(id.to_string(), now);
     }
 
-    /// A sandbox came up here. It counts as used from now, so one that has
-    /// just started is not the first to be put away.
+    /// A sandbox came up here with no request yet: created, or restored for
+    /// the master. Spared for `JUST_STARTED`.
     pub fn started(&self, id: &str) {
-        self.used.lock().insert(id.to_string(), Instant::now());
+        let now = Instant::now();
+        self.used.lock().insert(id.to_string(), now);
+        self.fresh.lock().insert(id.to_string(), now);
     }
 
-    /// Whether this sandbox was used within `KEEP_IF_USED_WITHIN`, which
-    /// keeps it from being put away to make room.
-    pub fn recently_used(&self, id: &str, now: Instant) -> bool {
-        self.used
-            .lock()
-            .get(id)
-            .is_some_and(|at| now.saturating_duration_since(*at) < KEEP_IF_USED_WITHIN)
+    /// A request for this sandbox is on its way through the gateway. Until
+    /// the returned guard is dropped -- once the answer is in hand, or the
+    /// caller has gone -- the sandbox is not put away to make room.
+    pub fn hold(self: &Arc<Self>, id: &str) -> InFlight {
+        *self.in_flight.lock().entry(id.to_string()).or_default() += 1;
+        InFlight {
+            wake: self.clone(),
+            id: id.to_string(),
+        }
+    }
+
+    /// Whether this sandbox may not be put away to make room: a request is
+    /// in flight, or it has only just come up.
+    pub fn protected(&self, id: &str, now: Instant) -> bool {
+        self.in_flight.lock().get(id).is_some_and(|n| *n > 0)
+            || self
+                .fresh
+                .lock()
+                .get(id)
+                .is_some_and(|at| now.saturating_duration_since(*at) < JUST_STARTED)
     }
 
     /// Which sandboxes a wake may put to disk to make room, best first.
     ///
     /// Frozen before Hot -- a frozen one has already been idle long enough
-    /// for the master to say so -- and within each, the one used longest
-    /// ago; one with no record (adopted across a restart) counts as oldest.
-    /// Never `except`, the sandbox being woken, and never one that served a
-    /// request in the last `KEEP_IF_USED_WITHIN`.
+    /// for the master to say so -- and within each, the one least in demand
+    /// (`DEMAND_WINDOW`), then the one used longest ago; one with no record
+    /// (adopted across a restart) comes first. Never `except`, the sandbox
+    /// being woken, and never one that is `protected`.
     pub fn victims(&self, observed: &[ObservedSandbox], except: &str, now: Instant) -> Vec<String> {
-        let used = self.used.lock();
-        let recent = |id: &str| {
-            used.get(id)
-                .is_some_and(|at| now.saturating_duration_since(*at) < KEEP_IF_USED_WITHIN)
-        };
-        let mut ranked: Vec<(bool, Option<Instant>, &str)> = observed
+        let candidates: Vec<&ObservedSandbox> = observed
             .iter()
             .filter(|o| o.id != except && matches!(o.tier, Tier::Hot | Tier::Frozen))
-            .filter(|o| !recent(&o.id))
-            .map(|o| (o.tier == Tier::Hot, used.get(&o.id).copied(), o.id.as_str()))
+            .filter(|o| !self.protected(&o.id, now))
             .collect();
-        ranked.sort();
+        let used = self.used.lock();
+        let demand = self.demand.lock();
+        let mut ranked: Vec<(bool, f64, Option<Instant>, &str)> = candidates
+            .into_iter()
+            .map(|o| {
+                let wanted = demand.get(&o.id).map_or(0.0, |d| decayed(*d, now));
+                (
+                    o.tier == Tier::Hot,
+                    wanted,
+                    used.get(&o.id).copied(),
+                    o.id.as_str(),
+                )
+            })
+            .collect();
+        ranked.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(a.1.total_cmp(&b.1))
+                .then(a.2.cmp(&b.2))
+                .then(a.3.cmp(b.3))
+        });
         ranked
             .into_iter()
-            .map(|(_, _, id)| id.to_string())
+            .map(|(_, _, _, id)| id.to_string())
             .collect()
     }
 
@@ -304,6 +358,8 @@ impl Wakeups {
         self.locks.lock().remove(id);
         self.seen.lock().remove(id);
         self.used.lock().remove(id);
+        self.fresh.lock().remove(id);
+        self.demand.lock().remove(id);
         self.evicted.lock().remove(id);
         self.unreported.lock().remove(id);
         self.arrivals.lock().remove(id);
@@ -345,6 +401,30 @@ impl Wakeups {
         me2.woke.notify_one();
         Ok(took)
     }
+}
+
+/// A request in flight to a sandbox; see `Wakeups::hold`.
+pub struct InFlight {
+    wake: Arc<Wakeups>,
+    id: String,
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        let mut all = self.wake.in_flight.lock();
+        if let Some(n) = all.get_mut(&self.id) {
+            *n -= 1;
+            if *n == 0 {
+                all.remove(&self.id);
+            }
+        }
+    }
+}
+
+/// A demand count brought forward to `now`.
+fn decayed((count, at): (f64, Instant), now: Instant) -> f64 {
+    let dt = now.saturating_duration_since(at).as_secs_f64();
+    count * (-dt / DEMAND_WINDOW.as_secs_f64()).exp()
 }
 
 #[cfg(test)]
@@ -415,46 +495,49 @@ mod tests {
         }
     }
 
-    /// Frozen goes before Hot, the longest unused first within each, and
-    /// neither the sandbox being woken, one that answered a moment ago, nor
-    /// one already on disk is ever chosen. One that answered 5 s ago is:
-    /// that is inside the master's `GRACE`, but not a conversation.
+    /// Frozen goes before Hot, and within each the one least in demand:
+    /// a sandbox called once a second ago goes before one called thirty
+    /// times that has been quiet for half a minute, and of two called once,
+    /// the one called longer ago goes first. Never the sandbox being woken,
+    /// one with a request in flight, one that has only just come up, or one
+    /// already on disk.
     #[test]
-    fn a_wake_puts_away_the_longest_idle_first() {
-        let w = Wakeups::new(|_, _| Ok(()));
+    fn a_wake_puts_away_the_least_wanted_first() {
+        let w = Arc::new(Wakeups::new(|_, _| Ok(())));
         let t0 = Instant::now();
         let s = Duration::from_secs;
-        let now = t0 + s(200);
-        for (id, at) in [
-            ("hot-old", t0),
-            ("hot-new", t0 + s(100)),
-            ("frozen-new", t0 + s(90)),
-            ("frozen-old", t0 + s(10)),
-            ("quiet", t0 + s(195)),
-            ("busy", t0 + s(199)),
-        ] {
-            w.used.lock().insert(id.into(), at);
+        let now = t0 + s(300);
+        w.saw_at("frozen-once-long-ago", t0 + s(100));
+        w.saw_at("frozen-once-recent", t0 + s(250));
+        w.saw_at("once-long-ago", t0 + s(150));
+        w.saw_at("once-just-now", t0 + s(299));
+        for i in 0..30 {
+            w.saw_at("popular", t0 + s(240 + i));
         }
+        w.saw_at("busy", t0 + s(150));
+        let _request = w.hold("busy");
+        w.fresh.lock().insert("fresh".into(), now - s(1));
         let observed = [
-            seen("hot-new", Tier::Hot),
-            seen("frozen-new", Tier::Frozen),
+            seen("once-just-now", Tier::Hot),
+            seen("frozen-once-recent", Tier::Frozen),
             seen("busy", Tier::Hot),
-            seen("quiet", Tier::Hot),
+            seen("popular", Tier::Hot),
             seen("target", Tier::Frozen),
-            seen("hot-old", Tier::Hot),
+            seen("once-long-ago", Tier::Hot),
             seen("on-disk", Tier::Snapshot),
-            seen("frozen-old", Tier::Frozen),
+            seen("fresh", Tier::Hot),
+            seen("frozen-once-long-ago", Tier::Frozen),
             seen("adopted", Tier::Hot),
         ];
         assert_eq!(
             w.victims(&observed, "target", now),
             [
-                "frozen-old",
-                "frozen-new",
+                "frozen-once-long-ago",
+                "frozen-once-recent",
                 "adopted",
-                "hot-old",
-                "hot-new",
-                "quiet"
+                "once-long-ago",
+                "once-just-now",
+                "popular"
             ]
         );
     }
@@ -477,7 +560,10 @@ mod tests {
     fn forgetting_drops_everything() {
         let w = Wakeups::new(|_, _| Ok(()));
         w.saw("a");
+        w.started("a");
         w.forget("a");
+        assert!(w.demand.lock().is_empty());
+        assert!(w.fresh.lock().is_empty());
         assert_eq!(w.in_grace("a", Instant::now()), None);
         assert!(w.take_traffic().is_empty());
     }
@@ -592,28 +678,32 @@ mod tests {
         assert!(most.load(Ordering::SeqCst) <= parallel);
     }
 
-    /// A wake that waited its turn comes up counting as used now, not as of
-    /// the request that asked for it. On 2026-10-28, at 80 per node and
-    /// 8 req/s, requests waited 24 s (p50) for their wake; the sandbox came
-    /// up looking like the longest-idle hot one, and the next wake put it to
-    /// disk 0.24 s later, before the request reached it -- 98% of the 502s.
+    /// A sandbox woken for a request is spared until that request has its
+    /// answer, however long the wake took, and no longer. On 2026-10-28, at
+    /// 80 per node and 8 req/s, requests waited 24 s (p50) for their wake;
+    /// counted from the request, the sandbox came up looking long idle and
+    /// the next wake put it to disk 0.24 s later -- 98% of the 502s.
+    /// Spared for a fixed 2 s after answering instead, nearly every hot
+    /// sandbox was spared at once and 26% of requests were refused.
     #[tokio::test]
-    async fn a_sandbox_just_woken_is_not_the_next_put_away() {
+    async fn a_sandbox_is_spared_while_its_request_is_in_flight_and_no_longer() {
         let w = Arc::new(Wakeups::new(|_, _| Ok(())));
         let asked = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
-        for id in ["a", "b"] {
-            w.seen.lock().insert(id.into(), asked);
-            w.used.lock().insert(id.into(), asked);
-        }
-
-        w.wake("a").await.unwrap();
-
-        let now = Instant::now();
+        w.saw_at("a", asked);
+        w.saw_at("b", asked);
         let observed = [seen("a", Tier::Hot), seen("b", Tier::Hot)];
+
+        let request = w.hold("a");
+        w.wake("a").await.unwrap();
+        let now = Instant::now();
         assert_eq!(w.victims(&observed, "c", now), ["b"]);
         assert!(
             w.in_grace("a", now).is_some(),
             "nor demoted by the master on a view from before it came up"
         );
+
+        // Answered. Wanted no more than "b", but used since.
+        drop(request);
+        assert_eq!(w.victims(&observed, "c", Instant::now()), ["b", "a"]);
     }
 }
