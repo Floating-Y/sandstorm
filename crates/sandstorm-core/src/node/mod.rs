@@ -131,6 +131,11 @@ pub struct NodeConfig {
     /// whether it should also give way to pressure as readily as a create
     /// is what this lets a node decide.
     pub wake_max_psi: f64,
+    /// How long a wake may take to start; see `wake::WAKE_BUDGET`.
+    pub wake_budget: Duration,
+    /// How many wakes may wait to restore at once; `None` for twice the
+    /// restore permits.
+    pub wake_max_waiting: Option<usize>,
     /// Tags being fetched from other nodes, so one fetch serves every child
     /// of a tag that arrives while it runs.
     pub fetches: Arc<Fetches>,
@@ -216,21 +221,12 @@ fn short_of(min_free_mib: u64, reading: &runtime::HostReading) -> Option<String>
 fn wakeups(cfg: &NodeConfig, rt: &Runtime) -> Arc<Wakeups> {
     let rt = rt.clone();
     let (min_free, max_psi) = (cfg.admit_min_free_mib, cfg.wake_max_psi);
-    Arc::new(Wakeups::new(move |w, id| {
-        promote(min_free, max_psi, &rt, w, id, WAKE_PATIENCE)
-    }))
+    Arc::new(
+        Wakeups::new(move |w, id, patience| promote(min_free, max_psi, &rt, w, id, patience))
+            .with_limits(cfg.wake_budget, cfg.wake_max_waiting),
+    )
 }
 
-/// How long a wake from the gateway waits for memory pressure to ease
-/// before it is refused.
-///
-/// Pressure is a 10-second average, and the node's own restores raise it:
-/// on 2026-10-28, four requests at once to a full node's snapshots took
-/// one node over its ceiling for a few seconds, and 8 of 600 were refused
-/// for nothing but that. A caller waiting a few seconds more is better
-/// served than one turned away. The wait holds the restore permit, so the
-/// wakes behind it queue rather than adding to the pressure.
-const WAKE_PATIENCE: Duration = Duration::from_secs(8);
 /// How often a waiting wake reads the pressure again.
 const PRESSURE_POLL: Duration = Duration::from_millis(250);
 
@@ -1200,6 +1196,8 @@ mod wake_tests {
             admit_min_free_mib: 0,
             admit_max_psi: f64::MAX,
             wake_max_psi: f64::MAX,
+            wake_budget: wake::WAKE_BUDGET,
+            wake_max_waiting: None,
             features: Vec::new(),
             fetches: Default::default(),
         };
@@ -1221,7 +1219,7 @@ mod wake_tests {
     fn a_sandbox_in_use_is_not_demoted() {
         let dir = tempfile::tempdir().unwrap();
         let (cfg, rt) = node(dir.path());
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         let mut failing = HashMap::new();
         w.saw("sb");
 
@@ -1289,7 +1287,7 @@ mod wake_tests {
     fn a_wake_short_of_swap_is_not_waited_out() {
         let dir = tempfile::tempdir().unwrap();
         let (_, rt) = node(dir.path());
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         let t0 = Instant::now();
         let r = promote_reading(512, 8.0, &rt, &w, "sb", Duration::from_secs(5), &|| {
             runtime::HostReading {
@@ -1311,7 +1309,7 @@ mod wake_tests {
     fn a_wake_waits_for_pressure_to_pass() {
         let dir = tempfile::tempdir().unwrap();
         let (_, rt) = node(dir.path());
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         let held = |r: &Result<()>| {
             r.as_ref()
                 .err()
@@ -1354,7 +1352,7 @@ mod wake_tests {
         let (mut cfg, rt) = node(dir.path());
         // Any pressure reading, 0 included, is over this.
         cfg.admit_max_psi = -1.0;
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         let mut failing = HashMap::new();
         let mut create = fork_from_elsewhere("sb", "127.0.0.1:1");
         if let Command::Create {
@@ -1405,7 +1403,7 @@ mod wake_tests {
     async fn a_fork_waits_for_its_image_and_a_failed_fetch_counts() {
         let dir = tempfile::tempdir().unwrap();
         let (cfg, rt) = node(dir.path());
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         let mut failing = HashMap::new();
         // Nothing listens on port 1, so the fetch fails.
         let cmd = fork_from_elsewhere("sb", "127.0.0.1:1");
@@ -1433,7 +1431,7 @@ mod wake_tests {
     fn a_dropped_tag_leaves_the_disk() {
         let dir = tempfile::tempdir().unwrap();
         let (cfg, rt) = node(dir.path());
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         let mut failing = HashMap::new();
         std::fs::create_dir_all(rt.tags_dir().join("old")).unwrap();
         std::fs::write(rt.tags_dir().join("old/pages.img"), b"x").unwrap();

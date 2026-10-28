@@ -29,6 +29,7 @@
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -46,6 +47,19 @@ use crate::tier::Tier;
 /// answered its only request a second ago as much as a busy one -- and 26%
 /// of requests were refused for want of anything to put away.
 pub const JUST_STARTED: Duration = Duration::from_secs(2);
+
+/// How long a wake may take to start before it is refused: waiting for a
+/// restore permit, then for memory pressure to ease. What is left of it
+/// when the wake gets its permit is how long it may wait out pressure.
+///
+/// A caller is better served by a quick 503 with `retry-after` than by a
+/// long wait. On 2026-10-28, at 80 per node and 8 req/s, wakes queued with
+/// no bound: refusals fell to 14%, but the answered requests' p50 went from
+/// 13 ms to 4.6 s, a popular sandbox's wake waiting 12 s behind the wakes
+/// of sandboxes called once. Before that, waiting out pressure for up to
+/// 8 s on its own had saved 8 of 600 wakes from being refused for pressure
+/// their own restores caused; most of that is inside this.
+pub const WAKE_BUDGET: Duration = Duration::from_secs(2);
 
 /// The time constant of a sandbox's demand: each request adds one, and the
 /// total decays by `e` every this long. Ranks how frequently and how
@@ -85,7 +99,9 @@ pub mod predict {
     pub const LEAD: Duration = Duration::from_secs(20);
 }
 
-type WakeFn = dyn Fn(&Wakeups, &str) -> Result<()> + Send + Sync;
+/// Brings a sandbox to Hot, waiting out memory pressure for at most the
+/// `Duration` it is given.
+type WakeFn = dyn Fn(&Wakeups, &str, Duration) -> Result<()> + Send + Sync;
 
 pub struct Wakeups {
     /// One per sandbox, held across any tier change -- a wake, or a command
@@ -124,12 +140,21 @@ pub struct Wakeups {
     arrivals: Mutex<HashMap<String, VecDeque<Instant>>>,
     /// The arrival a prefetch was last done after, so one is done per cycle.
     prefetched: Mutex<HashMap<String, Instant>>,
+    /// See `WAKE_BUDGET`.
+    budget: Duration,
+    /// How many wakes may wait for a restore permit at once. One that would
+    /// be further back is refused at once: it would not start in time.
+    max_waiting: usize,
+    waiting: AtomicUsize,
 }
 
 impl Wakeups {
     /// `wake` brings a sandbox to Hot and returns when it is serving. It
-    /// blocks, and is called with that sandbox's lock held.
-    pub fn new(wake: impl Fn(&Wakeups, &str) -> Result<()> + Send + Sync + 'static) -> Self {
+    /// blocks, and is called with that sandbox's lock held and how long it
+    /// may wait out memory pressure.
+    pub fn new(
+        wake: impl Fn(&Wakeups, &str, Duration) -> Result<()> + Send + Sync + 'static,
+    ) -> Self {
         let parallel = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(2)
@@ -148,7 +173,21 @@ impl Wakeups {
             woke: tokio::sync::Notify::new(),
             arrivals: Mutex::default(),
             prefetched: Mutex::default(),
+            budget: WAKE_BUDGET,
+            // Two each: about as many as can start within the budget when
+            // a restore takes half a second to a second.
+            max_waiting: 2 * parallel,
+            waiting: AtomicUsize::new(0),
         }
+    }
+
+    /// Other limits than `WAKE_BUDGET` and twice the restore permits.
+    pub fn with_limits(mut self, budget: Duration, max_waiting: Option<usize>) -> Self {
+        self.budget = budget;
+        if let Some(n) = max_waiting {
+            self.max_waiting = n;
+        }
+        self
     }
 
     /// The lock for one sandbox's tier.
@@ -375,13 +414,35 @@ impl Wakeups {
     /// client disconnects -- but the blocking work cannot be called back,
     /// so the permit goes with the work and is released when it ends. A
     /// caller that gives up while still queued never starts anything.
+    ///
+    /// Refused, as held back, if it cannot start within the budget: at once
+    /// when `max_waiting` are already waiting, or once the budget has gone
+    /// waiting for a permit.
     pub async fn wake(self: &Arc<Self>, id: &str) -> Result<Duration> {
-        let permit = self
-            .restores
-            .clone()
-            .acquire_owned()
-            .await
-            .context("shutting down")?;
+        let deadline = Instant::now() + self.budget;
+        let ahead = self.waiting.fetch_add(1, Ordering::SeqCst);
+        let waiting = Waiting(&self.waiting);
+        if ahead >= self.max_waiting {
+            return Err(super::HeldBack(format!(
+                "node held it back: {ahead} wakes already waiting to restore, at most {}",
+                self.max_waiting
+            ))
+            .into());
+        }
+        let permit =
+            match tokio::time::timeout_at(deadline.into(), self.restores.clone().acquire_owned())
+                .await
+            {
+                Ok(p) => p.context("shutting down")?,
+                Err(_) => {
+                    return Err(super::HeldBack(format!(
+                        "node held it back: no restore could start within {:?}",
+                        self.budget
+                    ))
+                    .into())
+                }
+            };
+        drop(waiting);
         let me = self.clone();
         let id = id.to_string();
         let me2 = self.clone();
@@ -390,7 +451,7 @@ impl Wakeups {
             let lock = me.lock(&id);
             let _held = lock.lock();
             let t0 = Instant::now();
-            (me.wake)(&me, &id)?;
+            (me.wake)(&me, &id, deadline.saturating_duration_since(t0))?;
             // Before the lock is let go, so a wake making room cannot take
             // this one between its coming up and its counting as used.
             me.in_use(&id);
@@ -400,6 +461,16 @@ impl Wakeups {
         .context("the wake task panicked")??;
         me2.woke.notify_one();
         Ok(took)
+    }
+}
+
+/// One wake waiting for a restore permit, counted until it has one or its
+/// caller has gone.
+struct Waiting<'a>(&'a AtomicUsize);
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -434,7 +505,7 @@ mod tests {
 
     #[test]
     fn traffic_is_reported_once() {
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         w.saw("a");
         w.saw("b");
         w.saw("a");
@@ -444,7 +515,7 @@ mod tests {
 
     #[test]
     fn grace_runs_out() {
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         assert_eq!(w.in_grace("a", Instant::now()), None, "never seen");
         w.saw("a");
         let left = w.in_grace("a", Instant::now()).expect("just seen");
@@ -456,7 +527,7 @@ mod tests {
     /// its next call; an irregular one never is.
     #[test]
     fn a_periodic_sandbox_is_prefetched_ahead_of_its_next_call() {
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         let t0 = Instant::now();
         let s = Duration::from_secs;
         for k in 0..4 {
@@ -477,7 +548,7 @@ mod tests {
 
     #[test]
     fn too_short_a_period_is_not_worth_predicting() {
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         let t0 = Instant::now();
         for k in 0..4 {
             w.arrived("busy", t0 + Duration::from_secs(20 * k));
@@ -503,7 +574,7 @@ mod tests {
     /// already on disk.
     #[test]
     fn a_wake_puts_away_the_least_wanted_first() {
-        let w = Arc::new(Wakeups::new(|_, _| Ok(())));
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
         let t0 = Instant::now();
         let s = Duration::from_secs;
         let now = t0 + s(300);
@@ -545,7 +616,7 @@ mod tests {
     /// Reported on every report for as long as it is protected, then not.
     #[test]
     fn evictions_are_reported_until_the_master_has_caught_up() {
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         w.put_away("b");
         w.put_away("a");
         let now = Instant::now();
@@ -558,7 +629,7 @@ mod tests {
 
     #[test]
     fn forgetting_drops_everything() {
-        let w = Wakeups::new(|_, _| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         w.saw("a");
         w.started("a");
         w.forget("a");
@@ -575,7 +646,7 @@ mod tests {
         let running = Arc::new(AtomicUsize::new(0));
         let overlapped = Arc::new(AtomicUsize::new(0));
         let (r, o) = (running.clone(), overlapped.clone());
-        let w = Arc::new(Wakeups::new(move |_, _| {
+        let w = Arc::new(Wakeups::new(move |_, _, _| {
             if r.fetch_add(1, Ordering::SeqCst) > 0 {
                 o.fetch_add(1, Ordering::SeqCst);
             }
@@ -628,7 +699,7 @@ mod tests {
         let most = Arc::new(AtomicUsize::new(0));
         let gate = Arc::new((parking_lot::Mutex::new(false), parking_lot::Condvar::new()));
         let (r, m, g) = (running.clone(), most.clone(), gate.clone());
-        let w = Arc::new(Wakeups::new(move |_, _| {
+        let w = Arc::new(Wakeups::new(move |_, _, _| {
             let now = r.fetch_add(1, Ordering::SeqCst) + 1;
             m.fetch_max(now, Ordering::SeqCst);
             let (open, cv) = &*g;
@@ -687,7 +758,7 @@ mod tests {
     /// sandbox was spared at once and 26% of requests were refused.
     #[tokio::test]
     async fn a_sandbox_is_spared_while_its_request_is_in_flight_and_no_longer() {
-        let w = Arc::new(Wakeups::new(|_, _| Ok(())));
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
         let asked = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
         w.saw_at("a", asked);
         w.saw_at("b", asked);
@@ -705,5 +776,152 @@ mod tests {
         // Answered. Wanted no more than "b", but used since.
         drop(request);
         assert_eq!(w.victims(&observed, "c", Instant::now()), ["b", "a"]);
+    }
+
+    /// Holds every restore permit until `release` is called, so a test can
+    /// see what a wake does when none is free.
+    fn blocking_wakes() -> (
+        Arc<Wakeups>,
+        Arc<(parking_lot::Mutex<bool>, parking_lot::Condvar)>,
+    ) {
+        let gate = Arc::new((parking_lot::Mutex::new(false), parking_lot::Condvar::new()));
+        let g = gate.clone();
+        let w = Wakeups::new(move |_, _, _| {
+            let (open, cv) = &*g;
+            let mut open = open.lock();
+            while !*open {
+                cv.wait(&mut open);
+            }
+            Ok(())
+        });
+        (Arc::new(w), gate)
+    }
+
+    fn release(gate: &(parking_lot::Mutex<bool>, parking_lot::Condvar)) {
+        *gate.0.lock() = true;
+        gate.1.notify_all();
+    }
+
+    /// A wake that must not take long, timed. Asserting comes after the
+    /// gate is released: the runtime waits for its blocking threads when it
+    /// shuts down, so a failure with the gate shut would hang, not fail.
+    async fn late_wake(w: &Arc<Wakeups>) -> (Result<Duration>, Duration) {
+        let t0 = Instant::now();
+        let r = match tokio::time::timeout(Duration::from_secs(5), w.wake("late")).await {
+            Ok(r) => r,
+            Err(_) => Err(anyhow::anyhow!("still waiting after 5 s")),
+        };
+        (r, t0.elapsed())
+    }
+
+    fn held_back(r: &Result<Duration>) -> String {
+        let e = r.as_ref().expect_err("refused");
+        assert!(
+            e.downcast_ref::<super::super::HeldBack>().is_some(),
+            "{e:#}"
+        );
+        format!("{e:#}")
+    }
+
+    /// A wake that cannot get a restore permit within its budget is
+    /// refused, as held back, rather than left queueing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_wake_that_cannot_start_in_time_is_refused() {
+        let (w, gate) = blocking_wakes();
+        let w = Arc::new(
+            Arc::try_unwrap(w)
+                .ok()
+                .unwrap()
+                .with_limits(Duration::from_millis(300), Some(100)),
+        );
+        let permits = w.restores.available_permits();
+        let busy: Vec<_> = (0..permits)
+            .map(|i| {
+                let w = w.clone();
+                tokio::spawn(async move { w.wake(&format!("busy-{i}")).await })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (r, took) = late_wake(&w).await;
+        release(&gate);
+        for b in busy {
+            b.await.unwrap().unwrap();
+        }
+
+        let why = held_back(&r);
+        assert!(why.contains("no restore could start within"), "{why}");
+        assert!(took >= Duration::from_millis(200), "{took:?}");
+        assert!(took < Duration::from_secs(1), "{took:?}");
+    }
+
+    /// With as many wakes already waiting as the node allows, another is
+    /// refused at once: it would not start in time, so its caller should
+    /// not wait to find that out.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_wake_behind_a_full_queue_is_refused_at_once() {
+        let (w, gate) = blocking_wakes();
+        let w = Arc::new(
+            Arc::try_unwrap(w)
+                .ok()
+                .unwrap()
+                .with_limits(Duration::from_secs(10), Some(1)),
+        );
+        let permits = w.restores.available_permits();
+        let mut busy: Vec<_> = (0..permits + 1)
+            .map(|i| {
+                let w = w.clone();
+                tokio::spawn(async move { w.wake(&format!("busy-{i}")).await })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (r, took) = late_wake(&w).await;
+        release(&gate);
+        for b in busy.drain(..) {
+            b.await.unwrap().unwrap();
+        }
+
+        let why = held_back(&r);
+        assert!(why.contains("already waiting"), "{why}");
+        assert!(took < Duration::from_millis(100), "{took:?}");
+        // And the count is back to nothing waiting.
+        assert_eq!(w.waiting.load(Ordering::SeqCst), 0);
+    }
+
+    /// A wake waits out memory pressure only for what is left of its
+    /// budget once it has its permit, not a fixed time on top of the wait.
+    #[tokio::test]
+    async fn a_wake_waits_out_pressure_only_for_what_is_left() {
+        let given = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let g = given.clone();
+        let w = Arc::new(
+            Wakeups::new(move |_, _, patience| {
+                g.lock().push(patience);
+                std::thread::sleep(Duration::from_millis(300));
+                Ok(())
+            })
+            .with_limits(Duration::from_secs(2), None),
+        );
+        // More than there are permits, so some wait for one first.
+        let permits = w.restores.available_permits();
+        let all: Vec<_> = (0..permits * 2)
+            .map(|i| {
+                let w = w.clone();
+                tokio::spawn(async move { w.wake(&format!("sb-{i}")).await })
+            })
+            .collect();
+        for a in all {
+            a.await.unwrap().unwrap();
+        }
+        let given = given.lock();
+        assert!(
+            given.iter().all(|p| *p <= Duration::from_secs(2)),
+            "{given:?}"
+        );
+        assert!(
+            given.iter().any(|p| *p < Duration::from_millis(1800)),
+            "the ones that queued got less: {given:?}"
+        );
     }
 }

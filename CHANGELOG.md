@@ -69,11 +69,11 @@ nor one whose tier is already changing. At most four
 go per wake; past that, or with nothing left to choose, the wake is refused
 as before. Memory pressure (PSI) is not made room for: it is a 10-second
 average that a checkpoint does not move. A wake from the gateway waits for it
-instead, up to 8 s, holding its restore permit so the wakes behind it queue
-rather than add to it; with four requests at once to a full node's
-snapshots, 8 of 600 had been refused for a few seconds of pressure their own
-restores caused. `--wake-max-psi` sets the ceiling a wake is held to,
-separately from creates.
+instead, for what is left of its budget (below), holding its restore permit
+so the wakes behind it queue rather than add to it; with four requests at
+once to a full node's snapshots, 8 of 600 had been refused for a few seconds
+of pressure their own restores caused. `--wake-max-psi` sets the ceiling a
+wake is held to, separately from creates.
 
 The restore permit belongs to the wake, not to the request that started it.
 It used to go with the request: a client that gave up while its wake waited
@@ -102,6 +102,14 @@ master's demotions as well; a restore the master asks for is spared for
 2 s, like a create, for its request to arrive; and a wake making room
 checks again, once it holds a sandbox's lock, that nothing has reached it.
 Every 502 the gateway answers is logged with the reason.
+
+A wake that cannot start quickly is refused rather than queued. It has 2 s
+(`--wake-budget-ms`) to get a restore slot and for memory pressure to ease,
+and is answered 503 with `retry-after` once that is gone; one that would be
+behind more than twice as many waiting wakes as there are slots
+(`--wake-max-waiting`) is refused at once. Unbounded, a popular sandbox's
+wake waited 12 s behind wakes of sandboxes called once, and the answered
+requests' p50 went from 13 ms to 4.6 s at 80 per node and 8 req/s.
 
 The node lists what it put away in its reports (`evicted`), and the master
 moves desired state there rather than asking for the sandbox back -- which
