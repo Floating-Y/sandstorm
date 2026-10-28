@@ -24,6 +24,7 @@
   --glow: 0 0 0 1px rgba(255,255,255,.04), 0 10px 30px rgba(0,0,0,.35);
   --heat-0: #10243f; --heat-1: #3987e5; --heat-2: #cde2fb;
   --brand: #f0a04b;
+  --spark: #4f4e4a;
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
@@ -35,6 +36,7 @@
     --accent: #0b0b0b; --on-accent: #fcfcfb;
     --heat-0: #eef4fc; --heat-1: #5598e7; --heat-2: #0d366b;
     --brand: #cc7420;
+    --spark: #c4c2ba;
   }
 }
 :root[data-theme="light"] {
@@ -46,6 +48,7 @@
   --accent: #0b0b0b; --on-accent: #fcfcfb;
   --heat-0: #eef4fc; --heat-1: #5598e7; --heat-2: #0d366b;
   --brand: #cc7420;
+  --spark: #c4c2ba;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--page); color: var(--ink);
@@ -108,7 +111,7 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .kpi .value { font-family: var(--serif); font-size: 34px; font-weight: 500; letter-spacing: -.4px; line-height: 1.1; margin: 6px 0 2px; }
 .kpi .value small { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 13px; color: var(--muted); font-weight: 400; margin-left: 4px; letter-spacing: 0; }
 .kpi .foot { color: var(--muted); font-size: 12px; min-height: 18px; }
-.kpi svg.spark { position: absolute; right: 0; bottom: 0; width: 100%; height: 36px; opacity: .7; pointer-events: none; }
+.kpi svg.spark { position: absolute; right: 0; bottom: 0; width: 100%; height: 36px; pointer-events: none; }
 .swatch { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
 .chart { width: 100%; display: block; }
 .chart text { fill: var(--muted); font-size: 11px; }
@@ -126,23 +129,29 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .tip .r b { font-weight: 600; }
 /* The tier flow: four tiers, and an arrow for each move between them whose
    width, label and moving dashes are the measured rate. */
-#flow { width: 100%; height: 156px; display: block; overflow: visible; }
-#flow .box { fill: none; stroke: none; }
-#flow .lbl { fill: var(--ink-2); font-size: 12.5px; font-weight: 600; }
-#flow .hint, #flow .pct, #flow .verb, #flow .why { fill: var(--muted); font-size: 11.5px; }
-#flow .hint { font-weight: 400; }
-#flow .cnt { fill: var(--ink); font-family: var(--serif); font-weight: 500; letter-spacing: -.3px; }
-#flow .track { fill: var(--grid); }
-#flow .bar { transition: width .8s cubic-bezier(.2,.8,.2,1); }
-#flow .rate { fill: var(--ink); font-size: 12.5px; font-weight: 600; }
-#flow .pipe { fill: none; stroke-linecap: round; stroke-linejoin: round; opacity: .85; transition: stroke-width .6s; }
-#flow .pipe.none { stroke: var(--axis) !important; opacity: 1; stroke-dasharray: 3 4; }
-#flow .head { transition: d .6s; }
-#flow .head.none { fill: var(--axis) !important; }
-/* A short glint that travels the arrow, quicker as the rate rises. */
-#flow .pulse { fill: none; stroke: #fff; stroke-opacity: .32; stroke-linecap: round; stroke-dasharray: 12 48; animation: flowdash 1s linear infinite; }
-@keyframes flowdash { to { stroke-dashoffset: -60; } }
-#flow .rate.none { fill: var(--muted); font-weight: 500; }
+/* The tier flow: the four tiers in equal columns, and between each pair a
+   connector carrying the measured rate of that move. Rates are words, not
+   widths; colour is the tier the move goes to. */
+.tiers { display: grid; grid-template-columns: minmax(0, 1fr) 112px minmax(0, 1fr) 112px minmax(0, 1fr) 112px minmax(0, 1fr); margin-top: 12px; }
+.tier { min-width: 0; padding: 2px 4px; border-radius: 8px; cursor: default; }
+.tier .th { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.tier .th i { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.tier .th .ti { margin-left: auto; color: var(--muted); font-weight: 400; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.tier .tc { font-family: var(--serif); font-size: 34px; font-weight: 500; letter-spacing: -.4px; line-height: 1.15; margin: 6px 0 10px; }
+.tier .tb { display: flex; align-items: center; gap: 10px; }
+.tier .track { flex: 1; height: 4px; border-radius: 2px; background: var(--grid); overflow: hidden; }
+.tier .track i { display: block; height: 100%; width: 0; border-radius: 2px; transition: width .8s cubic-bezier(.2,.8,.2,1); }
+.tier .tp { font-size: 12px; color: var(--muted); min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
+.tier .tin { margin-top: 9px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 17px; }
+.tier .tin b, .move b, .flowfoot b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.move { display: flex; flex-direction: column; align-items: stretch; gap: 5px; padding: 22px 14px 0; cursor: default; }
+.move .lab { text-align: center; font-size: 12px; color: var(--muted); white-space: nowrap; line-height: 1.25; }
+.move .ln { position: relative; height: 1.5px; background: currentColor; border-radius: 1px; margin-right: 3px; }
+.move .ln::after { content: ""; position: absolute; right: -2px; top: 50%; width: 7px; height: 7px; border-top: 1.5px solid currentColor; border-right: 1.5px solid currentColor; transform: translateY(-50%) rotate(45deg); }
+.move.none { color: var(--axis) !important; }
+.flowfoot { margin-top: 12px; font-size: 12px; color: var(--muted); text-align: right; }
+@media (max-width: 720px) { .tiers { grid-template-columns: 1fr 1fr; row-gap: 14px; } .move { display: none; } }
+
 /* Nodes, a row each. Their memory over time is the other view. */
 table.nodes-tbl td { vertical-align: middle; }
 table.nodes-tbl tr.down td { opacity: .6; }
@@ -367,8 +376,9 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
 
   <section data-tab="overview" class="card span-12 flowsec" style="animation-delay:.25s">
     <h2>Tier flow</h2>
-    <div class="sub" id="flowSub">Where the sandboxes are now, and how fast they move between tiers. Each arrow is as wide as its rate over the last half-minute.</div>
-    <svg id="flow" role="img" aria-label="Sandboxes by tier, and the rates between tiers"></svg>
+    <div class="sub" id="flowSub">Where the sandboxes are now, and how fast they have moved between tiers over the last half-minute.</div>
+    <div class="tiers" id="flow" role="group" aria-label="Sandboxes by tier, and the rates between tiers"></div>
+    <div class="flowfoot" id="flowFoot"></div>
   </section>
 
   <section data-tab="overview" class="card span-4 chartsec first" style="animation-delay:.34s">
@@ -654,7 +664,9 @@ function niceMax(v) {
 }
 const compact = (v) => v >= 1e6 ? (v / 1e6).toFixed(v >= 1e7 ? 0 : 1) + "M" : v >= 1e3 ? (v / 1e3).toFixed(v >= 1e4 ? 0 : 1) + "k" : fmt(v, v < 10 && v % 1 ? 1 : 0);
 
-function spark(svg, pts, color, fill = true) {
+// `tip`, if given, is { label, f }: hovering the card then marks the nearest
+// point and says what it was, the way the charts do.
+function spark(svg, pts, color, fill = true, tip = null) {
   svg.innerHTML = "";
   const w = svg.clientWidth || 200, h = svg.clientHeight || 46;
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
@@ -673,6 +685,24 @@ function spark(svg, pts, color, fill = true) {
   // rebuilds the path, and drawing each one in again replayed the
   // left-to-right sweep on every card every five seconds.
   if (!svg.dataset.drawn) { drawIn(p); svg.dataset.drawn = "1"; }
+  if (!tip) return;
+  const guide = el("line", { y1: 0, y2: h, stroke: css("--axis"), "stroke-width": 1, visibility: "hidden" }, svg);
+  const dot = el("circle", { r: 3, fill: color, stroke: css("--page"), "stroke-width": 1.5, visibility: "hidden" }, svg);
+  svg._hover = (e) => {
+    const r = svg.getBoundingClientRect(), t = t0 + Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * (t1 - t0);
+    let best = pts[0]; for (const q of pts) if (Math.abs(q[0] - t) < Math.abs(best[0] - t)) best = q;
+    const x = sx(best[0]).toFixed(1), y = sy(best[1]).toFixed(1);
+    guide.setAttribute("x1", x); guide.setAttribute("x2", x); guide.setAttribute("visibility", "visible");
+    dot.setAttribute("cx", x); dot.setAttribute("cy", y); dot.setAttribute("visibility", "visible");
+    showTip(e, clock(best[0]), [[tip.label, color, tip.f(best[1])]]);
+  };
+  svg._leave = () => { guide.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); hideTip(); };
+  const card = svg.parentElement;
+  if (!card.dataset.hover) {
+    card.dataset.hover = "1";
+    card.addEventListener("mousemove", (e) => svg._hover && svg._hover(e));
+    card.addEventListener("mouseleave", () => svg._leave && svg._leave());
+  }
 }
 function drawIn(p, dur = 1100) {
   const len = p.getTotalLength ? p.getTotalLength() : 0;
@@ -770,90 +800,62 @@ function showTip(e, title, rows) {
 function hideTip() { $("tip").classList.remove("on"); }
 
 // ---- the tier flow ------------------------------------------------------------
-// Four tiers and the moves between them, every number a measured one: an
-// arrow's width and label are the rate over the last half-minute, its dashes
-// move faster as it does, and a wake is the arrow back to awake. The master
-// counts wakes, not where they came from, so that arrow leaves both cold
-// tiers it can come from.
-const flow = { counts: { hot: 0, frozen: 0, snapshot: 0, detached: 0 }, rates: {}, size: "", g: null };
-// [rate key, from tier, to tier, verb]
-const FLOW_MOVES = [["frozen", 0, 1, "freeze"], ["snapshot", 1, 2, "to disk"], ["detached", 2, 3, "detach"]];
+// The four tiers in a row and the moves between them, every number measured
+// over the last half-minute. What enters awake -- created, and woken by a
+// request from frozen or on disk -- is written under it; deletes leave from
+// any tier, so they are a footnote rather than an arrow.
+const flow = { counts: { hot: 0, frozen: 0, snapshot: 0, detached: 0 }, rates: {} };
+// [rate key, the tier it goes to, verb, what it means]
+const FLOW_MOVES = [["frozen", "frozen", "freeze", "Awake sandboxes left idle are frozen: paused in memory."],
+  ["snapshot", "snapshot", "to disk", "Frozen sandboxes left idle longer are checkpointed to disk and leave memory."],
+  ["detached", "detached", "detach", "Sandboxes on disk left idle longest are detached from their node."]];
 function dur(s) { return s < 120 ? s + " s" : s < 7200 ? Math.round(s / 60) + " min" : Math.round(s / 3600) + " h"; }
-const perSec = (v) => v >= 1 ? fmt(v, 1) + "/s" : v > 0 ? fmt(v * 60, 0) + "/min" : "none";
-const pipeW = (r) => r > 0 ? Math.min(6, 1.6 + 1.5 * Math.sqrt(r)) : 1.2;
-const headRight = (x, y, w) => { const s = 5 + w * 0.6; return `M${x - s},${y - s * 0.7}L${x + 1},${y}L${x - s},${y + s * 0.7}Z`; };
-const headUp = (x, y, w) => { const s = 5 + w * 0.6; return `M${x - s * 0.7},${y + s}L${x},${y - 1}L${x + s * 0.7},${y + s}Z`; };
-function flowBuild(svg, w, h) {
-  const L = 92, R = 4, bottom = 46;
-  const G = Math.max(84, Math.min(140, w * 0.085));
-  const bw = (w - L - R - 3 * G) / 4, bh = Math.max(84, Math.min(100, h - bottom - 4));
-  const top = Math.max(2, (h - bottom - bh) / 2);
-  const x = (i) => L + i * (bw + G), cx = (i) => x(i) + bw / 2;
-  const yMid = top + bh / 2, yBot = top + bh, yW = yBot + 22, rc = 10;
-  const fs = Math.max(24, Math.min(32, bh * 0.27));
-  const g = { x, cx, bw, bh, top, yMid, yBot, yW };
-  let m = "";
-  TIERS.forEach((t, i) => {
-    const X = x(i), pad = 16, barW = bw - pad * 2 - 46;
-    m += `<g id="f-box-${t}"><title></title><rect class="box" x="${X}" y="${top}" width="${bw}" height="${bh}" rx="12"/>
-      <circle cx="${X + pad + 4}" cy="${top + 21}" r="4" style="fill:var(--${t})"/>
-      <text class="lbl" x="${X + pad + 14}" y="${top + 25}">${TIER_LABEL[t]}<tspan class="hint" id="f-hint-${t}" dx="6"></tspan></text>
-      <text class="cnt num" id="f-cnt-${t}" x="${X + pad}" y="${top + 34 + fs}" style="font-size:${fs}px">0</text>
-      <rect class="track" x="${X + pad}" y="${yBot - 20}" width="${barW}" height="5" rx="2.5"/>
-      <rect class="bar" id="f-bar-${t}" x="${X + pad}" y="${yBot - 20}" width="0" height="5" rx="2.5" style="fill:var(--${t})"/>
-      <text class="pct num" id="f-pct-${t}" x="${X + bw - pad}" y="${yBot - 15}" text-anchor="end"></text></g>`;
+const perSec = (v) => v >= 1 ? fmt(v, 1) + "/s" : v > 0 ? fmt(v * 60, v * 60 < 10 ? 1 : 0) + "/min" : "none";
+function flowBuild() {
+  const tier = (t) => `<div class="tier" data-t="${t}">
+      <div class="th"><i style="background:var(--${t})"></i>${TIER_LABEL[t]}<span class="ti" id="f-hint-${t}"></span></div>
+      <div class="tc num" id="f-cnt-${t}">0</div>
+      <div class="tb"><span class="track"><i id="f-bar-${t}" style="background:var(--${t})"></i></span><span class="tp" id="f-pct-${t}"></span></div>
+      <div class="tin" id="f-in-${t}"></div></div>`;
+  const move = ([k, to, verb]) => `<div class="move" data-k="${k}" id="f-m-${k}" style="color:var(--${to})">
+      <div class="lab">${verb} <b id="f-r-${k}">–</b></div><div class="ln"></div></div>`;
+  $("flow").innerHTML = tier("hot") + move(FLOW_MOVES[0]) + tier("frozen") + move(FLOW_MOVES[1]) + tier("snapshot") + move(FLOW_MOVES[2]) + tier("detached");
+  $("flow").addEventListener("mousemove", (e) => {
+    const c = flow.counts, r = flow.rates, total = TIERS.reduce((a, t) => a + (c[t] || 0), 0);
+    const t = e.target.closest(".tier"), m = e.target.closest(".move");
+    if (t) {
+      const id = t.dataset.t, idle = NOW ? NOW.idle : null, i = TIERS.indexOf(id);
+      const rows = [["sandboxes", tierColor(id), fmt(c[id] || 0)], ["of the fleet", tierColor(id), total ? fmt(100 * (c[id] || 0) / total, 1) + "%" : "–"]];
+      if (id === "hot") rows.push(["created", tierColor("hot"), perSec(r.create || 0)], ["woken by a request", tierColor("hot"), perSec(r.wake || 0)]);
+      else if (idle) rows.push(["after idle", css("--muted"), dur(idle[i - 1])]);
+      return showTip(e, TIER_LABEL[id], rows);
+    }
+    if (m) {
+      const [k, to, verb, what] = FLOW_MOVES.find((x) => x[0] === m.dataset.k);
+      return showTip(e, `${verb} · ${what}`, [["now", tierColor(to), perSec(r[k] || 0)]]);
+    }
+    hideTip();
   });
-  const pipe = (k, d, color) => `<path class="pipe" id="f-p-${k}" d="${d}" style="stroke:var(--${color})"/><path class="pulse" id="f-d-${k}" d="${d}"/><path class="head" id="f-h-${k}" style="fill:var(--${color})"/>`;
-  const label = (k, X, verb) => `<text text-anchor="middle" x="${X}" y="${yMid - 26}"><tspan class="verb" x="${X}">${verb}</tspan><tspan class="rate" id="f-r-${k}" x="${X}" dy="16"></tspan></text>`;
-  // In: created.
-  m += pipe("create", `M10,${yMid}H${x(0) - 10}`, "hot") + label("create", (10 + x(0) - 10) / 2, "new");
-  // Right, as they idle.
-  for (const [k, a, b, verb] of FLOW_MOVES) {
-    m += pipe(k, `M${x(a) + bw + 12},${yMid}H${x(b) - 10}`, TIERS[b]) + label(k, (x(a) + bw + x(b)) / 2, verb);
-  }
-  // Back, on a request: out of on disk and of frozen, into awake.
-  m += pipe("wake", `M${cx(2)},${yBot}V${yW - rc}Q${cx(2)},${yW} ${cx(2) - rc},${yW}H${cx(0) + rc}Q${cx(0)},${yW} ${cx(0)},${yW - rc}V${yBot + 12}` +
-    `M${cx(1)},${yBot}V${yW - rc}Q${cx(1)},${yW} ${cx(1) - rc},${yW}`, "hot");
-  m += `<text text-anchor="middle" x="${(cx(0) + cx(2)) / 2}" y="${yW + 18}"><tspan class="verb">woken by a request </tspan><tspan class="rate" id="f-r-wake"></tspan><tspan class="why"> · from frozen or on disk</tspan></text>`;
-  m += `<text text-anchor="end" x="${w - R}" y="${yW + 18}"><tspan class="verb">deleted </tspan><tspan class="rate" id="f-r-delete"></tspan><tspan class="why"> · from any tier</tspan></text>`;
-  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
-  svg.innerHTML = m;
-  // Numbers carry over a rebuild rather than counting up from zero again.
-  for (const t of TIERS) { const el = $("f-cnt-" + t); shown.set(el, flow.counts[t] || 0); el.textContent = fmt(flow.counts[t] || 0); }
-  flow.g = g;
+  $("flow").addEventListener("mouseleave", hideTip);
 }
+flowBuild();
 function drawFlow() {
-  const svg = $("flow"), w = svg.clientWidth, h = svg.clientHeight;
-  if (!w || !h) return;
-  if (flow.size !== `${w}x${h}`) { flow.size = `${w}x${h}`; flowBuild(svg, w, h); }
-  const g = flow.g, c = flow.counts, r = flow.rates;
+  const c = flow.counts, r = flow.rates, idle = NOW ? NOW.idle : null;
   const total = TIERS.reduce((a, t) => a + (c[t] || 0), 0);
-  const idle = NOW ? NOW.idle : null;
-  const hint = { hot: "· running", frozen: idle ? `· idle ${dur(idle[0])}+` : "", snapshot: idle ? `· idle ${dur(idle[1])}+` : "", detached: idle ? `· idle ${dur(idle[2])}+` : "" };
+  const hint = { hot: "running", frozen: idle ? `idle ${dur(idle[0])}+` : "", snapshot: idle ? `idle ${dur(idle[1])}+` : "", detached: idle ? `idle ${dur(idle[2])}+` : "" };
   for (const t of TIERS) {
     const share = total ? (c[t] || 0) / total : 0;
     tweenText($("f-cnt-" + t), c[t] || 0);
     $("f-hint-" + t).textContent = hint[t];
-    const pctText = total ? `${fmt(100 * share, share > 0 && share < 0.01 ? 1 : 0)}%` : "";
-    $("f-pct-" + t).textContent = pctText;
-    $("f-bar-" + t).setAttribute("width", Math.max(share > 0 ? 3 : 0, (g.bw - 78) * share).toFixed(1));
-    $("f-box-" + t).querySelector("title").textContent = `${TIER_LABEL[t]}: ${fmt(c[t] || 0)} sandboxes, ${pctText} of the fleet`;
+    $("f-pct-" + t).textContent = total ? `${fmt(100 * share, share > 0 && share < 0.01 ? 1 : 0)}%` : "";
+    $("f-bar-" + t).style.width = (share > 0 ? Math.max(1.5, 100 * share) : 0) + "%";
   }
-  const set = (k, rate, head) => {
-    const wd = pipeW(rate), p = $("f-p-" + k), d = $("f-d-" + k), hd = $("f-h-" + k);
-    p.style.strokeWidth = wd; p.classList.toggle("none", !(rate > 0));
-    hd.setAttribute("d", head(wd)); hd.classList.toggle("none", !(rate > 0));
-    d.style.display = rate > 0 ? "" : "none";
-    d.style.strokeWidth = Math.max(1.2, wd * 0.45);
-    // About a dash a second at one a second, quicker as the rate rises.
-    if (rate > 0) d.style.animationDuration = Math.max(0.6, Math.min(4, 3 / Math.sqrt(rate))).toFixed(2) + "s";
-    $("f-r-" + k).textContent = perSec(rate);
-    $("f-r-" + k).classList.toggle("none", !(rate > 0));
-  };
-  set("create", r.create || 0, (wd) => headRight(g.x(0) - 4, g.yMid, wd));
-  for (const [k, , b] of FLOW_MOVES) set(k, r[k] || 0, (wd) => headRight(g.x(b) - 4, g.yMid, wd));
-  set("wake", r.wake || 0, (wd) => headUp(g.cx(0), g.yBot + 4, wd));
-  $("f-r-delete").textContent = perSec(r.delete || 0);
+  $("f-in-hot").innerHTML = `new <b>${perSec(r.create || 0)}</b> · woken <b>${perSec(r.wake || 0)}</b>`;
+  for (const [k] of FLOW_MOVES) {
+    $("f-r-" + k).textContent = perSec(r[k] || 0);
+    $("f-m-" + k).classList.toggle("none", !(r[k] > 0));
+  }
+  $("flowFoot").innerHTML = `deleted <b>${perSec(r.delete || 0)}</b> · from any tier`;
   $("flow").setAttribute("aria-label", TIERS.map((t) => `${TIER_LABEL[t]} ${fmt(c[t] || 0)}`).join(", ") +
     `; freezing ${perSec(r.frozen || 0)}, to disk ${perSec(r.snapshot || 0)}, woken ${perSec(r.wake || 0)}`);
 }
@@ -1116,16 +1118,24 @@ function redrawAll(first = false) {
   timeChart($("c-lat"), lat, { log: true, unit: " ms", first });
   if (tab === "overview") drawFlow();
   if (tab === "nodes") nodeView(NOW.nodes);
-  // KPI sparklines
+  // KPI sparklines: a quiet grey, but for Awake, which is its tier's line,
+  // and for a figure that has gone wrong, which takes the colour that says so.
+  const quiet = css("--spark");
   const total = sumAt("fleet.sandboxes", TIERS);
-  spark($("s-total"), total, css("--ink-2"), false);
-  spark($("s-hot"), line("fleet.sandboxes", "hot"), css("--ink-2"), false);
+  spark($("s-total"), total, quiet, false, { label: "sandboxes", f: (v) => fmt(v) });
+  spark($("s-hot"), line("fleet.sandboxes", "hot"), tierColor("hot"), false, { label: "awake", f: (v) => fmt(v) });
   const hotMap = new Map(line("fleet.sandboxes", "hot"));
-  spark($("s-ratio"), total.map(([t, v]) => [t, v / Math.max(1, hotMap.get(t) || 1)]), css("--ink-2"), false);
-  spark($("s-nodes"), line("fleet.nodes", "up"), css("--ink-2"), false);
-  spark($("s-creates"), line("rate.creates", "placed").map(([t, v]) => [t, v * 60]), css("--ink-2"), false);
-  spark($("s-p99"), line("latency.api", "p99"), css("--ink-2"), false);
+  spark($("s-ratio"), total.map(([t, v]) => [t, v / Math.max(1, hotMap.get(t) || 1)]), quiet, false, { label: "per awake one", f: (v) => fmt(v, 1) + "×" });
+  const silent = NOW.nodes.some((n) => !n.connected);
+  spark($("s-nodes"), line("fleet.nodes", "up"), silent ? css("--bad") : quiet, false, { label: "answering", f: (v) => fmt(v) });
+  const refusing = recent(line("rate.creates", "refused")) > 0;
+  spark($("s-creates"), line("rate.creates", "placed").map(([t, v]) => [t, v * 60]), refusing ? css("--warn") : quiet, false, { label: "creates / min", f: (v) => fmt(v) });
+  const slow = (last(line("latency.api", "p99")) || 0) > API_P99_WARN_MS;
+  spark($("s-p99"), line("latency.api", "p99"), slow ? css("--warn") : quiet, false, { label: "API p99", f: (v) => fmt(v, v < 10 ? 1 : 0) + " ms" });
 }
+// An API p99 past this is worth a look: the master's calls are reads and
+// writes of its own store, normally a few milliseconds.
+const API_P99_WARN_MS = 250;
 
 async function refresh(first = false) {
   if (!token) { showGate(); return; }
@@ -1146,9 +1156,11 @@ async function refresh(first = false) {
     const up = now.nodes.filter((n) => n.connected).length;
     $("k-nodes").innerHTML = `${up}<small>/ ${now.nodes.length}</small>`;
     $("k-nodes-f").textContent = up === now.nodes.length ? "all answering" : `${now.nodes.length - up} silent`;
-    const cr = last(line("rate.creates", "placed")), rf = last(line("rate.creates", "refused"));
+    // Refusals over the last half-minute, as the sparkline's colour reads
+    // them, so the line and the words never disagree.
+    const cr = last(line("rate.creates", "placed")), rf = recent(line("rate.creates", "refused"));
     tweenText($("k-creates"), (cr || 0) * 60);
-    $("k-creates-f").textContent = rf ? `${fmt(rf * 60)} refused / min` : "none refused";
+    $("k-creates-f").textContent = rf > 0 ? `${fmt(rf * 60, rf * 60 < 10 ? 1 : 0)} refused / min` : "none refused";
     const p99 = last(line("latency.api", "p99"));
     tweenText($("k-p99"), p99, p99 != null && p99 < 10 ? 1 : 0, "<small>ms</small>");
     $("k-p99-f").textContent = `up ${dur(now.uptime_secs)} · ${fmt(last(line("rate.api", "requests")) || 0, 1)} req/s`;

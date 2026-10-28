@@ -47,12 +47,16 @@ fetched only while their tab is open.
 
 The overview fits one screen wherever the window is at least 1201 by 620:
 the cards share the height under the header, and the charts draw to the box
-they get. Smaller, it scrolls as before. Its tier flow is four tiers with
-their counts and share of the fleet, and an arrow for each move between
-them -- created, frozen, to disk, detached, and woken back to awake -- as
-wide as its measured rate and labelled with it. It replaces an animation of
-random particles, whose tanks filled relative to the largest tier, and the
-donut beside it, which showed the same four counts again.
+they get. Smaller, it scrolls as before. Its tier flow is the four tiers in
+equal columns -- count, share of the fleet, how long idle puts a sandbox
+there -- with a connector between each pair carrying that move's measured
+rate, and what enters awake (created, and woken by a request) written under
+it. It replaces an animation of random particles, whose tanks filled
+relative to the largest tier, and the donut beside it, which showed the same
+four counts again. The KPI sparklines are a quiet grey but for Awake, in its
+tier's colour, and for a figure gone wrong -- a silent node, refused
+creates, an API p99 over 250 ms -- in the colour that says so; hovering a
+KPI, a tier or a move says what it is, like the charts.
 
 Sandboxes that will not start are a line above the sandbox table and a
 count on its Failing filter, which lists them with their errors -- not a
