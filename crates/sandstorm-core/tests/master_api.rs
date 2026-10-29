@@ -929,6 +929,83 @@ async fn an_exhausted_address_plan_is_refused_up_front() {
     );
 }
 
+/// A batch that runs out of slots must preserve existing sandboxes and
+/// release its own allocations so a later request can use the remaining slot.
+#[tokio::test]
+async fn a_failed_batch_releases_its_network_slots() {
+    let td = TempDir::new().unwrap();
+    let st = Arc::new(MasterState::new(
+        Store::open(td.path().join("state.db")).unwrap(),
+        Ca::open_or_create(td.path().join("pki")).unwrap(),
+        sandstorm_core::master::MasterOptions {
+            admit: sandstorm_core::master::Admission {
+                min_free_mib: 0,
+                max_psi_avg10: f64::MAX,
+            },
+            // Room for exactly three sandboxes.
+            max_net_index: 2,
+            ..Default::default()
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind::<SocketAddr>("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router(st)).await.ok();
+    });
+    let h = Harness {
+        base: format!("http://{addr}"),
+        _td: td,
+    };
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+
+    for i in 0..2 {
+        let r = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({ "template": "python" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 201, "sandbox {i} should have got a slot");
+    }
+    let store = Store::open(h._td.path().join("state.db")).unwrap();
+    let before = format!("{:?}", store.list_sandboxes().unwrap());
+    let r = c
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python", "n": 2 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 503);
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("no free network slot"),
+        "got {:?}",
+        body["error"]
+    );
+    assert_eq!(
+        format!("{:?}", store.list_sandboxes().unwrap()),
+        before,
+        "a failed batch must leave all existing records unchanged"
+    );
+    let retry = c
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), 201, "the remaining slot must still be free");
+    let sandboxes = store.list_sandboxes().unwrap();
+    assert_eq!(sandboxes.len(), 3);
+    assert!(sandboxes.iter().any(|sandbox| sandbox.net_index == Some(2)));
+}
+
 /// The node owns addressing, so the address it reports is what the API
 /// serves -- there is nothing for a caller to reach a sandbox by until then.
 #[tokio::test]
@@ -2035,6 +2112,16 @@ mod branch {
             .unwrap();
         let arr = kids.as_array().expect("the v0.5 body gets a list back");
         assert_eq!(arr.len(), 4);
+        let store = Store::open(h._td.path().join("state.db")).unwrap();
+        let sandboxes = store.list_sandboxes().unwrap();
+        assert_eq!(sandboxes.len(), 5);
+        let mut network_slots = std::collections::HashSet::new();
+        let mut gateway_ports = std::collections::HashSet::new();
+        for sandbox in &sandboxes {
+            assert!(network_slots.insert(sandbox.net_index.unwrap()));
+            assert!(gateway_ports.insert(sandbox.gateway_port.unwrap()));
+        }
+
         let mut slots = std::collections::HashSet::new();
         for k in arr {
             assert_eq!(k["node_id"], "bm-1", "forks land where the image is");

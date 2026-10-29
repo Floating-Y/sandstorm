@@ -2594,6 +2594,9 @@ async fn create_sandbox(
         }
     };
 
+    let batch = store
+        .begin_sandbox_batch()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let mut made = Vec::with_capacity(count as usize);
     for (node_id, pool) in &placed {
         // The port is the sandbox's own, inside its namespace, so there is
@@ -2669,6 +2672,10 @@ async fn create_sandbox(
         v["token"] = serde_json::Value::String(token);
         made.push(v);
     }
+
+    batch
+        .commit()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     st.metrics
         .creates_placed
