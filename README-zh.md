@@ -30,10 +30,19 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-overview-dark.svg">
-  <img alt="六台 2 核 2 GB 机器，全部常驻只能放 286 个，Sandstorm 放了 20,000 个沙箱；下面四张小图：按闲置时长看请求延迟，流量加大时的延迟和拒绝比例（对照 round 3），按堆大小看每个节点能常驻的数量，按堆大小看从磁盘唤醒的时间" src="docs/assets/charts/fleet-overview-light.svg" width="800">
+  <img alt="六台 2 核 2 GB 机器，全部常驻只能放 286 个，Sandstorm 放了 20,000 个沙箱；左边是容量，右边是延迟。左下按堆大小看每个节点作为沙箱和作为普通进程能常驻的数量，每种大小下面标着从磁盘唤醒的时间；右边是按闲置时长看请求延迟，以及流量加大时的延迟和拒绝比例（对照 round 3）" src="docs/assets/charts/fleet-overview-light.svg" width="800">
 </picture>
 
 </div>
+
+master 在 `/` 提供控制台：每个沙箱在哪一档、在各档之间流动多快、每个节点还剩多少内存。下图是模拟的 6 节点集群。
+
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/console-dark.webp">
+  <img alt="Sandstorm 控制台：顶部是沙箱数、常驻数、节点数、每分钟创建数和 API p99；左边是常驻、冻结、磁盘、离线四档之间的流动；右边是各档沙箱数随时间变化、生命周期速率、节点余量和延迟。" src="docs/assets/console-light.webp">
+</picture>
+</p>
 
 ## 工作原理
 
@@ -53,11 +62,11 @@
 
 ## 延迟和开销
 
-开头总览图下面的四张小图，依次是：
+开头总览图里另外三张图，先是右边两张：
 
 - **唤醒。** 在节点本机上测，不经过网络。热的沙箱 3.8 ms 就有响应。冻结的沙箱，解冻只要 11 ms，其余时间主要花在把堆内存从 zswap 读回来，合计约 100 ms。已落盘的沙箱，64 MiB 的堆恢复约 230 ms。
 - **有流量的时候。** 每个节点放 40 个沙箱，只装得下约 12 个同时醒着，少数几个沙箱拿走大部分请求。唤醒时内存不够，节点会先把最少被用到的沙箱落盘腾出位置；2 秒内起不来的唤醒直接拒绝，不排队。所以每个节点每秒 1、2、4、8 个请求时，被拒绝的只有 **1.1%、0.1%、0.2%、2.5%**，修复前是 13%、26%、32%、33%（三遍，共 40,500 个请求）。代价在长尾：要等恢复的请求，p99 在各个速率下都是 2 秒左右。超过节点的周转能力时——每节点 80 个、每秒 8 个请求——会拒绝 10.6%，p99 是 3.2 秒。
-- **更重的沙箱。** 堆内存大的时候，一个沙箱的开销和同一个程序直接作为普通进程跑差不多：64 MiB 时每个节点 13 个对 11 个，256 MiB 时 6 个对 4 个，因为节点会把闲置的页压进 zswap，而测试用的堆特别好压缩。堆小的时候，gVisor 自身的开销占大头，分档正是用来弥补这个差距的。从磁盘恢复的时间随堆增长：64 MiB 要 0.2 s，256 和 512 MiB 约 1 s，1 GiB 要 3.6 s。
+- **更重的沙箱。** 堆内存大的时候，一个沙箱的开销和同一个程序直接作为普通进程跑差不多：64 MiB 时每个节点 11 个对 10 个，256 MiB 时 4 个对 3 个，512 MiB 和 1 GiB 时两边都是 2 个和 1 个，因为节点会把闲置的页压进 zswap，而测试用的堆特别好压缩。堆小的时候，gVisor 自身的开销占大头，16 MiB 时是 19 个对 24 个，分档正是用来弥补这个差距的。从磁盘恢复的时间随堆增长：64 MiB 要 0.2 s，256 和 512 MiB 约 1 s，1 GiB 要 3.6 s。
 
 ## 同样的机器，不用 Sandstorm
 
@@ -131,10 +140,10 @@ scripts/fleet.sh seed     # 在每个节点放一个模板
 scripts/fleet.sh verify   # 启动一个沙箱，确认真的能跑
 ```
 
-**已经装好的节点**，用 `SANDSTORM_LISTEN=0.0.0.0:80` 监听。第一次启动时它会把配对码写到 `/var/lib/sandstorm/pki/node/pairing-code`。把地址和配对码交给 master：
+**已经装好的节点**，用 `SANDSTORM_LISTEN=0.0.0.0:80` 监听。第一次启动时它会把配对码写到 `/var/lib/sandstorm/pki/node/pairing-code`。把地址和配对码交给 master，CA 和 API token 用 master 上 `/var/lib/sandstorm/pki` 里的那两个文件：
 
 ```bash
-curl --cacert ca.pem -H "Authorization: Bearer $SANDSTORM_TOKEN" \
+curl --cacert ca.pem -H "Authorization: Bearer $(cat api-token)" -H 'Content-Type: application/json' \
   https://master:8080/v1/nodes -d '{"address": "10.0.0.5", "pairing_code": "<配对码>"}'
 ```
 

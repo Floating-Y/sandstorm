@@ -30,10 +30,19 @@ On six cloud machines with 2 cores and 2 GB each, which hold **286** Python HTTP
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-overview-dark.svg">
-  <img alt="20,000 sandboxes on six 2-core, 2 GB machines that hold 286 kept in memory; below it, request latency by idle time, latency and refusals under rising traffic against what round 3 refused, sandboxes kept in memory by heap size, and wake time from disk by heap size" src="docs/assets/charts/fleet-overview-light.svg" width="800">
+  <img alt="Four panels. On the left, capacity: 20,000 sandboxes on six 2-core, 2 GB machines that hold 286 kept in memory, and by heap size, how many a node keeps in memory as a sandbox and as a plain process, with the wake time from disk under each size. On the right, latency: by idle time, and under rising traffic against what round 3 refused" src="docs/assets/charts/fleet-overview-light.svg" width="800">
 </picture>
 
 </div>
+
+The master serves a console at `/`: where every sandbox is, how fast they move between tiers, and each node's headroom. Here on a simulated six-node fleet.
+
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/console-dark.webp">
+  <img alt="The Sandstorm console: counts of sandboxes, awake ones, nodes, creates per minute and API p99 across the top; the tier flow between awake, frozen, on disk and detached; sandboxes by tier over time, lifecycle rates, node headroom and latency." src="docs/assets/console-light.webp">
+</picture>
+</p>
 
 ## How it works
 
@@ -53,11 +62,11 @@ Every sandbox is in one of four tiers. It drops a tier at a time as it stays idl
 
 ## Latency and cost
 
-The four smaller panels in the figure at the top, in order:
+The other three panels of the figure at the top, the two on the right first:
 
 - **Waking.** Timed on the node, so no network is in the path. A hot sandbox answers in 3.8 ms. Frozen, the thaw takes 11 ms and reading its heap back from zswap takes most of the rest: about 100 ms. On disk, the restore is about 230 ms for a 64 MiB heap.
 - **Under traffic.** 40 sandboxes per node, where about 12 fit awake, with a few of them getting most requests. A wake that finds the node out of memory puts the sandboxes least in demand to disk to make room, and one that cannot start within 2 s is refused rather than queued, so at 1, 2, 4 and 8 requests a second per node **1.1%, 0.1%, 0.2% and 2.5%** of requests were refused, against 13%, 26%, 32% and 33% before (three runs, 40,500 requests). The cost is in the tail: a request that has to wait for a restore takes about 2 s at p99, at every rate. Past what a node can turn over — 80 per node at 8 req/s — it refuses 10.6%, with a p99 of 3.2 s.
-- **Heavier sandboxes.** With a large heap, a sandbox costs about what the same program does as a plain process: 13 against 11 per node at 64 MiB, 6 against 4 at 256 MiB, because the node squeezes idle pages into zswap and the test heap compresses well. With a small one, gVisor's own overhead dominates, which is what tiering makes up for. Waking from disk grows with the heap: 0.2 s at 64 MiB, 1 s at 256 and 512 MiB, 3.6 s at 1 GiB.
+- **Heavier sandboxes.** With a large heap, a sandbox costs about what the same program does as a plain process: 11 against 10 per node at 64 MiB, 4 against 3 at 256 MiB, 2 and 1 for both at 512 MiB and 1 GiB, because the node squeezes idle pages into zswap and the test heap compresses well. With a small one, gVisor's own overhead dominates, 19 against 24 at 16 MiB, which is what tiering makes up for. Waking from disk grows with the heap: 0.2 s at 64 MiB, 1 s at 256 and 512 MiB, 3.6 s at 1 GiB.
 
 ## Against the same machines without Sandstorm
 
@@ -131,10 +140,10 @@ scripts/fleet.sh seed     # put a template on each node
 scripts/fleet.sh verify   # start one sandbox and check it runs
 ```
 
-**A node that is already installed** listens with `SANDSTORM_LISTEN=0.0.0.0:80`. On first start it writes a pairing code to `/var/lib/sandstorm/pki/node/pairing-code`. Give the master its address and that code:
+**A node that is already installed** listens with `SANDSTORM_LISTEN=0.0.0.0:80`. On first start it writes a pairing code to `/var/lib/sandstorm/pki/node/pairing-code`. Give the master its address and that code, with the master's CA and API token from its `/var/lib/sandstorm/pki`:
 
 ```bash
-curl --cacert ca.pem -H "Authorization: Bearer $SANDSTORM_TOKEN" \
+curl --cacert ca.pem -H "Authorization: Bearer $(cat api-token)" -H 'Content-Type: application/json' \
   https://master:8080/v1/nodes -d '{"address": "10.0.0.5", "pairing_code": "<code>"}'
 ```
 
