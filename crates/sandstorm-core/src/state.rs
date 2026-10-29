@@ -159,6 +159,14 @@ pub struct Store {
 }
 
 impl Store {
+    /// Writes made until `commit` stand or fall together; dropping the
+    /// transaction rolls them back. It is on this store's own connection, so
+    /// reads inside it see its earlier writes, and the caller's hold on the
+    /// store's mutex keeps anyone else out until it ends.
+    pub(crate) fn transaction(&self) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+        self.conn.unchecked_transaction()
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if let Some(dir) = path.parent() {

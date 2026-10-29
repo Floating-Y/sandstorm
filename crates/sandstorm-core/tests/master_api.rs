@@ -870,7 +870,8 @@ async fn a_requested_port_is_honoured() {
 }
 
 /// Running out of addresses is a clear refusal at create time, not a
-/// sandbox that is accepted and then cannot be given a network.
+/// sandbox that is accepted and then cannot be given a network -- and a
+/// batch that runs out partway is refused whole.
 #[tokio::test]
 async fn an_exhausted_address_plan_is_refused_up_front() {
     let td = TempDir::new().unwrap();
@@ -902,21 +903,29 @@ async fn an_exhausted_address_plan_is_refused_up_front() {
     put_template(&h, "python").await;
     let c = reqwest::Client::new();
 
-    for i in 0..3 {
-        let r = c
-            .post(format!("{}/v1/sandboxes", h.base))
-            .json(&serde_json::json!({ "template": "python" }))
+    let create = |body: serde_json::Value| {
+        c.post(format!("{}/v1/sandboxes", h.base))
+            .json(&body)
             .send()
-            .await
-            .unwrap();
+    };
+    let one = serde_json::json!({ "template": "python" });
+    for i in 0..2 {
+        let r = create(one.clone()).await.unwrap();
         assert_eq!(r.status(), 201, "sandbox {i} should have got a slot");
     }
-    let r = c
-        .post(format!("{}/v1/sandboxes", h.base))
-        .json(&serde_json::json!({ "template": "python" }))
-        .send()
+
+    // Two more when one slot is left: refused whole, nothing written, and
+    // the slot is still there for a single create.
+    let store = Store::open(h._td.path().join("state.db")).unwrap();
+    let before = format!("{:?}", store.list_sandboxes().unwrap());
+    let r = create(serde_json::json!({ "template": "python", "n": 2 }))
         .await
         .unwrap();
+    assert_eq!(r.status(), 503);
+    assert_eq!(format!("{:?}", store.list_sandboxes().unwrap()), before);
+    assert_eq!(create(one.clone()).await.unwrap().status(), 201);
+
+    let r = create(one).await.unwrap();
     assert_eq!(r.status(), 503);
     let body: serde_json::Value = r.json().await.unwrap();
     assert!(
@@ -2044,6 +2053,21 @@ mod branch {
             .unwrap();
         let arr = kids.as_array().expect("the v0.5 body gets a list back");
         assert_eq!(arr.len(), 4);
+        // One transaction for the four, and each still got its own slot and port.
+        let all = Store::open(h._td.path().join("state.db"))
+            .unwrap()
+            .list_sandboxes()
+            .unwrap();
+        let distinct = |f: fn(&sandstorm_core::state::Sandbox) -> Option<u32>| {
+            all.iter()
+                .filter_map(f)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        };
+        assert_eq!(all.len(), 5);
+        assert_eq!(distinct(|s| s.net_index), 5);
+        assert_eq!(distinct(|s| s.gateway_port.map(u32::from)), 5);
+
         let mut slots = std::collections::HashSet::new();
         for k in arr {
             assert_eq!(k["node_id"], "bm-1", "forks land where the image is");
