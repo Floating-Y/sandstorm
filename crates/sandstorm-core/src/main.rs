@@ -80,8 +80,19 @@ struct ServeArgs {
 
     #[arg(long, default_value = "/var/lib/sandstorm", env = "SANDSTORM_WORK_DIR")]
     work_dir: PathBuf,
+    /// Which engine runs sandboxes: runsc (gVisor, the default) or
+    /// firecracker (needs /dev/kvm, and a work dir on XFS or btrfs).
+    #[arg(long, default_value = "runsc", value_parser = ["runsc", "firecracker"])]
+    backend: String,
     #[arg(long, default_value = "runsc")]
     runsc: String,
+    #[arg(long, default_value = "firecracker")]
+    firecracker: String,
+    /// The guest kernel for --backend firecracker, an uncompressed vmlinux.
+    #[arg(long, default_value = "/var/lib/sandstorm/vmlinux")]
+    fc_kernel: PathBuf,
+    #[arg(long, default_value_t = 1)]
+    fc_vcpus: u8,
     /// runsc's state directory. Per-deployment by default: sharing one
     /// means two sandstorm nodes would each see the other's containers as
     /// orphans and destroy them.
@@ -133,6 +144,22 @@ struct ServeArgs {
     /// so `--insecure-transport` turns the client-certificate check off too.
     #[arg(long)]
     insecure_transport: bool,
+
+    /// Serve the E2B API and E2B's sandbox addresses on this address, for
+    /// the official e2b SDKs. Needs --e2b-domain. Off when absent.
+    #[arg(long, env = "SANDSTORM_E2B_BIND", requires = "e2b_domain")]
+    e2b_bind: Option<std::net::SocketAddr>,
+    /// What the SDKs' E2B_DOMAIN is set to. `api.<domain>` and
+    /// `*.<domain>` must resolve to --e2b-bind.
+    #[arg(long, env = "SANDSTORM_E2B_DOMAIN", requires = "e2b_bind")]
+    e2b_domain: Option<String>,
+    /// A certificate for `*.<domain>`, PEM. Without one the front door's
+    /// certificate is issued from this deployment's CA (pki-dir/ca.pem),
+    /// which clients then have to trust, e.g. with SSL_CERT_FILE.
+    #[arg(long, requires = "e2b_tls_key")]
+    e2b_tls_cert: Option<PathBuf>,
+    #[arg(long, requires = "e2b_tls_cert")]
+    e2b_tls_key: Option<PathBuf>,
 
     /// Range sandbox network namespaces are addressed from. Each sandbox
     /// gets a /30 out of it, so a /16 holds 16384 of them.
@@ -325,6 +352,15 @@ async fn serve(a: ServeArgs) -> Result<()> {
             max_net_index: (1u32 << (32 - a.net_prefix.min(30) as u32)) / 4 - 2,
             port_range: (a.port_min, a.port_max),
             insecure_transport: a.insecure_transport,
+            e2b: match (a.e2b_bind, a.e2b_domain.clone()) {
+                (Some(bind), Some(domain)) => Some(master::FrontConfig {
+                    bind,
+                    domain,
+                    tls_cert: a.e2b_tls_cert.clone(),
+                    tls_key: a.e2b_tls_key.clone(),
+                }),
+                _ => None,
+            },
             admit: sandstorm_core::master::Admission {
                 min_free_mib: a.admit_min_free_mib,
                 max_psi_avg10: a.admit_max_psi,
@@ -433,8 +469,15 @@ async fn serve(a: ServeArgs) -> Result<()> {
             token,
             pki_dir: a.pki_dir.join("node"),
             runtime: RuntimeConfig {
+                backend: match a.backend.as_str() {
+                    "firecracker" => sandstorm_core::node::BackendKind::Firecracker,
+                    _ => sandstorm_core::node::BackendKind::Runsc,
+                },
                 runsc: a.runsc.clone(),
                 runsc_root: a.runsc_root.clone(),
+                firecracker: a.firecracker.clone(),
+                fc_kernel: a.fc_kernel.clone(),
+                fc_vcpus: a.fc_vcpus,
                 work_dir: a.work_dir.clone(),
                 max_sandboxes: a.max_sandboxes,
                 volume_root: a

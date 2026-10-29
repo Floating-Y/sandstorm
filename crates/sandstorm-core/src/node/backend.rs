@@ -1,12 +1,15 @@
 //! The engine underneath a node: the few operations that differ between
 //! gVisor and anything else that could run a sandbox.
 //!
-//! Everything else `Runtime` does is the node's own and stays there: the
-//! network namespace, the overlay, the OCI bundle, tags, archives, and every
-//! tier change that is a cgroup write. A backend is handed an OCI bundle and
-//! an image directory and asked to start, checkpoint, restore or remove a
-//! sandbox from them -- the shape runsc already has, and the one a VMM that
-//! takes OCI bundles (as Kata and firecracker-containerd do) can meet.
+//! A backend prepares a sandbox's writable layer and its bundle directory
+//! from a template -- an overlay and an OCI spec for runsc, a reflinked disk
+//! image and a VM description for Firecracker -- and is then asked to start,
+//! checkpoint, restore or remove the sandbox from them. Everything else
+//! `Runtime` does is the node's own and stays there: the network namespace,
+//! tags, archives, and every tier change that is a cgroup write.
+//!
+//! `bundles/<id>/config.json` existing is what "this sandbox is on this
+//! node" means to `Runtime`, whatever the backend writes in it.
 //!
 //! What `Runtime` relies on, and a backend must therefore keep true:
 //!
@@ -23,6 +26,9 @@
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
+
+use super::bundle::{self, BuildRequest};
+use super::runtime::RuntimeConfig;
 use std::process::{Command as Exec, Stdio};
 use std::time::{Duration, Instant};
 
@@ -31,6 +37,25 @@ pub trait Backend: Send + Sync + 'static {
     /// Identifies this engine's build. Part of the node's fingerprint, so
     /// it must change whenever an image this engine wrote might not restore.
     fn version(&self) -> String;
+
+    /// What a template installed at `dir` (`templates/<name>`) is made of
+    /// for this backend. A template is not installed if this does not exist.
+    fn template_root(&self, dir: &Path) -> PathBuf;
+
+    /// Lay down the sandbox's writable layer and write its bundle directory,
+    /// returning that directory. Idempotent: a sandbox that already has a
+    /// layer keeps it, which is what makes re-adoption after a restart free.
+    fn prepare(&self, cfg: &RuntimeConfig, req: &BuildRequest<'_>) -> Result<PathBuf>;
+
+    /// The directory holding everything this sandbox wrote, which detach
+    /// archives and a later `prepare` with `restore_from` unpacks again.
+    fn layer(&self, cfg: &RuntimeConfig, id: &str) -> PathBuf;
+
+    /// Stop using the layer, leaving it in place to be archived.
+    fn unmount(&self, cfg: &RuntimeConfig, id: &str) -> Result<()>;
+
+    /// Remove the layer and the bundle directory.
+    fn teardown(&self, cfg: &RuntimeConfig, id: &str) -> Result<()>;
 
     /// Start a sandbox from its bundle, from nothing.
     fn boot(&self, id: &str, bundle: &Path) -> Result<()>;
@@ -42,6 +67,10 @@ pub trait Backend: Send + Sync + 'static {
     /// Write a running sandbox's state into `image`, an existing directory.
     /// The sandbox is stopped afterwards; `remove` is still needed.
     fn checkpoint(&self, id: &str, image: &Path, compress: bool) -> Result<()>;
+    /// Whether `image` looks like a whole checkpoint of this engine's, from
+    /// its files alone. `observe` relies on it, so no subprocess and nothing
+    /// slow; it is a layout check, and restore stays the final word.
+    fn validate(&self, image: &Path) -> Result<()>;
 
     /// Forget a stopped sandbox. Best effort: called on paths that are
     /// already cleaning up, where there is nothing better to do on failure.
@@ -217,6 +246,26 @@ impl Backend for Runsc {
             .unwrap_or_default()
     }
 
+    fn template_root(&self, dir: &Path) -> PathBuf {
+        dir.join("rootfs")
+    }
+
+    fn prepare(&self, cfg: &RuntimeConfig, req: &BuildRequest<'_>) -> Result<PathBuf> {
+        bundle::build(cfg, req).map(|l| l.bundle)
+    }
+
+    fn layer(&self, cfg: &RuntimeConfig, id: &str) -> PathBuf {
+        cfg.work_dir.join("layers").join(id).join("upper")
+    }
+
+    fn unmount(&self, cfg: &RuntimeConfig, id: &str) -> Result<()> {
+        bundle::unmount(cfg, id)
+    }
+
+    fn teardown(&self, cfg: &RuntimeConfig, id: &str) -> Result<()> {
+        bundle::teardown(cfg, id)
+    }
+
     // create then start, rather than `run`: create reports a bad bundle as
     // an error we can attribute.
     fn boot(&self, id: &str, bundle: &Path) -> Result<()> {
@@ -250,6 +299,32 @@ impl Backend for Runsc {
         }
         args.push(id);
         self.run(&args, RUNSC_SNAPSHOT_TIMEOUT).map(drop)
+    }
+
+    /// `checkpoint.img` opens with the statefile header: "gVisorSF", then
+    /// the big-endian length of the JSON metadata that follows it
+    /// (gvisor `pkg/state/statefile`). A split image keeps its memory in
+    /// `pages_meta.img` and `pages.img` beside it, and needs both.
+    fn validate(&self, image: &Path) -> Result<()> {
+        use std::io::Read;
+        let mut f = std::fs::File::open(image.join("checkpoint.img"))
+            .with_context(|| format!("no checkpoint.img in {}", image.display()))?;
+        let mut header = [0u8; 16];
+        f.read_exact(&mut header)
+            .context("checkpoint.img is shorter than its header")?;
+        if &header[..8] != b"gVisorSF" {
+            bail!("checkpoint.img is not a gVisor statefile");
+        }
+        let meta = u64::from_be_bytes(header[8..].try_into().unwrap());
+        if meta > 16 << 20 || f.metadata()?.len() <= 16 + meta {
+            bail!("checkpoint.img is truncated");
+        }
+        let len = |name: &str| std::fs::metadata(image.join(name)).map(|m| m.len()).ok();
+        match (len("pages_meta.img"), len("pages.img")) {
+            (Some(meta), Some(_)) if meta > 0 => Ok(()),
+            (None, None) => Ok(()),
+            _ => bail!("checkpoint pages files are incomplete"),
+        }
     }
 
     fn remove(&self, id: &str) {
