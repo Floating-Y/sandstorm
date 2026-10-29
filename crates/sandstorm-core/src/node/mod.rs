@@ -25,7 +25,7 @@ mod wake;
 pub use agent::{serve_listen, Identity as AgentIdentity};
 pub use backend::{Backend, Runsc};
 pub use bundle::TemplateSpec;
-pub use gateway::{Exposed, Gateway};
+pub use gateway::{Exposed, Gateway, PORT_HEADER};
 pub use host::{
     bootstrap_compressed_swap, compressed_swap, decide_compression, decide_reclaim, pin_in_zswap,
     Lever,
