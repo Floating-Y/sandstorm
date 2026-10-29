@@ -870,7 +870,8 @@ async fn a_requested_port_is_honoured() {
 }
 
 /// Running out of addresses is a clear refusal at create time, not a
-/// sandbox that is accepted and then cannot be given a network.
+/// sandbox that is accepted and then cannot be given a network -- and a
+/// batch that runs out partway is refused whole.
 #[tokio::test]
 async fn an_exhausted_address_plan_is_refused_up_front() {
     let td = TempDir::new().unwrap();
@@ -902,83 +903,29 @@ async fn an_exhausted_address_plan_is_refused_up_front() {
     put_template(&h, "python").await;
     let c = reqwest::Client::new();
 
-    for i in 0..3 {
-        let r = c
-            .post(format!("{}/v1/sandboxes", h.base))
-            .json(&serde_json::json!({ "template": "python" }))
+    let create = |body: serde_json::Value| {
+        c.post(format!("{}/v1/sandboxes", h.base))
+            .json(&body)
             .send()
-            .await
-            .unwrap();
-        assert_eq!(r.status(), 201, "sandbox {i} should have got a slot");
-    }
-    let r = c
-        .post(format!("{}/v1/sandboxes", h.base))
-        .json(&serde_json::json!({ "template": "python" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), 503);
-    let body: serde_json::Value = r.json().await.unwrap();
-    assert!(
-        body["error"]
-            .as_str()
-            .unwrap()
-            .contains("no free network slot"),
-        "got {:?}",
-        body["error"]
-    );
-}
-
-/// A batch that runs out of slots must preserve existing sandboxes and
-/// release its own allocations so a later request can use the remaining slot.
-#[tokio::test]
-async fn a_failed_batch_releases_its_network_slots() {
-    let td = TempDir::new().unwrap();
-    let st = Arc::new(MasterState::new(
-        Store::open(td.path().join("state.db")).unwrap(),
-        Ca::open_or_create(td.path().join("pki")).unwrap(),
-        sandstorm_core::master::MasterOptions {
-            admit: sandstorm_core::master::Admission {
-                min_free_mib: 0,
-                max_psi_avg10: f64::MAX,
-            },
-            // Room for exactly three sandboxes.
-            max_net_index: 2,
-            ..Default::default()
-        },
-    ));
-    let listener = tokio::net::TcpListener::bind::<SocketAddr>("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, router(st)).await.ok();
-    });
-    let h = Harness {
-        base: format!("http://{addr}"),
-        _td: td,
     };
-    register(&h, "bm-1", "default").await;
-    put_template(&h, "python").await;
-    let c = reqwest::Client::new();
-
+    let one = serde_json::json!({ "template": "python" });
     for i in 0..2 {
-        let r = c
-            .post(format!("{}/v1/sandboxes", h.base))
-            .json(&serde_json::json!({ "template": "python" }))
-            .send()
-            .await
-            .unwrap();
+        let r = create(one.clone()).await.unwrap();
         assert_eq!(r.status(), 201, "sandbox {i} should have got a slot");
     }
+
+    // Two more when one slot is left: refused whole, nothing written, and
+    // the slot is still there for a single create.
     let store = Store::open(h._td.path().join("state.db")).unwrap();
     let before = format!("{:?}", store.list_sandboxes().unwrap());
-    let r = c
-        .post(format!("{}/v1/sandboxes", h.base))
-        .json(&serde_json::json!({ "template": "python", "n": 2 }))
-        .send()
+    let r = create(serde_json::json!({ "template": "python", "n": 2 }))
         .await
         .unwrap();
+    assert_eq!(r.status(), 503);
+    assert_eq!(format!("{:?}", store.list_sandboxes().unwrap()), before);
+    assert_eq!(create(one.clone()).await.unwrap().status(), 201);
+
+    let r = create(one).await.unwrap();
     assert_eq!(r.status(), 503);
     let body: serde_json::Value = r.json().await.unwrap();
     assert!(
@@ -989,21 +936,6 @@ async fn a_failed_batch_releases_its_network_slots() {
         "got {:?}",
         body["error"]
     );
-    assert_eq!(
-        format!("{:?}", store.list_sandboxes().unwrap()),
-        before,
-        "a failed batch must leave all existing records unchanged"
-    );
-    let retry = c
-        .post(format!("{}/v1/sandboxes", h.base))
-        .json(&serde_json::json!({ "template": "python" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(retry.status(), 201, "the remaining slot must still be free");
-    let sandboxes = store.list_sandboxes().unwrap();
-    assert_eq!(sandboxes.len(), 3);
-    assert!(sandboxes.iter().any(|sandbox| sandbox.net_index == Some(2)));
 }
 
 /// The node owns addressing, so the address it reports is what the API
@@ -2121,15 +2053,20 @@ mod branch {
             .unwrap();
         let arr = kids.as_array().expect("the v0.5 body gets a list back");
         assert_eq!(arr.len(), 4);
-        let store = Store::open(h._td.path().join("state.db")).unwrap();
-        let sandboxes = store.list_sandboxes().unwrap();
-        assert_eq!(sandboxes.len(), 5);
-        let mut network_slots = std::collections::HashSet::new();
-        let mut gateway_ports = std::collections::HashSet::new();
-        for sandbox in &sandboxes {
-            assert!(network_slots.insert(sandbox.net_index.unwrap()));
-            assert!(gateway_ports.insert(sandbox.gateway_port.unwrap()));
-        }
+        // One transaction for the four, and each still got its own slot and port.
+        let all = Store::open(h._td.path().join("state.db"))
+            .unwrap()
+            .list_sandboxes()
+            .unwrap();
+        let distinct = |f: fn(&sandstorm_core::state::Sandbox) -> Option<u32>| {
+            all.iter()
+                .filter_map(f)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        };
+        assert_eq!(all.len(), 5);
+        assert_eq!(distinct(|s| s.net_index), 5);
+        assert_eq!(distinct(|s| s.gateway_port.map(u32::from)), 5);
 
         let mut slots = std::collections::HashSet::new();
         for k in arr {

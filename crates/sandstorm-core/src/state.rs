@@ -158,25 +158,13 @@ pub struct Store {
     conn: Connection,
 }
 
-/// Rolls back a sandbox batch unless it is explicitly committed.
-pub(crate) struct SandboxBatch<'a> {
-    transaction: rusqlite::Transaction<'a>,
-}
-
-impl SandboxBatch<'_> {
-    pub(crate) fn commit(self) -> Result<()> {
-        self.transaction.commit()?;
-        Ok(())
-    }
-}
-
 impl Store {
-    pub(crate) fn begin_sandbox_batch(&self) -> Result<SandboxBatch<'_>> {
-        // The master holds its Store mutex throughout the batch. Using the
-        // same connection lets allocation see earlier inserts in this batch.
-        Ok(SandboxBatch {
-            transaction: self.conn.unchecked_transaction()?,
-        })
+    /// Writes made until `commit` stand or fall together; dropping the
+    /// transaction rolls them back. It is on this store's own connection, so
+    /// reads inside it see its earlier writes, and the caller's hold on the
+    /// store's mutex keeps anyone else out until it ends.
+    pub(crate) fn transaction(&self) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+        self.conn.unchecked_transaction()
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {

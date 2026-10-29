@@ -2704,8 +2704,10 @@ pub(super) async fn create_sandbox(
         }
     };
 
+    // All of them or none: a slot or port that runs out partway through
+    // must not leave the ones before it behind.
     let batch = store
-        .begin_sandbox_batch()
+        .transaction()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let mut made = Vec::with_capacity(count as usize);
     for (node_id, pool) in &placed {
