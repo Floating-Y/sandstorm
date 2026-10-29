@@ -6,6 +6,34 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### The gateway streams, and one host port reaches every port of a sandbox
+
+The node gateway used to read a request's whole body, send it, then read the
+sandbox's whole answer before replying, with a 60 s limit on all of it. A
+server stream -- envd's `commands.run`, server-sent events, a long download
+-- arrived in one piece at the end or not at all. It now speaks HTTP/1.1 on
+a connection of its own per request and passes both bodies through as they
+arrive, with no overall time limit; a WebSocket upgrade is spliced through.
+The sandbox counts as in flight until its answer has been read to the end,
+not only until its headers arrived.
+
+`x-sandstorm-port: <port>` sends a request to that port inside the sandbox
+instead of the one it was created with. The token check is the same for every
+port, and neither header reaches the sandbox.
+
+### The v0.5 Firecracker runtime leaves the tree
+
+`sandstorm-cli`, `sandstorm-vmm`, `sandstorm-uffd` and the `experiments/`
+crates are removed, with the design notes, benchmarks and scripts that only
+described or drove them; the guest-kernel scripts stay, since
+`--backend firecracker` boots that kernel. `sandstormd` never depended on any of them; they
+were still workspace members, so CI built them and readers took them for
+part of v0.6. Everything removed is in the
+[`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3), and
+links that pointed at it now point there. `DESIGN.md`, `docs/RUNBOOK.md`
+and `docs/ROADMAP.md` described only the v0.5 runtime and are now short
+pointers. The `/v1/sandboxes` refusal of `live_fork` and `hugepages` stays.
+
 ### forkd is now Sandstorm
 
 Everything is renamed at once, with no compatibility layer: the crates

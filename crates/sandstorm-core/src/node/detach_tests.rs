@@ -9,13 +9,12 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let runtime = Runtime {
-            cfg: RuntimeConfig {
-                work_dir: dir.path().join("work"),
-                volume_root: dir.path().join("volumes"),
-                ..Default::default()
-            },
-        };
+        let runtime = Runtime::new(RuntimeConfig {
+            work_dir: dir.path().join("work"),
+            volume_root: dir.path().join("volumes"),
+            ..Default::default()
+        })
+        .unwrap();
         let fixture = Self { dir, runtime };
         fixture.seed();
         fixture
