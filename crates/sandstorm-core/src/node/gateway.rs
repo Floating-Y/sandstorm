@@ -679,7 +679,7 @@ mod tests {
             for release in [first_released, second_released] {
                 let (mut stream, _) = upstream.accept().await.unwrap();
                 let mut request = [0u8; 4096];
-                stream.read(&mut request).await.unwrap();
+                assert!(stream.read(&mut request).await.unwrap() > 0);
                 stream
                     .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n")
                     .await
