@@ -165,14 +165,17 @@ impl Firecracker {
             .open(cg.join("cgroup.procs"))
             .with_context(|| format!("opening {}/cgroup.procs", cg.display()))?;
 
-        let mut cmd = match &cfg.netns {
-            Some(ns) => {
-                let mut c = Exec::new("ip");
-                c.args(["netns", "exec", ns, &self.bin]);
-                c
-            }
-            None => Exec::new(&self.bin),
-        };
+        // Its namespace is entered in the child before exec, not through
+        // `ip netns exec`: that is another process, and it remounts /sys
+        // for a program that only needs the namespace's tap. About 10 ms
+        // of a warm start on bm went on starting Firecracker.
+        let netns = cfg
+            .netns
+            .as_ref()
+            .map(|ns| std::fs::File::open(format!("/var/run/netns/{ns}")))
+            .transpose()
+            .with_context(|| format!("opening {id}'s network namespace"))?;
+        let mut cmd = Exec::new(&self.bin);
         cmd.arg("--api-sock")
             .arg(&sock)
             .current_dir(&disk)
@@ -183,10 +186,11 @@ impl Firecracker {
             use std::os::unix::io::AsRawFd;
             use std::os::unix::process::CommandExt;
             let fd = procs.as_raw_fd();
+            let ns_fd = netns.as_ref().map(|f| f.as_raw_fd());
             // Its own session, so nothing aimed at this process's group
-            // reaches it; and into the cgroup before exec, so there is no
-            // moment when a freeze or a kill would miss it. `ip netns exec`
-            // execs Firecracker in place, so the pid stays the same.
+            // reaches it; into the cgroup before exec, so there is no
+            // moment when a freeze or a kill would miss it; and into its
+            // network namespace.
             unsafe {
                 cmd.pre_exec(move || {
                     if libc::setsid() < 0 {
@@ -194,6 +198,17 @@ impl Firecracker {
                     }
                     if libc::write(fd, b"0".as_ptr().cast(), 1) < 0 {
                         return Err(std::io::Error::last_os_error());
+                    }
+                    if let Some(ns) = ns_fd {
+                        #[cfg(target_os = "linux")]
+                        if libc::setns(ns, libc::CLONE_NEWNET) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            let _ = ns;
+                            return Err(std::io::ErrorKind::Unsupported.into());
+                        }
                     }
                     Ok(())
                 });
@@ -203,6 +218,7 @@ impl Firecracker {
             .spawn()
             .with_context(|| format!("starting {} for {id}", self.bin))?;
         drop(procs);
+        drop(netns);
         let pid = child.id();
         std::fs::write(self.bundle(id).join("fc.pid"), pid.to_string())?;
         // Reaped here while this process lives; after a restart it is
@@ -220,7 +236,7 @@ impl Firecracker {
                 self.stop(id);
                 bail!("firecracker for {id} did not open its API socket; see its log");
             }
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(1));
         }
         Ok(())
     }
@@ -260,6 +276,33 @@ impl Firecracker {
 }
 
 impl Backend for Firecracker {
+    /// The tap and its NAT rules depend on nothing but the namespace: every
+    /// guest is 10.42.0.2 behind its own tap.
+    fn prepare_netns(&self, netns: &str) -> Result<()> {
+        ensure_tap(netns)
+    }
+
+    /// A paused VM goes on where it stopped. Stopping it and restoring it
+    /// from the image instead, as runsc must, assembled the whole diff chain
+    /// every time: on bm the parent's return grew from 73 to 285 ms over six
+    /// branches of one app64. Its memory now stands on the image's chain, so
+    /// that is the base the next checkpoint diffs against; pages it dirties
+    /// from here are tracked from the snapshot just taken, and a tracker
+    /// that kept older ones too would only make the diff larger.
+    fn resume_after_checkpoint(&self, id: &str, image: &Path) -> Result<bool> {
+        let chain = chain_of(image)?;
+        link_chain(image, &chain, &self.base_dir(id))?;
+        api(
+            &self.sock(id),
+            "PATCH",
+            "/vm",
+            &json!({ "state": "Resumed" }),
+            API_TIMEOUT,
+        )
+        .with_context(|| format!("resuming {id}"))?;
+        Ok(true)
+    }
+
     fn version(&self) -> String {
         Exec::new(&self.bin)
             .arg("--version")
@@ -468,10 +511,9 @@ impl Backend for Firecracker {
             Ok(())
         })();
         match r {
-            Ok(()) => {
-                self.stop(id);
-                Ok(())
-            }
+            // Left paused: every caller either removes it or, for a branch,
+            // resumes it (`resume_after_checkpoint`).
+            Ok(()) => Ok(()),
             Err(e) => {
                 // Leave it running rather than paused for ever.
                 let _ = api(
@@ -776,7 +818,21 @@ fn clone_file(src: &std::fs::File, dst: &std::fs::File) -> Result<()> {
 /// Put the tap and the two NAT rules into the sandbox's namespace. Every
 /// step checks first, so this is safe to run again before every boot and
 /// restore -- which it must, since Snapshot releases the network.
+///
+/// The tap is addressed and brought up last, so a tap that is up with its
+/// address means everything before it is in place too: one `ip` to find
+/// that out, rather than the nine this takes from nothing. A namespace from
+/// `net::Pool` arrives that way, which is what the pool is for.
 fn ensure_tap(ns: &str) -> Result<()> {
+    let up = Exec::new("ip")
+        .args(["-n", ns, "-o", "-4", "addr", "show", "dev", TAP, "up"])
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(TAP_CIDR))
+        .unwrap_or(false);
+    if up {
+        return Ok(());
+    }
     let ok = |args: &[&str]| {
         Exec::new(args[0])
             .args(&args[1..])
@@ -802,11 +858,6 @@ fn ensure_tap(ns: &str) -> Result<()> {
             &["ip", "-n", ns, "tuntap", "add", "dev", TAP, "mode", "tap"],
         )?;
     }
-    run(
-        "addressing the tap",
-        &["ip", "-n", ns, "addr", "replace", TAP_CIDR, "dev", TAP],
-    )?;
-    run("tap up", &["ip", "-n", ns, "link", "set", TAP, "up"])?;
     run(
         "forwarding in the namespace",
         &[
@@ -853,6 +904,11 @@ fn ensure_tap(ns: &str) -> Result<()> {
             run("adding a NAT rule", &add)?;
         }
     }
+    run(
+        "addressing the tap",
+        &["ip", "-n", ns, "addr", "replace", TAP_CIDR, "dev", TAP],
+    )?;
+    run("tap up", &["ip", "-n", ns, "link", "set", TAP, "up"])?;
     Ok(())
 }
 
@@ -907,24 +963,35 @@ fn is_timeout(e: &anyhow::Error) -> bool {
 /// A restored guest's clock is wherever it was when the image was taken.
 /// Best effort and bounded: a sandbox whose clock could not be set is still
 /// better served than one that was not restored.
+///
+/// One `set_time` to the agent, which sets it in-process. An agent from
+/// before that action answers with an error, and gets `date -s` through
+/// `exec` as before, which forks in the guest: 15 ms of a 30 ms warm
+/// restore on bm.
 fn sync_clock(ip: Ipv4Addr) {
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64())
+    };
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
-        if agent(ip, &json!({ "action": "ping" }), Duration::from_millis(500)).is_ok() {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs());
-            let req = json!({
-                "action": "exec",
-                "args": ["date", "-s", format!("@{now}")],
-                "timeout": 2,
-            });
-            if let Err(e) = agent(ip, &req, Duration::from_secs(3)) {
-                tracing::warn!(%ip, error = %e, "could not set a restored guest's clock");
+        let req = json!({ "action": "set_time", "unix": now() });
+        match agent(ip, &req, Duration::from_millis(500)) {
+            Ok(v) if v.get("ok").and_then(Value::as_bool) == Some(true) => return,
+            Ok(_) => {
+                let req = json!({
+                    "action": "exec",
+                    "args": ["date", "-s", format!("@{}", now() as u64)],
+                    "timeout": 2,
+                });
+                if let Err(e) = agent(ip, &req, Duration::from_secs(3)) {
+                    tracing::warn!(%ip, error = %e, "could not set a restored guest's clock");
+                }
+                return;
             }
-            return;
+            Err(_) => std::thread::sleep(Duration::from_millis(2)),
         }
-        std::thread::sleep(Duration::from_millis(20));
     }
     tracing::warn!(%ip, "a restored guest's agent did not answer; its clock is stale");
 }

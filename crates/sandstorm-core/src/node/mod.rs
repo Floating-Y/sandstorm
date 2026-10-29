@@ -976,6 +976,9 @@ async fn poll_once(
         bail!("master refused the poll: {} {reason}", status.as_u16());
     }
     let resp: PollResponse = raw.json().await?;
+    if !resp.commands.is_empty() {
+        tracing::debug!(count = resp.commands.len(), "commands from the master");
+    }
 
     let now = Instant::now();
     let mut soonest: Option<Duration> = None;
@@ -983,7 +986,7 @@ async fn poll_once(
     for cmd in &resp.commands {
         asked_about.push(command_id(cmd).to_string());
         match run_one(cfg, rt, failing, wake, cmd, now) {
-            Step::Done => {}
+            Step::Done => expose_created(rt, gw, cmd).await,
             Step::Later(wait) => soonest = sooner(soonest, wait),
             // Posted as soon as it exists, not at the end of the batch, so a
             // caller waiting on a fast exec is not held up by a slow create
@@ -1008,6 +1011,16 @@ async fn poll_once(
     // Reopen the request at once either way; this only says how long the
     // master may hold it before we need to come back for a retry.
     Ok(soonest)
+}
+
+/// A sandbox this batch just created is reachable from now, not from the
+/// report after the batch; see `Gateway::expose`.
+pub(super) async fn expose_created(rt: &Runtime, gw: &mut Gateway, cmd: &Command) {
+    if let Command::Create { id, .. } = cmd {
+        if let Some(e) = rt.exposed(id) {
+            gw.expose(&e).await;
+        }
+    }
 }
 
 /// Attach the master's bearer token, when there is one.

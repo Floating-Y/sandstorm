@@ -100,6 +100,9 @@ pub struct RuntimeConfig {
     /// page it squeezes out takes a swap slot. The admission floor; 0
     /// squeezes whatever is left.
     pub reclaim_floor_mib: u64,
+    /// Network namespaces kept built ahead of any sandbox; see `net::Pool`.
+    /// 0 builds each one when it is needed.
+    pub netns_pool: usize,
 }
 
 impl Default for RuntimeConfig {
@@ -121,6 +124,7 @@ impl Default for RuntimeConfig {
             prefetch_snapshots: false,
             pin_in_zswap: true,
             reclaim_floor_mib: 0,
+            netns_pool: 0,
         }
     }
 }
@@ -223,6 +227,8 @@ pub struct Runtime {
     /// Asking the backend runs a subprocess; the answer cannot change
     /// while this node runs.
     fp: Arc<std::sync::OnceLock<String>>,
+    /// Namespaces built ahead of time, when `netns_pool` asks for any.
+    pool: Option<Arc<net::Pool>>,
 }
 
 impl Runtime {
@@ -256,10 +262,19 @@ impl Runtime {
         for d in [&cfg.work_dir, &cfg.volume_root] {
             std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
         }
+        let pool = (cfg.netns_pool > 0).then(|| {
+            let e = engine.clone();
+            net::Pool::start(
+                cfg.netns_pool,
+                &cfg.work_dir.to_string_lossy(),
+                Box::new(move |ns| e.prepare_netns(ns)),
+            )
+        });
         Ok(Self {
             cfg,
             engine,
             fp: Arc::default(),
+            pool,
         })
     }
 
@@ -471,7 +486,7 @@ impl Runtime {
         // 8080, which is why no host-wide port check is needed any more.
         let (netns, sandbox_ip) = match net_index {
             Some(i) => {
-                let slot = net::setup(&self.cfg.net, id, i)
+                let slot = net::setup(&self.cfg.net, id, i, self.pool.as_deref())
                     .with_context(|| format!("setting up the network for {id}"))?;
                 // Persisted so a restarted node can map this sandbox back to
                 // its slot, which it needs to reclaim the address later.
@@ -565,7 +580,8 @@ impl Runtime {
                 if !image.is_dir() {
                     bail!("tag {tag} is not on this node (no {})", image.display());
                 }
-                self.ensure_net(id)?;
+                // The network `setup` built above is untouched, as for a
+                // warm start (`restore_warm`).
                 self.engine
                     .restore(id, &bundle, &image)
                     .with_context(|| format!("forking {id} from tag {tag}"))?;
@@ -626,14 +642,24 @@ impl Runtime {
         let _ = self.freeze(id, false);
         self.checkpoint_into(id, &image, false)
             .with_context(|| format!("checkpointing {id} into tag {tag}"))?;
-        self.engine.remove(id);
 
-        // Put the parent back from the image it just produced, with its
-        // address reapplied first.
-        self.ensure_net(id)?;
-        self.engine
-            .restore(id, &bundle, &image)
-            .with_context(|| format!("restoring {id} after branching it into {tag}"))?;
+        // Where the engine can, the parent just carries on. Otherwise, or if
+        // that fails, it is put back from the image it just produced, with
+        // its address reapplied first.
+        let resumed = self
+            .engine
+            .resume_after_checkpoint(id, &image)
+            .unwrap_or_else(|e| {
+                tracing::warn!(%id, error = %format!("{e:#}"), "could not resume after branching; restoring");
+                false
+            });
+        if !resumed {
+            self.engine.remove(id);
+            self.ensure_net(id)?;
+            self.engine
+                .restore(id, &bundle, &image)
+                .with_context(|| format!("restoring {id} after branching it into {tag}"))?;
+        }
 
         let size = dir_size(&image);
         tracing::info!(%id, %tag, size_bytes = size, "branched");
@@ -671,8 +697,11 @@ impl Runtime {
         self.cfg.work_dir.join("warm").join(template).join(key)
     }
 
+    /// Only from `create`, straight after `net::setup`: nothing has run in
+    /// the namespace yet, so there is nothing for `ensure_net` to put back.
+    /// Re-applying it anyway was about eight `ip` processes, 25 ms of a
+    /// 104 ms warm start on bm.
     fn restore_warm(&self, id: &str, bundle: &Path, image: &Path, w: &WarmSpec) -> Result<()> {
-        self.ensure_net(id)?;
         self.engine
             .restore(id, bundle, image)
             .context("restoring the warm image")?;
@@ -1299,7 +1328,7 @@ impl Runtime {
         let Some(i) = self.net_index_of(id) else {
             return Ok(());
         };
-        let slot = net::setup(&self.cfg.net, id, i)
+        let slot = net::setup(&self.cfg.net, id, i, self.pool.as_deref())
             .with_context(|| format!("restoring the network for {id}"))?;
         tracing::debug!(%id, ip = %slot.sandbox_ip, "network reapplied before restore");
         Ok(())

@@ -93,6 +93,13 @@ struct ServeArgs {
     fc_kernel: PathBuf,
     #[arg(long, default_value_t = 1)]
     fc_vcpus: u8,
+    /// Network namespaces to keep built ahead of any sandbox, so a create or
+    /// a wake from Snapshot only names and addresses one. 0 builds each on
+    /// demand, as before. Each holds about 0.4 MiB of kernel memory; 32
+    /// covers a fork of 20 at once, where 8 left 12 children building their
+    /// own at about 80 ms more each.
+    #[arg(long, env = "SANDSTORM_NETNS_POOL", default_value_t = 32)]
+    netns_pool: usize,
     /// runsc's state directory. Per-deployment by default: sharing one
     /// means two sandstorm nodes would each see the other's containers as
     /// orphans and destroy them.
@@ -494,6 +501,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
                 prefetch_snapshots: a.prefetch_snapshots != node::Lever::Off,
                 pin_in_zswap: node::pin_in_zswap(),
                 reclaim_floor_mib: a.admit_min_free_mib,
+                netns_pool: a.netns_pool,
             },
             hold: Duration::from_secs(a.hold_secs),
             // The same two numbers the master places with, applied here
