@@ -1,6 +1,6 @@
-//! Tier changes, executed against runsc.
+//! Tier changes, executed against the node's backend (`backend.rs`).
 //!
-//! Every measurement in the tier table came from this sequence on bm:
+//! Every measurement, made with the runsc backend, in the tier table came from this sequence on bm:
 //!   hot -> frozen    `echo 1 > cgroup.freeze`          8-11 ms, 0 CPU
 //!   frozen -> hot    `echo 0 > cgroup.freeze`          8-11 ms
 //!   hot -> snapshot  `runsc checkpoint` + delete       84 ms, frees RAM
@@ -8,17 +8,20 @@
 //!   hot -> detached  tar+zstd the layer into the volume
 //!   detached -> hot  untar + cold start                1.7-2.8 s
 //!
-//! `runsc create` + `runsc start` daemonises the sandbox, so it is not a
-//! child of this process and a control-plane restart does not touch it.
-//! The cgroup is named in the bundle's spec, so there is exactly one path
+//! A started sandbox is not a child of this process, so a control-plane
+//! restart does not touch it. The cgroup is named in the bundle's spec, so there is exactly one path
 //! to write for a freeze.
 
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command as Exec, Stdio};
+use std::process::Command as Exec;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::backend::{Backend, Runsc};
 use super::bundle::{self, TemplateSpec, WarmSpec};
+use super::firecracker::Firecracker;
 use super::net::{self, NetConfig};
 use crate::proto::ObservedSandbox;
 use crate::tier::Tier;
@@ -41,15 +44,6 @@ pub struct CreateRequest<'a> {
     pub token: &'a str,
 }
 
-/// Ceiling for a runsc command that should answer immediately. Generous
-/// against a loaded node, short enough that a wedged runsc surfaces as an
-/// error on this sandbox rather than a node that has stopped responding.
-const RUNSC_TIMEOUT: Duration = Duration::from_secs(20);
-
-/// Checkpoint and restore do real work proportional to the sandbox's memory.
-/// Measured at 84 ms on bm, but a large sandbox on a loaded node is slower.
-const RUNSC_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(120);
-
 /// The node's own seed sandboxes, which a warm template image is taken
 /// from. `observe` never reports them, and the master refuses the prefix
 /// for anything it creates, so the two can never be confused.
@@ -59,10 +53,25 @@ const WARM_RETRY: Duration = Duration::from_secs(600);
 /// How long `after_restore` may take.
 const AFTER_RESTORE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Which engine runs this node's sandboxes. `backend.rs`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BackendKind {
+    /// gVisor. Needs no `/dev/kvm`.
+    #[default]
+    Runsc,
+    /// Firecracker microVMs, for hosts with `/dev/kvm`. Not yet run on one.
+    Firecracker,
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
+    pub backend: BackendKind,
     pub runsc: String,
     pub runsc_root: PathBuf,
+    pub firecracker: String,
+    /// The guest kernel, an uncompressed vmlinux.
+    pub fc_kernel: PathBuf,
+    pub fc_vcpus: u8,
     /// Bundles, writable layers and snapshot images live here.
     pub work_dir: PathBuf,
     pub max_sandboxes: u32,
@@ -96,8 +105,12 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
+            backend: BackendKind::Runsc,
             runsc: "runsc".into(),
             runsc_root: "/var/run/sandstorm-runsc".into(),
+            firecracker: "firecracker".into(),
+            fc_kernel: "/var/lib/sandstorm/vmlinux".into(),
+            fc_vcpus: 1,
             work_dir: "/var/lib/sandstorm".into(),
             max_sandboxes: 0,
             volume_root: "/var/lib/sandstorm/volumes".into(),
@@ -199,157 +212,66 @@ fn reclaim_frozen(id: &str, cg: &Path, pin: bool, floor_mib: u64) {
     );
 }
 
-/// Reads state from disk and cgroups; clones share only a cache of validated
-/// immutable snapshot files, avoiding repeated decoding during polling.
+/// Holds no state of its own beyond its configuration and its backend --
+/// everything it knows it reads from disk and the cgroup tree -- so a clone
+/// is a second handle on the same node, which is what the gateway's waker
+/// uses.
 #[derive(Clone)]
 pub struct Runtime {
     cfg: RuntimeConfig,
-    validated_snapshots: snapshot::ValidationCache,
-    #[cfg(test)]
-    cgroup_root: Option<PathBuf>,
+    engine: Arc<dyn Backend>,
+    /// Asking the backend runs a subprocess; the answer cannot change
+    /// while this node runs.
+    fp: Arc<std::sync::OnceLock<String>>,
 }
 
 impl Runtime {
+    /// A node on the backend its configuration names.
     pub fn new(cfg: RuntimeConfig) -> Result<Self> {
+        let engine: Arc<dyn Backend> = match cfg.backend {
+            BackendKind::Runsc => Arc::new(Runsc {
+                bin: cfg.runsc.clone(),
+                root: cfg.runsc_root.clone(),
+                work_dir: cfg.work_dir.clone(),
+            }),
+            BackendKind::Firecracker => {
+                let fc = Firecracker {
+                    bin: cfg.firecracker.clone(),
+                    // Absolute: Firecracker runs in each sandbox's own disk
+                    // directory, where a relative path would mean nothing.
+                    kernel: std::fs::canonicalize(&cfg.fc_kernel)
+                        .unwrap_or_else(|_| cfg.fc_kernel.clone()),
+                    vcpus: cfg.fc_vcpus,
+                    work_dir: cfg.work_dir.clone(),
+                };
+                std::fs::create_dir_all(&cfg.work_dir)?;
+                fc.check_host()?;
+                Arc::new(fc)
+            }
+        };
+        Self::with_backend(cfg, engine)
+    }
+
+    pub fn with_backend(cfg: RuntimeConfig, engine: Arc<dyn Backend>) -> Result<Self> {
         for d in [&cfg.work_dir, &cfg.volume_root] {
             std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
         }
         Ok(Self {
             cfg,
-            validated_snapshots: Default::default(),
-            #[cfg(test)]
-            cgroup_root: None,
+            engine,
+            fp: Arc::default(),
         })
     }
 
-    /// For runsc commands that leave a long-lived process behind: create,
-    /// start, restore.
-    ///
-    /// These must NOT go through `runsc()`. `Command::output()` reads the
-    /// child's stdout and stderr until EOF, and the sandbox process inherits
-    /// those pipes and keeps them open for as long as it runs -- so EOF
-    /// never arrives and the call blocks for ever on a sandbox that started
-    /// perfectly well. The symptom is a container stuck in `created` with no
-    /// error anywhere. Give the sandbox a file for its output instead.
-    fn runsc_spawn(&self, id: &str, args: &[&str]) -> Result<()> {
-        let log_path = self.cfg.work_dir.join("logs");
-        std::fs::create_dir_all(&log_path)?;
-        let log = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path.join(format!("{id}.log")))
-            .with_context(|| format!("opening the log for {id}"))?;
-
-        let mut child = Exec::new(&self.cfg.runsc)
-            .arg("--root")
-            .arg(&self.cfg.runsc_root)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(log.try_clone()?)
-            .stderr(log)
-            .spawn()
-            .with_context(|| format!("running {} {:?}", self.cfg.runsc, args))?;
-
-        // Bounded for the same reason as `runsc`: a wedged runsc must not
-        // take the node's loop with it.
-        let deadline = Instant::now() + RUNSC_SNAPSHOT_TIMEOUT;
-        let status = loop {
-            match child.try_wait()? {
-                Some(s) => break s,
-                None if Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    bail!(
-                        "{} {:?} did not finish within {:?}",
-                        self.cfg.runsc,
-                        args,
-                        RUNSC_SNAPSHOT_TIMEOUT
-                    );
-                }
-                None => std::thread::sleep(Duration::from_millis(2)),
-            }
-        };
-        if !status.success() {
-            bail!(
-                "{} {:?} exited with {status}; see {}",
-                self.cfg.runsc,
-                args,
-                log_path.join(format!("{id}.log")).display()
-            );
-        }
-        Ok(())
-    }
-
-    /// For short-lived runsc commands that answer and exit: list, delete,
-    /// kill, checkpoint.
-    ///
-    /// Every one of these gets a deadline. runsc takes a lock on its state
-    /// directory, and a wedged container makes even `runsc list` block --
-    /// which blocks `observe()`, which blocks the node's whole loop. A node
-    /// that stops polling because one container is stuck is worse than one
-    /// that reports an error about it.
-    ///
-    /// Output goes to temporary files rather than pipes. `Command::output()`
-    /// waits for EOF, and anything runsc leaves holding those descriptors
-    /// keeps them open -- the same trap `runsc_spawn` documents.
-    fn runsc(&self, args: &[&str]) -> Result<String> {
-        self.runsc_timeout(args, RUNSC_TIMEOUT)
-    }
-
-    fn runsc_timeout(&self, args: &[&str], timeout: Duration) -> Result<String> {
-        let tmp = self.cfg.work_dir.join("tmp");
-        std::fs::create_dir_all(&tmp)?;
-        let stem = format!("runsc-{}", uuid::Uuid::new_v4());
-        let (out_path, err_path) = (
-            tmp.join(format!("{stem}.out")),
-            tmp.join(format!("{stem}.err")),
-        );
-        let out_file = std::fs::File::create(&out_path)?;
-        let err_file = std::fs::File::create(&err_path)?;
-
-        let mut child = Exec::new(&self.cfg.runsc)
-            .arg("--root")
-            .arg(&self.cfg.runsc_root)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(out_file)
-            .stderr(err_file)
-            .spawn()
-            .with_context(|| format!("running {} {:?}", self.cfg.runsc, args))?;
-
-        let deadline = Instant::now() + timeout;
-        let status = loop {
-            match child.try_wait()? {
-                Some(s) => break s,
-                None if Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    bail!(
-                        "{} {:?} did not finish within {:?}; runsc may be wedged on \
-                         its state directory",
-                        self.cfg.runsc,
-                        args,
-                        timeout
-                    );
-                }
-                None => std::thread::sleep(Duration::from_millis(2)),
-            }
-        };
-
-        let stdout = std::fs::read_to_string(&out_path).unwrap_or_default();
-        let stderr = std::fs::read_to_string(&err_path).unwrap_or_default();
-        std::fs::remove_file(&out_path).ok();
-        std::fs::remove_file(&err_path).ok();
-
-        if !status.success() {
-            bail!("{} {:?} failed: {}", self.cfg.runsc, args, stderr.trim());
-        }
-        Ok(stdout)
+    /// What this node is snapshot-compatible with; see `fingerprint`.
+    pub fn fingerprint(&self) -> String {
+        self.fp
+            .get_or_init(|| fingerprint(&self.engine.version()))
+            .clone()
     }
 
     /// What this node actually holds right now, read from the filesystem
-    /// and cgroups. Snapshot validation uses the offline statefile decoder,
-    /// cached until files change; it never queries a sentry with `runsc list`.
+    /// and cgroups. No subprocess, and in particular no `runsc list`.
     ///
     /// `runsc list` queries each sandbox's sentry over its socket, and a
     /// frozen sentry cannot answer: measured on bm, `runsc list` times out
@@ -357,10 +279,10 @@ impl Runtime {
     /// Since freezing is the whole point of the frozen tier, asking runsc
     /// would mean one frozen sandbox blinds the node to every other -- the
     /// node stops polling, and nothing recovers until someone thaws it by
-    /// hand. Running state therefore comes from the cgroup files:
+    /// hand. So state comes from places that cannot block:
     ///
-    ///   validated snapshots/<id>, no processes -> Snapshot
     ///   cgroup exists and has processes  -> Frozen or Hot, per cgroup.freeze
+    ///   a whole image at snapshots/<id>  -> Snapshot (see `has_snapshot`)
     ///   neither                          -> not here; the master will Create
     ///
     /// Enumerating our own bundles directory also means we can only ever
@@ -386,26 +308,26 @@ impl Runtime {
                 continue;
             }
 
+            // The cgroup first: a sandbox with processes is running whatever
+            // is on disk, such as an image a restore did not get to delete.
             let cg = self.cgroup_path(&id);
             let running = std::fs::read_to_string(cg.join("cgroup.procs"))
                 .map(|s| !s.trim().is_empty())
                 .unwrap_or(false);
+            if !running && self.has_snapshot(&id) {
+                found.push(ObservedSandbox {
+                    ip: self.ip_of(&id),
+                    net_index: self.net_index_of(&id),
+                    id,
+                    tier: Tier::Snapshot,
+                    serving: false,
+                });
+                continue;
+            }
             if !running {
-                let image = self.cfg.work_dir.join("snapshots").join(&id);
-                if image.is_dir() {
-                    match self.validate_snapshot(&image) {
-                        Ok(()) => found.push(ObservedSandbox {
-                            ip: self.ip_of(&id),
-                            net_index: self.net_index_of(&id),
-                            id,
-                            tier: Tier::Snapshot,
-                            serving: false,
-                        }),
-                        Err(error) => {
-                            tracing::warn!(%id, %error, "ignoring invalid snapshot; preserving its data")
-                        }
-                    }
-                }
+                // The bundle is here but nothing is in its cgroup: a failed
+                // start, or a sandbox that died. Reporting it as present
+                // would stop the master retrying it.
                 continue;
             }
             let frozen = self.is_frozen(&id);
@@ -436,8 +358,7 @@ impl Runtime {
             .filter(|e| e.path().is_dir())
             .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
             .filter(|(id, _)| !id.starts_with(WARM_SEED_PREFIX))
-            .filter(|(id, _)| !self.cfg.work_dir.join("snapshots").join(id).exists())
-            .filter(|(id, _)| !self.pending_snapshots(id).exists())
+            .filter(|(id, _)| !self.has_snapshot(id))
             .filter(|(id, _)| {
                 std::fs::read_to_string(self.cgroup_path(id).join("cgroup.procs"))
                     .map(|s| s.trim().is_empty())
@@ -455,10 +376,6 @@ impl Runtime {
     }
 
     fn cgroup_path(&self, id: &str) -> PathBuf {
-        #[cfg(test)]
-        if let Some(root) = &self.cgroup_root {
-            return root.join(id);
-        }
         PathBuf::from("/sys/fs/cgroup/sandstorm").join(id)
     }
 
@@ -535,14 +452,6 @@ impl Runtime {
             gateway_port,
             token,
         } = *req;
-        for saved in [
-            self.pending_snapshots(id),
-            self.cfg.work_dir.join("snapshots").join(id),
-        ] {
-            if saved.exists() {
-                bail!("refusing to recreate {id}: checkpoint data at {}; recover or explicitly destroy it first", saved.display());
-            }
-        }
         let rootfs = self.template_rootfs(template)?;
         let spec: TemplateSpec = serde_json::from_value(spec.clone())
             .with_context(|| format!("template {template} has an unusable spec"))?;
@@ -560,7 +469,7 @@ impl Runtime {
         // Its own network namespace. Each sandbox is alone on a /30, so the
         // port it binds is its own business -- two sandboxes may both use
         // 8080, which is why no host-wide port check is needed any more.
-        let netns = match net_index {
+        let (netns, sandbox_ip) = match net_index {
             Some(i) => {
                 let slot = net::setup(&self.cfg.net, id, i)
                     .with_context(|| format!("setting up the network for {id}"))?;
@@ -588,24 +497,30 @@ impl Runtime {
                     }
                 }
                 tracing::info!(%id, ip = %slot.sandbox_ip, netns = %slot.netns, "network ready");
-                Some(format!("/var/run/netns/{}", slot.netns))
+                (
+                    Some(format!("/var/run/netns/{}", slot.netns)),
+                    Some(slot.sandbox_ip),
+                )
             }
-            None => None,
+            None => (None, None),
         };
 
-        let layout = bundle::build(
-            &self.cfg,
-            &bundle::BuildRequest {
-                id,
-                template_rootfs: &rootfs,
-                spec: &spec,
-                port,
-                volume,
-                restore_from,
-                netns: netns.as_deref(),
-            },
-        )
-        .with_context(|| format!("building bundle for {id}"))?;
+        let bundle = self
+            .engine
+            .prepare(
+                &self.cfg,
+                &bundle::BuildRequest {
+                    id,
+                    template_rootfs: &rootfs,
+                    spec: &spec,
+                    port,
+                    volume,
+                    restore_from,
+                    netns: netns.as_deref(),
+                    sandbox_ip,
+                },
+            )
+            .with_context(|| format!("building bundle for {id}"))?;
 
         tracing::info!(%id, %template, port, ?volume, "create");
 
@@ -628,7 +543,7 @@ impl Runtime {
         };
         if let Some((image, w)) = warm {
             let t0 = Instant::now();
-            match self.restore_warm(id, &layout.bundle, &image, &w) {
+            match self.restore_warm(id, &bundle, &image, &w) {
                 Ok(()) => {
                     self.accept_connections(id);
                     tracing::info!(%id, %template, ms = t0.elapsed().as_millis() as u64, "started warm");
@@ -636,7 +551,7 @@ impl Runtime {
                 }
                 Err(e) => {
                     tracing::warn!(%id, %template, error = %format!("{e:#}"), "warm start failed; booting instead");
-                    let _ = self.runsc(&["delete", "-force", id]);
+                    self.engine.remove(id);
                 }
             }
         }
@@ -651,30 +566,11 @@ impl Runtime {
                     bail!("tag {tag} is not on this node (no {})", image.display());
                 }
                 self.ensure_net(id)?;
-                self.runsc_spawn(
-                    id,
-                    &[
-                        "restore",
-                        "--bundle",
-                        &layout.bundle.to_string_lossy(),
-                        &format!("--image-path={}", image.display()),
-                        "--detach",
-                        id,
-                    ],
-                )
-                .with_context(|| format!("forking {id} from tag {tag}"))?;
+                self.engine
+                    .restore(id, &bundle, &image)
+                    .with_context(|| format!("forking {id} from tag {tag}"))?;
             }
-            // create then start, rather than `run`: create reports a bad
-            // bundle as an error we can attribute.
-            None => {
-                self.runsc_spawn(
-                    id,
-                    &["create", "--bundle", &layout.bundle.to_string_lossy(), id],
-                )
-                .with_context(|| format!("runsc create {id}"))?;
-                self.runsc_spawn(id, &["start", id])
-                    .with_context(|| format!("runsc start {id}"))?;
-            }
+            None => self.engine.boot(id, &bundle)?,
         }
         // Whatever it was before, it is running now.
         self.accept_connections(id);
@@ -720,7 +616,6 @@ impl Runtime {
         if image.exists() {
             bail!("tag {tag} already exists");
         }
-        std::fs::create_dir_all(&image)?;
 
         let bundle = self.cfg.work_dir.join("bundles").join(id);
         if !bundle.join("config.json").exists() {
@@ -729,32 +624,16 @@ impl Runtime {
 
         // Thaw first if frozen: checkpointing a frozen task set hangs.
         let _ = self.freeze(id, false);
-        self.runsc_timeout(
-            &[
-                "checkpoint",
-                &format!("--image-path={}", image.display()),
-                id,
-            ],
-            RUNSC_SNAPSHOT_TIMEOUT,
-        )
-        .with_context(|| format!("checkpointing {id} into tag {tag}"))?;
-        let _ = self.runsc(&["delete", "-force", id]);
+        self.checkpoint_into(id, &image, false)
+            .with_context(|| format!("checkpointing {id} into tag {tag}"))?;
+        self.engine.remove(id);
 
         // Put the parent back from the image it just produced, with its
         // address reapplied first.
         self.ensure_net(id)?;
-        self.runsc_spawn(
-            id,
-            &[
-                "restore",
-                "--bundle",
-                &bundle.to_string_lossy(),
-                &format!("--image-path={}", image.display()),
-                "--detach",
-                id,
-            ],
-        )
-        .with_context(|| format!("restoring {id} after branching it into {tag}"))?;
+        self.engine
+            .restore(id, &bundle, &image)
+            .with_context(|| format!("restoring {id} after branching it into {tag}"))?;
 
         let size = dir_size(&image);
         tracing::info!(%id, %tag, size_bytes = size, "branched");
@@ -773,8 +652,7 @@ impl Runtime {
         rootfs: &Path,
     ) -> PathBuf {
         use sha2::{Digest, Sha256};
-        static FP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        let fp = FP.get_or_init(|| fingerprint().unwrap_or_default());
+        let fp = self.fingerprint();
         let mtime = |p: &Path| {
             std::fs::metadata(p)
                 .and_then(|m| m.modified())
@@ -795,18 +673,9 @@ impl Runtime {
 
     fn restore_warm(&self, id: &str, bundle: &Path, image: &Path, w: &WarmSpec) -> Result<()> {
         self.ensure_net(id)?;
-        self.runsc_spawn(
-            id,
-            &[
-                "restore",
-                "--bundle",
-                &bundle.to_string_lossy(),
-                &format!("--image-path={}", image.display()),
-                "--detach",
-                id,
-            ],
-        )
-        .context("restoring the warm image")?;
+        self.engine
+            .restore(id, bundle, image)
+            .context("restoring the warm image")?;
         if !w.after_restore.is_empty() {
             let (_, stderr, code) = self
                 .exec(id, &w.after_restore, AFTER_RESTORE_TIMEOUT)
@@ -911,15 +780,9 @@ impl Runtime {
             // Uncompressed on purpose: this image is restored on every
             // create, so it lives in the page cache, where an uncompressed
             // image restores fastest (138 ms against 696 on bm).
-            self.runsc_timeout(
-                &[
-                    "checkpoint",
-                    &format!("--image-path={}", tmp.display()),
-                    &seed,
-                ],
-                RUNSC_SNAPSHOT_TIMEOUT,
-            )
-            .context("checkpointing the seed")?;
+            self.engine
+                .checkpoint(&seed, &tmp, false)
+                .context("checkpointing the seed")?;
             std::fs::write(tmp.join("ready"), "")?;
             // Older images of this template are for a spec or rootfs that
             // no longer exists.
@@ -934,7 +797,7 @@ impl Runtime {
             std::fs::rename(&tmp, dir)?;
             Ok(dir_size(dir) >> 20)
         })();
-        let _ = self.runsc(&["delete", "-force", &seed]);
+        self.engine.remove(&seed);
         let _ = self.destroy_with_net(&seed, Some(slot));
         result
     }
@@ -962,12 +825,9 @@ impl Runtime {
             bail!("template name {name:?} is not a plain name");
         }
         let dir = self
-            .cfg
-            .work_dir
-            .join("templates")
-            .join(name)
-            .join("rootfs");
-        if !dir.is_dir() {
+            .engine
+            .template_root(&self.cfg.work_dir.join("templates").join(name));
+        if !dir.exists() {
             bail!(
                 "template {name} is not installed on this node (no {})",
                 dir.display()
@@ -1098,94 +958,74 @@ impl Runtime {
         Ok(())
     }
 
-    fn checkpoint(&self, id: &str) -> Result<()> {
-        self.checkpoint_timeout(id, RUNSC_SNAPSHOT_TIMEOUT)
+    /// Whether `snapshots/<id>` holds an image this node finished. A sealed
+    /// image must still match its seal; one without a seal (written before
+    /// images were sealed) is judged by the backend from its files.
+    fn has_snapshot(&self, id: &str) -> bool {
+        let image = self.cfg.work_dir.join("snapshots").join(id);
+        match std::fs::read(image.join(SEAL)) {
+            Ok(seal) => serde_json::from_slice::<BTreeMap<String, u64>>(&seal)
+                .ok()
+                .zip(image_files(&image).ok())
+                .is_some_and(|(sealed, now)| sealed == now),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                image.is_dir() && self.engine.validate(&image).is_ok()
+            }
+            Err(_) => false,
+        }
     }
 
-    fn checkpoint_timeout(&self, id: &str, timeout: Duration) -> Result<()> {
-        let published = self.cfg.work_dir.join("snapshots").join(id);
-        // Each attempt owns a directory: a timed-out sentry may still be writing.
-        let pending = self.pending_snapshots(id);
-        std::fs::create_dir_all(published.parent().unwrap())?;
-        if published.exists() {
-            let validation = self.validate_snapshot(&published);
-            if validation.is_ok() {
-                let running =
-                    match std::fs::read_to_string(self.cgroup_path(id).join("cgroup.procs")) {
-                        Ok(processes) => !processes.trim().is_empty(),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                        Err(error) => {
-                            return Err(error)
-                                .context("checking running state before retaining a checkpoint")
-                        }
-                    };
-                if !running {
-                    bail!(
-                        "refusing to overwrite checkpoint at {}",
-                        published.display()
-                    );
-                }
-            }
-            // A live sandbox may retain a valid image after restore cleanup failed.
-            // Preserve it (or a legacy failed attempt) until a newer image succeeds.
-            std::fs::create_dir_all(&pending)?;
-            let retained = pending.join(uuid::Uuid::new_v4().to_string());
-            snapshot::publish(&published, &retained).with_context(|| {
-                format!("retaining previous checkpoint {}", published.display())
-            })?;
-            self.validated_snapshots.lock().remove(&published);
-            if let Err(error) = validation {
-                tracing::warn!(%id, %error, path = %retained.display(), "retained invalid checkpoint before retrying");
+    /// Checkpoint `id` into `dest`, which must not exist yet. The backend
+    /// writes into a directory of the attempt's own beside `dest`; the image
+    /// is checked, sealed, and only then renamed into place. So `dest` is
+    /// either a whole image or absent, and a failed or timed-out checkpoint
+    /// never reads as a snapshot or a tag.
+    fn checkpoint_into(&self, id: &str, dest: &Path, compress: bool) -> Result<()> {
+        let attempt = clear_attempts(dest)?.join(format!(
+            "{}{}",
+            attempt_prefix(dest),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&attempt)?;
+        let done = (|| {
+            self.engine.checkpoint(id, &attempt, compress)?;
+            self.engine
+                .validate(&attempt)
+                .context("the checkpoint wrote an incomplete image")?;
+            seal(&attempt)?;
+            publish(&attempt, dest)
+        })();
+        if done.is_err() {
+            // A timed-out writer may still be in there; the next attempt or
+            // a destroy clears whatever this cannot.
+            if let Err(e) = std::fs::remove_dir_all(&attempt) {
+                tracing::warn!(%id, path = %attempt.display(), error = %e, "could not remove a failed checkpoint attempt");
             }
         }
-        std::fs::create_dir_all(&pending)?;
-        let image = pending.join(uuid::Uuid::new_v4().to_string());
-        std::fs::create_dir(&image)?;
-        let result = (|| {
-            let image_path = format!("--image-path={}", image.display());
-            let mut args = vec!["checkpoint", image_path.as_str()];
-            if self.cfg.compress_snapshots {
-                args.push("--compression=flate-best-speed");
-            }
-            args.push(id);
-            self.runsc_timeout(&args, timeout)
-                .with_context(|| format!("checkpointing {id}"))?;
-            self.validate_snapshot(&image)?;
-            self.record_checkpoint(&image)?;
-            // Do not replace even an empty pre-existing directory.
-            if published.exists() {
-                bail!(
-                    "checkpoint destination already exists: {}",
-                    published.display()
-                );
-            }
-            snapshot::publish(&image, &published)
-                .with_context(|| format!("publishing checkpoint to {}", published.display()))?;
-            Ok(())
-        })();
-        self.validated_snapshots.lock().remove(&image);
-        // Keep failed attempts and the bundle/layer: the sandbox may have stopped.
-        result.with_context(|| {
-            format!(
-                "checkpoint {id}; unpublished data retained under {}",
-                pending.display()
-            )
-        })?;
-        self.runsc(&["delete", "-force", id]).with_context(|| {
-            format!(
-                "deleting {id} after publishing checkpoint at {}",
-                published.display()
-            )
-        })?;
+        done
+    }
+
+    /// The image and every attempt at one.
+    fn drop_snapshot(&self, id: &str) {
+        let image = self.cfg.work_dir.join("snapshots").join(id);
+        std::fs::remove_dir_all(&image).ok();
+        clear_attempts(&image).ok();
+    }
+
+    fn checkpoint(&self, id: &str) -> Result<()> {
+        // Only a running sandbox is checkpointed, so an image already here
+        // is one it has moved on from: a restore that could not delete it.
+        let dir = self.cfg.work_dir.join("snapshots").join(id);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)
+                .with_context(|| format!("clearing the stale image at {}", dir.display()))?;
+        }
+        self.checkpoint_into(id, &dir, self.cfg.compress_snapshots)
+            .with_context(|| format!("checkpointing {id}"))?;
+        // The process is gone; the writable layer stays, which is why
+        // Snapshot frees memory but not disk.
+        self.engine.remove(id);
         self.release_net(id);
-        // A newer published image now supersedes earlier attempts, and delete
-        // has stopped their writer. Never discard them before both succeed.
-        std::fs::remove_dir_all(&pending).with_context(|| {
-            format!(
-                "cleaning superseded checkpoint attempts {}",
-                pending.display()
-            )
-        })?;
         tracing::info!(%id, "checkpointed");
         Ok(())
     }
@@ -1193,7 +1033,6 @@ impl Runtime {
     fn restore(&self, id: &str) -> Result<()> {
         let dir = self.cfg.work_dir.join("snapshots").join(id);
         let bundle = self.cfg.work_dir.join("bundles").join(id);
-        self.validate_snapshot(&dir)?;
         self.ensure_net(id)?;
         if !bundle.join("config.json").exists() {
             bail!(
@@ -1202,33 +1041,18 @@ impl Runtime {
                 bundle.display()
             );
         }
-        self.runsc_spawn(
-            id,
-            &[
-                "restore",
-                "--bundle",
-                &bundle.to_string_lossy(),
-                &format!("--image-path={}", dir.display()),
-                "--detach",
-                id,
-            ],
-        )
-        .with_context(|| format!("restoring {id}"))?;
-        self.accept_connections(id);
-        // A restart may have interrupted cleanup after publication. The successful
-        // restore supersedes those attempts too, before discarding its source image.
-        let pending = self.pending_snapshots(id);
-        if pending.exists() {
-            std::fs::remove_dir_all(&pending).with_context(|| {
-                format!(
-                    "cleaning restored checkpoint attempts {}",
-                    pending.display()
-                )
-            })?;
+        if !self.has_snapshot(id) {
+            bail!("{id} has no complete checkpoint at {}", dir.display());
         }
-        self.validated_snapshots.lock().remove(&dir);
-        std::fs::remove_dir_all(&dir)
-            .with_context(|| format!("cleaning restored checkpoint {}", dir.display()))?;
+        self.engine
+            .restore(id, &bundle, &dir)
+            .with_context(|| format!("restoring {id}"))?;
+        // Running now, so `observe` goes by the cgroup and a leftover image
+        // is harmless; the next checkpoint clears it.
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            tracing::warn!(%id, error = %e, "could not remove the image restored from");
+        }
+        self.accept_connections(id);
         tracing::info!(%id, "restored");
         Ok(())
     }
@@ -1238,13 +1062,13 @@ impl Runtime {
     /// per-file copies onto the volume, because the volume pays per file.
     fn detach(&self, id: &str) -> Result<()> {
         // Unmount first, then archive: by here the sandbox is checkpointed
-        // and gone, so nothing needs the overlay, and reading a live
-        // upperdir is best avoided.
-        bundle::unmount(&self.cfg, id)?;
+        // and gone, so nothing needs the layer, and reading a live one is
+        // best avoided.
+        self.engine.unmount(&self.cfg, id)?;
 
-        // Only the overlay upper dir: the lower is the shared template and
-        // would be the same bytes for every sandbox on the node.
-        let layer = self.cfg.work_dir.join("layers").join(id).join("upper");
+        // Only what this sandbox wrote: the template under it would be the
+        // same bytes for every sandbox on the node.
+        let layer = self.engine.layer(&self.cfg, id);
         let arc_dir = self.cfg.volume_root.join(id).join("_archive");
         std::fs::create_dir_all(&arc_dir)?;
         let arc = arc_dir.join("layer.tar.zst");
@@ -1252,7 +1076,7 @@ impl Runtime {
         let status = Exec::new("sh")
             .arg("-c")
             .arg(format!(
-                "tar -C {} -cf - . | zstd -3 -T0 -q -o {} -f",
+                "tar -S -C {} -cf - . | zstd -3 -T0 -q -o {} -f",
                 shell_quote(&layer.to_string_lossy()),
                 shell_quote(&arc.to_string_lossy())
             ))
@@ -1261,85 +1085,21 @@ impl Runtime {
         if !status.success() {
             bail!("archiving {id} failed with {status}");
         }
-        let image = self.cfg.work_dir.join("snapshots").join(id);
-        self.validated_snapshots.lock().remove(&image);
-        for path in [image, self.pending_snapshots(id)] {
-            if path.exists() {
-                std::fs::remove_dir_all(&path)
-                    .with_context(|| format!("cleaning archived checkpoint {}", path.display()))?;
-            }
-        }
+        self.drop_snapshot(id);
         // Unmount and drop the layer: detached means nothing local at all.
-        bundle::teardown(&self.cfg, id)?;
+        self.engine.teardown(&self.cfg, id)?;
         tracing::info!(%id, archive = %arc.display(), "detached");
         Ok(())
     }
 
-    /// Run a command inside a running sandbox.
-    ///
-    /// `.output()` is safe here, unlike for create: an exec'd command is
-    /// expected to finish and its output is the whole point. The timeout is
-    /// what protects us if it spawns something that holds the pipes open.
+    /// Run a command inside a running sandbox. See `Backend::exec`.
     pub fn exec(
         &self,
         id: &str,
         args: &[String],
         timeout: Duration,
     ) -> Result<(String, String, i64)> {
-        if args.is_empty() {
-            bail!("exec needs a command to run");
-        }
-        let tmp = self.cfg.work_dir.join("tmp");
-        std::fs::create_dir_all(&tmp)?;
-        let stem = format!("exec-{}-{}", id, std::process::id());
-        let (op, ep) = (
-            tmp.join(format!("{stem}.out")),
-            tmp.join(format!("{stem}.err")),
-        );
-        let (of, ef) = (std::fs::File::create(&op)?, std::fs::File::create(&ep)?);
-
-        let mut child = Exec::new(&self.cfg.runsc)
-            .arg("--root")
-            .arg(&self.cfg.runsc_root)
-            .arg("exec")
-            .arg(id)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(of)
-            .stderr(ef)
-            .spawn()
-            .with_context(|| format!("runsc exec {id}"))?;
-
-        let deadline = Instant::now() + timeout;
-        let mut timed_out = false;
-        let status = loop {
-            match child.try_wait()? {
-                Some(st) => break st,
-                None if Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    timed_out = true;
-                    break std::process::ExitStatus::default();
-                }
-                None => std::thread::sleep(Duration::from_millis(2)),
-            }
-        };
-
-        let stdout = std::fs::read_to_string(&op).unwrap_or_default();
-        let mut stderr = std::fs::read_to_string(&ep).unwrap_or_default();
-        std::fs::remove_file(&op).ok();
-        std::fs::remove_file(&ep).ok();
-
-        if timed_out {
-            // A timeout is reported as output, not as a transport error: the
-            // caller asked for a command's result and this IS the result.
-            stderr.push_str(&format!(
-                "\nsandstorm: killed after {}s\n",
-                timeout.as_secs()
-            ));
-            return Ok((stdout, stderr, 124));
-        }
-        Ok((stdout, stderr, status.code().unwrap_or(-1) as i64))
+        self.engine.exec(id, args, timeout)
     }
 
     pub fn destroy_with_net(&self, id: &str, net_index: Option<u32>) -> Result<()> {
@@ -1501,12 +1261,13 @@ impl Runtime {
         // this left gvisor_sentry processes that nothing could reap and that
         // went on holding their sandbox's port.
         let _ = self.freeze(id, false);
-        let _ = self.runsc(&["kill", id, "KILL"]);
-        let _ = self.runsc(&["delete", "-force", id]);
+        self.engine.kill(id);
+        self.engine.remove(id);
 
-        // Backstop: runsc's own kill path can leave the sentry running --
-        // certainly when runsc's state for the container is already gone.
-        // cgroup.kill takes the whole cgroup regardless of what runsc thinks.
+        // Backstop: the backend's own kill can leave something running --
+        // runsc's can leave the sentry, certainly when its state for the
+        // container is already gone. cgroup.kill takes the whole cgroup
+        // regardless of what the backend thinks.
         let cg = self.cgroup_path(id);
         if cg.exists() {
             if std::fs::write(cg.join("cgroup.kill"), "1").is_ok() {
@@ -1525,19 +1286,8 @@ impl Runtime {
             }
             std::fs::remove_dir(&cg).ok();
         }
-        let snapshots = self.cfg.work_dir.join("snapshots").join(id);
-        self.validated_snapshots.lock().remove(&snapshots);
-        for path in [snapshots, self.pending_snapshots(id)] {
-            match std::fs::remove_dir_all(&path) {
-                Ok(()) => (),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("removing checkpoint data {}", path.display()))
-                }
-            }
-        }
-        bundle::teardown(&self.cfg, id)?;
+        self.drop_snapshot(id);
+        self.engine.teardown(&self.cfg, id)?;
         // The archived layer is ours; the volume's /workspace is the user's
         // and is left alone.
         if let Some(d) = self.archive_path(id).parent() {
@@ -1558,19 +1308,10 @@ fn shell_quote(s: &str) -> String {
 /// (`killed by signal 11` after a restore that reported success), so a match
 /// is necessary and NOT sufficient. This gates placement; continuity across
 /// nodes comes from the volume, not from moving a snapshot.
-pub fn fingerprint() -> Result<String> {
-    let runsc_ver = Exec::new("runsc")
-        .arg("--version")
-        .output()
-        .ok()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .next()
-                .unwrap_or("")
-                .to_string()
-        })
-        .unwrap_or_default();
+///
+/// `engine_version` is `Backend::version`: an image is only as portable as
+/// the engine that wrote it.
+pub fn fingerprint(engine_version: &str) -> String {
     let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
     let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
     let flags = cpuinfo
@@ -1585,11 +1326,11 @@ pub fn fingerprint() -> Result<String> {
         .to_string();
 
     let mut h = 0xcbf29ce484222325u64;
-    for b in format!("{runsc_ver}|{}|{vendor}|{flags}", kernel.trim()).bytes() {
+    for b in format!("{engine_version}|{}|{vendor}|{flags}", kernel.trim()).bytes() {
         h ^= b as u64;
         h = h.wrapping_mul(0x100000001b3);
     }
-    Ok(format!("{h:016x}"))
+    format!("{h:016x}")
 }
 
 /// Free memory and the 10-second "some" memory-pressure average.
@@ -1698,24 +1439,23 @@ mod tests {
 
     #[test]
     fn fingerprint_is_stable_within_a_host() {
-        let a = fingerprint().unwrap();
-        let b = fingerprint().unwrap();
+        let a = fingerprint("runsc version release-20261019.0");
+        let b = fingerprint("runsc version release-20261019.0");
         assert_eq!(a, b);
         assert_eq!(a.len(), 16);
+        // An image is only as portable as the engine that wrote it.
+        assert_ne!(a, fingerprint("runsc version release-20261026.0"));
     }
 
     /// Demotion must never skip a tier; the master walks one step per sweep.
     #[test]
     fn no_direct_hot_to_detached() {
-        let rt = Runtime {
-            validated_snapshots: Default::default(),
-            cgroup_root: None,
-            cfg: RuntimeConfig {
-                work_dir: std::env::temp_dir().join("sandstorm-rt-test"),
-                volume_root: std::env::temp_dir().join("sandstorm-rt-test/vol"),
-                ..Default::default()
-            },
-        };
+        let rt = Runtime::new(RuntimeConfig {
+            work_dir: std::env::temp_dir().join("sandstorm-rt-test"),
+            volume_root: std::env::temp_dir().join("sandstorm-rt-test/vol"),
+            ..Default::default()
+        })
+        .unwrap();
         // observe() finds nothing for an unknown id, so this reports the
         // more basic error first; the transition table itself is asserted
         // by the match arms being exhaustive.
@@ -1725,22 +1465,261 @@ mod tests {
 }
 
 #[cfg(test)]
+mod backend_tests {
+    use super::*;
+    use parking_lot::Mutex;
+    use tempfile::TempDir;
+
+    /// Records what it was asked to do, and writes an image so a checkpoint
+    /// leaves something behind -- unless `.1` is set, when it writes nothing
+    /// and still reports success, as a checkpoint that went wrong quietly.
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<String>>, std::sync::atomic::AtomicBool);
+
+    impl Recorder {
+        fn log(&self, s: String) {
+            self.0.lock().push(s);
+        }
+    }
+
+    impl Backend for Recorder {
+        fn version(&self) -> String {
+            "recorder 1".into()
+        }
+        fn template_root(&self, dir: &Path) -> PathBuf {
+            dir.join("rootfs")
+        }
+        fn prepare(&self, cfg: &RuntimeConfig, req: &bundle::BuildRequest<'_>) -> Result<PathBuf> {
+            let b = cfg.work_dir.join("bundles").join(req.id);
+            std::fs::create_dir_all(&b)?;
+            std::fs::write(b.join("config.json"), "{}")?;
+            self.log(format!("prepare {}", req.id));
+            Ok(b)
+        }
+        fn layer(&self, cfg: &RuntimeConfig, id: &str) -> PathBuf {
+            cfg.work_dir.join("layers").join(id)
+        }
+        fn unmount(&self, _: &RuntimeConfig, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn teardown(&self, cfg: &RuntimeConfig, id: &str) -> Result<()> {
+            std::fs::remove_dir_all(cfg.work_dir.join("bundles").join(id)).ok();
+            Ok(())
+        }
+        fn boot(&self, id: &str, _: &Path) -> Result<()> {
+            self.log(format!("boot {id}"));
+            Ok(())
+        }
+        fn restore(&self, id: &str, _: &Path, image: &Path) -> Result<()> {
+            self.log(format!(
+                "restore {id} {}",
+                image.file_name().unwrap().to_string_lossy()
+            ));
+            Ok(())
+        }
+        fn checkpoint(&self, id: &str, image: &Path, compress: bool) -> Result<()> {
+            // The attempt directory's name is random, so it is not logged.
+            if !self.1.load(std::sync::atomic::Ordering::Relaxed) {
+                std::fs::write(image.join("checkpoint.img"), b"pages")?;
+            }
+            self.log(format!("checkpoint {id} {compress}"));
+            Ok(())
+        }
+        fn validate(&self, image: &Path) -> Result<()> {
+            if !image.join("checkpoint.img").is_file() {
+                bail!("no checkpoint.img");
+            }
+            Ok(())
+        }
+        fn remove(&self, id: &str) {
+            self.log(format!("remove {id}"));
+        }
+        fn kill(&self, id: &str) {
+            self.log(format!("kill {id}"));
+        }
+        fn exec(&self, id: &str, args: &[String], _: Duration) -> Result<(String, String, i64)> {
+            self.log(format!("exec {id} {}", args.join(" ")));
+            Ok((String::new(), String::new(), 0))
+        }
+    }
+
+    /// Branching is the one sequence that must come out in this order: the
+    /// parent is stopped by its own checkpoint and put back from the image
+    /// it just wrote, uncompressed whatever the node's setting, since every
+    /// fork restores from it.
+    #[test]
+    fn a_branch_checkpoints_removes_and_restores_the_parent_from_the_tag() {
+        let dir = TempDir::new().unwrap();
+        let rec = Arc::new(Recorder::default());
+        let rt = Runtime::with_backend(
+            RuntimeConfig {
+                work_dir: dir.path().to_path_buf(),
+                volume_root: dir.path().join("volumes"),
+                compress_snapshots: true,
+                ..Default::default()
+            },
+            rec.clone(),
+        )
+        .unwrap();
+        let bundle = dir.path().join("bundles").join("sb1");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("config.json"), "{}").unwrap();
+
+        // The image and its seal.
+        let size = rt.branch("sb1", "t1").unwrap();
+        assert_eq!(size, dir_size(&dir.path().join("tags/t1")));
+        assert!(size > 5);
+        assert_eq!(
+            *rec.0.lock(),
+            ["checkpoint sb1 false", "remove sb1", "restore sb1 t1"]
+        );
+        // A tag that exists is never overwritten.
+        assert!(rt.branch("sb1", "t1").is_err());
+    }
+
+    fn rec_rt(dir: &Path) -> (Arc<Recorder>, Runtime) {
+        let rec = Arc::new(Recorder::default());
+        let rt = Runtime::with_backend(
+            RuntimeConfig {
+                work_dir: dir.to_path_buf(),
+                volume_root: dir.join("volumes"),
+                ..Default::default()
+            },
+            rec.clone(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("bundles/sb1")).unwrap();
+        std::fs::write(dir.join("bundles/sb1/config.json"), "{}").unwrap();
+        (rec, rt)
+    }
+
+    /// A checkpoint that reports success but leaves no usable image is not
+    /// published: no snapshot, no attempt left over, and the sandbox is not
+    /// stopped or reported as Snapshot, so the master can try again.
+    #[test]
+    fn a_checkpoint_without_an_image_is_not_a_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let (rec, rt) = rec_rt(dir.path());
+        rec.1.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(rt.checkpoint("sb1").is_err());
+        assert_eq!(*rec.0.lock(), ["checkpoint sb1 false"]);
+        let snapshots = dir.path().join("snapshots");
+        assert_eq!(std::fs::read_dir(&snapshots).unwrap().count(), 0);
+        assert!(!rt.has_snapshot("sb1"));
+        assert!(rt.observe().unwrap().is_empty());
+
+        // The next attempt goes through, and replaces nothing.
+        rec.1.store(false, std::sync::atomic::Ordering::Relaxed);
+        rt.checkpoint("sb1").unwrap();
+        assert!(rt.has_snapshot("sb1"));
+        let names: Vec<_> = std::fs::read_dir(&snapshots)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names, ["sb1"]);
+    }
+
+    /// A sealed image whose files have changed since is not one this node
+    /// finished; a tag the backend later adds a dot-named cache to still is.
+    #[test]
+    fn a_sealed_image_must_still_match_its_seal() {
+        let dir = TempDir::new().unwrap();
+        let (_, rt) = rec_rt(dir.path());
+        rt.checkpoint("sb1").unwrap();
+        let image = dir.path().join("snapshots/sb1");
+        std::fs::write(image.join(".mem.assembled"), b"cache").unwrap();
+        assert!(rt.has_snapshot("sb1"));
+        std::fs::write(image.join("checkpoint.img"), b"pag").unwrap();
+        assert!(!rt.has_snapshot("sb1"));
+        let err = rt.restore("sb1").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no complete checkpoint"),
+            "{err:#}"
+        );
+    }
+
+    /// Images from before sealing are judged by the backend.
+    #[test]
+    fn an_unsealed_image_is_judged_by_the_backend() {
+        let dir = TempDir::new().unwrap();
+        let (_, rt) = rec_rt(dir.path());
+        let image = dir.path().join("snapshots/sb1");
+        std::fs::create_dir_all(&image).unwrap();
+        assert!(!rt.has_snapshot("sb1"));
+        std::fs::write(image.join("checkpoint.img"), b"pages").unwrap();
+        assert!(rt.has_snapshot("sb1"));
+    }
+
+    #[test]
+    fn the_fingerprint_follows_the_backend() {
+        let dir = TempDir::new().unwrap();
+        let cfg = RuntimeConfig {
+            work_dir: dir.path().to_path_buf(),
+            volume_root: dir.path().join("volumes"),
+            ..Default::default()
+        };
+        let rt = Runtime::with_backend(cfg, Arc::new(Recorder::default())).unwrap();
+        assert_eq!(rt.fingerprint(), fingerprint("recorder 1"));
+    }
+}
+
+#[cfg(test)]
 mod observe_tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// An image the runsc backend's `validate` accepts: the statefile header,
+    /// its metadata, and a byte past it.
+    pub(super) fn fake_statefile(image: &Path) {
+        std::fs::create_dir_all(image).unwrap();
+        let meta = b"{}";
+        let mut f = b"gVisorSF".to_vec();
+        f.extend((meta.len() as u64).to_be_bytes());
+        f.extend(meta);
+        f.push(0);
+        std::fs::write(image.join("checkpoint.img"), f).unwrap();
+    }
+
+    /// The directory a failed checkpoint used to leave behind.
+    #[test]
+    fn an_empty_image_directory_is_not_a_snapshot() {
+        let td = TempDir::new().unwrap();
+        std::fs::create_dir_all(td.path().join("bundles/sb1")).unwrap();
+        std::fs::create_dir_all(td.path().join("snapshots/sb1")).unwrap();
+        assert!(rt(td.path()).observe().unwrap().is_empty());
+    }
+
+    /// A split image without its pages, and a statefile cut short.
+    #[test]
+    fn runsc_rejects_an_incomplete_image() {
+        let td = TempDir::new().unwrap();
+        let image = td.path().join("img");
+        fake_statefile(&image);
+        let runsc = Runsc {
+            bin: "runsc".into(),
+            root: td.path().to_path_buf(),
+            work_dir: td.path().to_path_buf(),
+        };
+        runsc.validate(&image).unwrap();
+        std::fs::write(image.join("pages_meta.img"), b"m").unwrap();
+        assert!(runsc.validate(&image).is_err());
+        std::fs::write(image.join("pages.img"), b"").unwrap();
+        runsc.validate(&image).unwrap();
+        std::fs::write(
+            image.join("checkpoint.img"),
+            b"gVisorSF\0\0\0\0\0\0\0\x09{}",
+        )
+        .unwrap();
+        assert!(runsc.validate(&image).is_err());
+    }
+
     fn rt(work: &std::path::Path) -> Runtime {
-        Runtime {
-            validated_snapshots: Default::default(),
-            cgroup_root: None,
-            cfg: RuntimeConfig {
-                runsc: work.join("fake-runsc").to_string_lossy().into_owned(),
-                runsc_root: work.to_path_buf(),
-                work_dir: work.to_path_buf(),
-                volume_root: work.join("volumes"),
-                ..Default::default()
-            },
-        }
+        Runtime::new(RuntimeConfig {
+            work_dir: work.to_path_buf(),
+            volume_root: work.join("volumes"),
+            ..Default::default()
+        })
+        .unwrap()
     }
 
     #[test]
@@ -1758,13 +1737,13 @@ mod observe_tests {
         assert!(rt(td.path()).observe().unwrap().is_empty());
     }
 
-    /// Snapshot validation is offline and does not require a live cgroup.
+    /// Snapshot is read from the filesystem, so it needs no runsc and no
+    /// cgroup -- which is what makes it observable at all.
     #[test]
-    #[cfg(target_os = "linux")]
     fn a_checkpointed_sandbox_is_observed_as_snapshot() {
         let td = TempDir::new().unwrap();
         std::fs::create_dir_all(td.path().join("bundles/sb1")).unwrap();
-        checkpoint_tests::fixture(td.path(), &td.path().join("snapshots/sb1"));
+        fake_statefile(&td.path().join("snapshots/sb1"));
         let got = rt(td.path()).observe().unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].tier, Tier::Snapshot);
@@ -1780,17 +1759,101 @@ mod observe_tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
     fn only_our_own_bundles_can_ever_be_seen() {
         let td = TempDir::new().unwrap();
         // Another deployment's bundle, in a sibling directory.
         std::fs::create_dir_all(td.path().join("../other/bundles/theirs")).ok();
         std::fs::create_dir_all(td.path().join("bundles/ours")).unwrap();
-        checkpoint_tests::fixture(td.path(), &td.path().join("snapshots/ours"));
+        fake_statefile(&td.path().join("snapshots/ours"));
         let got = rt(td.path()).observe().unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, "ours");
     }
+}
+
+/// Written into an image last, before it is published: the length of every
+/// file the backend wrote. A dot name, so tag listings and transfers skip
+/// it, as they skip the backend's own caches (`.mem.assembled`).
+///
+/// It catches a checkpoint that failed, not a power cut: nothing here is
+/// fsynced, since syncing the whole image would put its every byte on the
+/// snapshot tier's critical path.
+const SEAL: &str = ".sealed";
+
+/// The files of an image and their lengths, leaving out dot names.
+fn image_files(image: &Path) -> Result<BTreeMap<String, u64>> {
+    let mut files = BTreeMap::new();
+    for e in std::fs::read_dir(image)? {
+        let e = e?;
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !name.starts_with('.') && e.file_type()?.is_file() {
+            files.insert(name, e.metadata()?.len());
+        }
+    }
+    Ok(files)
+}
+
+fn seal(image: &Path) -> Result<()> {
+    std::fs::write(image.join(SEAL), serde_json::to_vec(&image_files(image)?)?)
+        .context("sealing the checkpoint")
+}
+
+/// `.<name>.attempt-`: attempts at `dest` sit beside it under dot names,
+/// on the same filesystem, so publishing one is a rename.
+fn attempt_prefix(dest: &Path) -> String {
+    format!(
+        ".{}.attempt-",
+        dest.file_name().unwrap_or_default().to_string_lossy()
+    )
+}
+
+/// Remove earlier attempts at `dest`, returning the directory they were in.
+fn clear_attempts(dest: &Path) -> Result<&Path> {
+    let parent = dest.parent().context("an image path has a parent")?;
+    std::fs::create_dir_all(parent)?;
+    let prefix = attempt_prefix(dest);
+    for e in std::fs::read_dir(parent)?.flatten() {
+        if e.file_name().to_string_lossy().starts_with(&prefix) {
+            std::fs::remove_dir_all(e.path()).ok();
+        }
+    }
+    Ok(parent)
+}
+
+/// Rename `from` to `to` unless `to` exists. `renameat2(RENAME_NOREPLACE)`
+/// makes that one step where the filesystem supports it; elsewhere the
+/// check and the rename are two, which holds because one sandbox's
+/// transitions never run at once.
+fn publish(from: &Path, to: &Path) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let (f, t) = (
+            std::ffi::CString::new(from.as_os_str().as_bytes())?,
+            std::ffi::CString::new(to.as_os_str().as_bytes())?,
+        );
+        // SAFETY: both strings outlive the call, which keeps no pointer.
+        let r = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                f.as_ptr(),
+                libc::AT_FDCWD,
+                t.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if r == 0 {
+            return Ok(());
+        }
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::EINVAL) {
+            return Err(e).with_context(|| format!("publishing {}", to.display()));
+        }
+    }
+    if to.exists() {
+        bail!("{} already exists", to.display());
+    }
+    std::fs::rename(from, to).with_context(|| format!("publishing {}", to.display()))
 }
 
 fn dir_size(p: &std::path::Path) -> u64 {
@@ -1808,29 +1871,23 @@ mod warm_tests {
     use super::*;
 
     fn rt(work: &Path) -> Runtime {
-        Runtime {
-            validated_snapshots: Default::default(),
-            cgroup_root: None,
-            cfg: RuntimeConfig {
-                runsc: work.join("fake-runsc").to_string_lossy().into_owned(),
-                runsc_root: work.to_path_buf(),
-                work_dir: work.to_path_buf(),
-                volume_root: work.join("volumes"),
-                ..Default::default()
-            },
-        }
+        Runtime::new(RuntimeConfig {
+            work_dir: work.to_path_buf(),
+            volume_root: work.join("volumes"),
+            ..Default::default()
+        })
+        .unwrap()
     }
 
     /// A seed is the node's own business: reporting it would have the
     /// master destroy it as an orphan halfway through being imaged.
     #[test]
-    #[cfg(target_os = "linux")]
     fn a_seed_is_never_reported() {
         let dir = tempfile::tempdir().unwrap();
         let rt = rt(dir.path());
         for id in ["sb-real", "sandstorm-warm-abc123"] {
             std::fs::create_dir_all(dir.path().join("bundles").join(id)).unwrap();
-            checkpoint_tests::fixture(dir.path(), &dir.path().join("snapshots").join(id));
+            super::observe_tests::fake_statefile(&dir.path().join("snapshots").join(id));
         }
         let ids: Vec<String> = rt.observe().unwrap().into_iter().map(|o| o.id).collect();
         assert_eq!(ids, vec!["sb-real".to_string()]);
@@ -1886,29 +1943,3 @@ mod warm_tests {
         );
     }
 }
-
-#[cfg(test)]
-mod checkpoint_regression_tests {
-    use super::*;
-
-    #[test]
-    fn an_empty_checkpoint_directory_is_not_a_snapshot() {
-        let work = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(work.path().join("bundles/sb1")).unwrap();
-        std::fs::create_dir_all(work.path().join("snapshots/sb1")).unwrap();
-        let runtime = Runtime::new(RuntimeConfig {
-            work_dir: work.path().to_path_buf(),
-            volume_root: work.path().join("volumes"),
-            ..Default::default()
-        })
-        .unwrap();
-        assert!(runtime.observe().unwrap().is_empty());
-    }
-}
-
-#[path = "snapshot.rs"]
-mod snapshot;
-
-#[cfg(all(test, target_os = "linux"))]
-#[path = "checkpoint_tests.rs"]
-mod checkpoint_tests;

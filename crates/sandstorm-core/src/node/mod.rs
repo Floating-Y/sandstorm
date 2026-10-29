@@ -11,7 +11,9 @@
 //!   installed only needs to be pointed at.
 
 mod agent;
+mod backend;
 mod bundle;
+mod firecracker;
 mod gateway;
 mod host;
 mod net;
@@ -21,14 +23,15 @@ mod tags;
 mod wake;
 
 pub use agent::{serve_listen, Identity as AgentIdentity};
+pub use backend::{Backend, Runsc};
 pub use bundle::TemplateSpec;
-pub use gateway::{Exposed, Gateway};
+pub use gateway::{Exposed, Gateway, PORT_HEADER};
 pub use host::{
     bootstrap_compressed_swap, compressed_swap, decide_compression, decide_reclaim, pin_in_zswap,
     Lever,
 };
 pub use net::NetConfig;
-pub use runtime::{Runtime, RuntimeConfig, WARM_SEED_PREFIX};
+pub use runtime::{BackendKind, Runtime, RuntimeConfig, WARM_SEED_PREFIX};
 pub use tags::Fetches;
 pub use wake::Wakeups;
 
@@ -372,6 +375,9 @@ fn evict_one(rt: &Runtime, wake: &Wakeups, except: &str) -> Result<bool> {
 
 pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
     std::fs::create_dir_all(&cfg.pki_dir)?;
+    // First, because registering reports the backend's fingerprint. This
+    // only makes directories; no sandbox is touched until the rules below.
+    let rt = Runtime::new(cfg.runtime.clone())?;
     let cert_path = cfg.pki_dir.join("client.pem");
     let key_path = cfg.pki_dir.join("client-key.pem");
     let api_token_path = cfg.pki_dir.join("api-token");
@@ -383,7 +389,7 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
                  get one from the master with `sandstorm node-token create`"
             );
         };
-        let learned = register(&cfg, token, &cert_path, &key_path).await?;
+        let learned = register(&cfg, token, &rt.fingerprint(), &cert_path, &key_path).await?;
         if cfg.api_token.is_none() && !learned.is_empty() {
             write_private(&api_token_path, &learned)?;
             cfg.api_token = Some(learned);
@@ -405,7 +411,6 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
     // answer on the veth too.
     net::install_rules(&cfg.runtime.net).context("installing the sandbox network rules")?;
 
-    let rt = Runtime::new(cfg.runtime.clone())?;
     tags::clear_partial(&rt.tags_dir());
     // Adoption, not reconciliation: whatever is already running here is
     // reported as observed and kept. Measured on bm, a kill -9 of the
@@ -577,13 +582,14 @@ async fn report_wakes(
 async fn register(
     cfg: &NodeConfig,
     token: &str,
+    fingerprint: &str,
     cert_path: &PathBuf,
     key_path: &PathBuf,
 ) -> Result<String> {
     let req = RegisterRequest {
         token: token.to_string(),
         node_id: cfg.node_id.clone(),
-        fingerprint: runtime::fingerprint()?,
+        fingerprint: fingerprint.to_string(),
         max_sandboxes: cfg.runtime.max_sandboxes,
     };
     let url = format!("{}/v1/node/register", cfg.master_url.trim_end_matches('/'));
@@ -1262,18 +1268,28 @@ mod wake_tests {
     }
 
     /// A bundle with nothing running and no snapshot is dead once it is old
-    /// enough; one on disk, a warm seed, or a young one is not.
+    /// enough; one on disk, a warm seed, or a young one is not. An empty
+    /// image directory, which a failed checkpoint used to leave, is no
+    /// snapshot, so its sandbox is dead too.
     #[test]
     fn a_sandbox_that_died_is_found() {
         let dir = tempfile::tempdir().unwrap();
         let (cfg, rt) = node(dir.path());
         let bundles = cfg.runtime.work_dir.join("bundles");
         let seed = format!("{}py", runtime::WARM_SEED_PREFIX);
-        for id in ["sb-dead", "sb-on-disk", seed.as_str()] {
+        for id in ["sb-dead", "sb-on-disk", "sb-empty-image", seed.as_str()] {
             std::fs::create_dir_all(bundles.join(id)).unwrap();
         }
-        std::fs::create_dir_all(cfg.runtime.work_dir.join("snapshots").join("sb-on-disk")).unwrap();
-        assert_eq!(rt.dead(Duration::ZERO), ["sb-dead"]);
+        let snapshots = cfg.runtime.work_dir.join("snapshots");
+        std::fs::create_dir_all(snapshots.join("sb-on-disk")).unwrap();
+        let mut statefile = b"gVisorSF".to_vec();
+        statefile.extend(2u64.to_be_bytes());
+        statefile.extend(b"{}\0");
+        std::fs::write(snapshots.join("sb-on-disk/checkpoint.img"), statefile).unwrap();
+        std::fs::create_dir_all(snapshots.join("sb-empty-image")).unwrap();
+        let mut dead = rt.dead(Duration::ZERO);
+        dead.sort();
+        assert_eq!(dead, ["sb-dead", "sb-empty-image"]);
         assert!(
             rt.dead(Duration::from_secs(3600)).is_empty(),
             "too young to call dead"
