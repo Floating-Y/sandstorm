@@ -785,7 +785,7 @@ mod tests {
     async fn a_streamed_answer_stays_protected_after_headers_and_releases_on_finish_or_cancel() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 28473u16))
+        let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 28481u16))
             .await
             .unwrap();
         let (release_first, first_released) = tokio::sync::oneshot::channel::<()>();
@@ -806,19 +806,19 @@ mod tests {
 
         let wake = Arc::new(Wakeups::new(|_, _, _| Ok(())));
         let mut gateway = Gateway::waking(wake.clone());
-        let mut exposed = spec("sb-stream", 28472);
+        let mut exposed = spec("sb-stream", 28480);
         exposed.sandbox_ip = "127.0.0.1".parse().unwrap();
-        exposed.sandbox_port = 28473;
+        exposed.sandbox_port = 28481;
         gateway.reconcile(&[exposed]).await;
 
-        let first = get(28472).await;
+        let first = get(28480).await;
         assert_eq!(first.status(), 200);
         assert!(wake.protected("sb-stream", std::time::Instant::now()));
         release_first.send(()).unwrap();
         assert_eq!(first.text().await.unwrap(), "hi");
         assert!(!wake.protected("sb-stream", std::time::Instant::now()));
 
-        let second = get(28472).await;
+        let second = get(28480).await;
         assert_eq!(second.status(), 200);
         assert!(wake.protected("sb-stream", std::time::Instant::now()));
         drop(second);
