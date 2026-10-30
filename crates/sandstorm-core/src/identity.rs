@@ -112,10 +112,12 @@ impl Ca {
             });
         }
 
-        // The CLI creates api-token before starting the master on its first run.
+        // The CLI creates api-token before starting the master on its first
+        // run, and a node on this machine keeps its own PKI in node/.
         for entry in std::fs::read_dir(&dir)? {
+            let name = entry?.file_name();
             ensure!(
-                entry?.file_name() == "api-token",
+                name == "api-token" || name == "node",
                 "CA files are missing from an existing PKI directory"
             );
         }
@@ -266,6 +268,15 @@ mod tests {
             std::fs::read_to_string(td.path().join("api-token")).unwrap(),
             "existing API token"
         );
+    }
+
+    #[test]
+    fn first_start_can_follow_this_machines_node() {
+        // `--master --node` starts both at once, and the node's PKI lives
+        // inside the master's.
+        let td = TempDir::new().unwrap();
+        std::fs::create_dir(td.path().join("node")).unwrap();
+        Ca::open_or_create(td.path()).unwrap();
     }
 
     #[test]
