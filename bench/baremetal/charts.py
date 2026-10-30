@@ -1,48 +1,46 @@
 #!/usr/bin/env python3
-"""Draw the bare-metal comparison charts from a results directory.
+"""Draw the README's figure from a results directory.
 
+    python3 -m pip install seaborn matplotlib
     python3 bench/baremetal/charts.py bench/baremetal/results/2026-10-30 docs/assets/charts
 
-The same drawing code and palette as bench/fleet/charts.py, and the same
-rule: every chart in `-light.svg` and `-dark.svg`, and a chart whose data
-is missing is skipped, not faked. Each runtime's figure is its last row in
-the directory, so a re-run supersedes the one before it.
+Written as `compare-light.svg` and `compare-dark.svg`, its text as paths so it
+looks the same on any machine, and skipped, not faked, if its data is missing.
+Each runtime's figure is its last row in the directory, so a re-run supersedes
+the one before it. Its notes are the README's caption, not part of the image.
 """
 
 import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "fleet"))
-from charts import THEMES, W, Chart  # noqa: E402
+import matplotlib
 
-# Shown in this order, top to bottom; Sandstorm's rows in bold.
-STARTS = [
-    ("sandstorm-fc-warm", "Sandstorm, Firecracker, warm", True),
-    ("cubesandbox", "CubeSandbox", False),
-    ("sandstorm-gvisor-warm", "Sandstorm, gVisor, warm", True),
-    ("sandstorm-gvisor", "Sandstorm, gVisor", True),
-    ("runc", "Docker (runc)", False),
-    ("runsc", "Docker + gVisor", False),
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import seaborn as sns  # noqa: E402
+from matplotlib.ticker import FuncFormatter  # noqa: E402
+
+# Each runtime's name in the figure, and whether it is Sandstorm.
+ROWS = [
+    ("sandstorm-fc-warm", "Sandstorm FC warm", True),
+    ("sandstorm-fc", "Sandstorm FC cold", True),
+    ("sandstorm-gvisor-warm", "Sandstorm gVisor warm", True),
+    ("sandstorm-gvisor", "Sandstorm gVisor cold", True),
+    ("cubesandbox", "Cube warm", False),
+    ("cubesandbox-cold", "Cube cold", False),
     ("microsandbox", "microsandbox", False),
-    ("kata", "Kata (QEMU)", False),
-]
-# The fleet's 2-core, 2 GB nodes: no KVM, so gVisor and containers only.
-FLEET_STARTS = [
-    ("sandstorm-gvisor-warm", "Sandstorm, warm template", True),
-    ("sandstorm-gvisor", "Sandstorm", True),
-    ("process", "Plain process, no isolation", False),
-    ("bwrap", "bubblewrap", False),
-    ("podman", "Podman (crun)", False),
-    ("runc", "Docker (runc)", False),
+    ("kata", "Kata", False),
     ("runsc", "Docker + gVisor", False),
+    ("runc", "Docker", False),
+    ("podman", "Podman", False),
+    ("bwrap", "bubblewrap", False),
+    ("process", "Process", False),
 ]
-CLONES = [
-    ("sandstorm-fc", "Sandstorm, Firecracker"),
-    ("cubesandbox", "CubeSandbox"),
-    ("microsandbox", "microsandbox"),
-    ("sandstorm-gvisor", "Sandstorm, gVisor"),
-]
+THEMES = {
+    "light": {"bg": "#ffffff", "ink": "#24292f", "muted": "#6e7781", "grid": "#e6e6e6", "rest": "#b8bcc2", "ours": "#4c72b0", "first": "#d39b12"},
+    "dark": {"bg": "#0d1117", "ink": "#d7dde3", "muted": "#8b949e", "grid": "#21262d", "rest": "#3d444d", "ours": "#3f7fd0", "first": "#d9a93a"},
+}
 
 
 def rows(src):
@@ -65,10 +63,10 @@ def summaries(src):
     return out
 
 
-def fleet_summaries(src):
+def fleet_summaries(src, sub="fleet"):
     """The same, the median across nodes: one file per node in `fleet/`."""
     per = {}
-    for f in sorted((src / "fleet").glob("*.jsonl")):
+    for f in sorted((src / sub).glob("*.jsonl")):
         for rt, apps in summaries_of(f).items():
             for app, (st, mem) in apps.items():
                 per.setdefault(rt, {}).setdefault(app, ([], []))
@@ -78,7 +76,7 @@ def fleet_summaries(src):
                     per[rt][app][1].append(mem)
     med = lambda xs: sorted(xs)[len(xs) // 2] if len(xs) % 2 else sum(sorted(xs)[len(xs) // 2 - 1:len(xs) // 2 + 1]) / 2 if xs else None
     return {rt: {app: (med(a), med(b)) for app, (a, b) in apps.items()} for rt, apps in per.items()}, \
-        len(list((src / "fleet").glob("*.jsonl")))
+        len(list((src / sub).glob("*.jsonl")))
 
 
 def summaries_of(f):
@@ -94,135 +92,85 @@ def summaries_of(f):
 
 
 def clones(src):
-    """runtime -> [clone 1, 10, 20] in ms, until every child answers. For
-    Sandstorm a branch then one fork call, so the snapshot plus the fork."""
+    """runtime -> (snapshot, [clone 1, 10, 20]) in ms, until every child
+    answers. For Sandstorm a branch then one fork call, so their sum."""
     out = {}
     for r in rows(src):
         if r.get("kind") != "fork":
             continue
+        s = r.get("snapshot_ms", 0)
         if "clone1_ms" in r:
-            out[r["runtime"]] = [r["clone1_ms"], r["clone10_wall_ms"], r["clone20_wall_ms"]]
+            out[r["runtime"]] = (s, [r["clone1_ms"], r["clone10_wall_ms"], r["clone20_wall_ms"]])
         else:
-            s = r.get("snapshot_ms", 0)
-            out[r["runtime"]] = [s + r["fork1_ms"], s + r["fork10_wall_ms"], s + r["fork20_wall_ms"]]
+            out[r["runtime"]] = (s, [s + r["fork1_ms"], s + r["fork10_wall_ms"], s + r["fork20_wall_ms"]])
     return out
 
 
-def hbars(c, x0, x1, y0, items, lo, hi, fmt, ticks):
-    """Log-scale horizontal bars between x0 and x1, one per row."""
-    import math
-    t = c.t
-    a, b = math.log10(lo), math.log10(hi)
-    sx = lambda v: x0 + (x1 - x0) * (math.log10(max(v, lo)) - a) / (b - a)
-    yb = y0 + 34 * len(items)
-    for v in ticks:
-        X = sx(v)
-        c.out.append(f'<line x1="{X:.1f}" x2="{X:.1f}" y1="{y0}" y2="{yb}" stroke="{t["axis"] if v == ticks[0] else t["grid"]}"/>')
-        c.text(X, yb + 18, fmt(v), anchor="middle")
-    for i, (v, colour) in enumerate(items):
-        if v is None:
-            continue
-        y = y0 + 8 + i * 34
-        w = sx(v) - x0
-        c.out.append(f'<rect x="{x0}" y="{y + 3}" width="{w:.1f}" height="18" rx="4" fill="{colour}"/>')
-        c.text(sx(v) + 6, y + 16, fmt(v), colour=t["ink"], weight=600)
-
-
-def start(src, theme):
-    """Start to first answer and memory per instance for app64, side by
-    side, one row per runtime. Two plots, not two axes on one: they are
-    different measures."""
-    return start_chart(summaries(src), STARTS, theme, "The 64 MiB app on one KVM machine",
-                       "2 × Xeon E5-2637 v2, 31 GB. Start: p50 of 20, one at a time. Memory: 100 kept running. Log scales.",
-                       "Start time and memory per instance of a 64 MiB app, by runtime, on one KVM machine",
-                       [("Start to first answer", "app64", 0, (30, 10000), MS, [30, 100, 1000, 10000]),
-                        ("Memory per instance", "app64", 1, (5, 500), lambda v: f"{v:.0f}" + (" MiB" if v >= 300 else ""), [5, 10, 100, 500])])
-
-
-def fleet(src, theme):
-    """The same chart on the fleet's 2-core, 2 GB nodes, the median node."""
-    s, nodes = fleet_summaries(src)
-    if not nodes:
-        return None
-    return start_chart(s, FLEET_STARTS, theme, "Start to first answer on 2-core, 2 GB cloud machines",
-                       f"No KVM. p50 of 20 started one at a time, then the median of {nodes} nodes. Log scales.",
-                       "Start to first answer of a web server and a 64 MiB app, by runtime, on 2-core, 2 GB machines",
-                       [("Python web server", "web", 0, (30, 3000), MS, [30, 100, 1000, 3000]),
-                        ("64 MiB app", "app64", 0, (30, 3000), MS, [30, 100, 1000, 3000])])
-
-
 MS = lambda v: f"{v / 1000:.1f} s" if v >= 1000 else f"{v:.0f} ms"
+MIB = lambda v: f"{v:.0f} MiB"
+TICK = lambda v, _: f"{v / 1000:g}k" if v >= 1000 else f"{v:g}"
 
 
-def start_chart(s, order, theme, title, subtitle, label, panels):
-    """One row per runtime, labelled once, and a log-scale bar plot per
-    panel: (heading, app, 0 for start or 1 for memory, range, format, ticks)."""
-    shown = [(k, name, ours) for k, name, ours in order if panels[0][1] in s.get(k, {})]
-    if len(shown) < 2:
-        return None
-    t = THEMES[theme]
-    colour = lambda k, ours: t["series"][0] if k == "sandstorm-fc-warm" else t["series"][2] if ours else t["series"][1] if k == "cubesandbox" else t["muted"]
-    h = 112 + 34 * len(shown) + 40
-    c = Chart(theme, title, subtitle, h=h, left=24, right=24, title_left=24)
-    y0 = c.top + 16
-    lx, gap = 236, 28
-    mid = lx + (W - 24 - lx - gap) / 2
-    spans = [(lx, mid - 40), (mid + gap, W - 24 - 72)]
-    for i, (k, name, ours) in enumerate(shown):
-        c.text(lx - 12, y0 + 8 + i * 34 + 15, name, colour=t["ink"] if ours else t["ink2"], anchor="end", weight=600 if ours else 400)
-    for (a, b), (head, app, i, (lo, hi), fmt, ticks) in zip(spans, panels):
-        c.text(a, y0 - 6, head, colour=t["ink2"], weight=600)
-        hbars(c, a, b, y0 + 4, [(s[k].get(app, (None, None))[i], colour(k, o)) for k, _, o in shown], lo, hi, fmt, ticks)
-    return c.svg(label)
+def panel(ax, t, title, rows, fmt, lim):
+    """One ranked panel: best first, log scale, each value at its bar's end."""
+    y = range(len(rows))
+    ax.barh(list(y), [v - lim[0] for v, _, _ in rows], left=lim[0], height=0.62, zorder=3,
+            color=[t["first"] if i == 0 else t["ours"] if ours else t["rest"] for i, (_, _, ours) in enumerate(rows)],
+            edgecolor="none", linewidth=0)
+    ax.set_xscale("log")
+    ax.set_xlim(*lim)
+    ax.set_ylim(len(rows) - 0.4, -0.6)
+    ax.set_yticks(list(y), [name for _, name, _ in rows], fontsize=11.5)
+    ax.set_title(title, loc="left", fontsize=13, fontweight="bold", color=t["ink"], pad=8)
+    ax.tick_params(axis="y", length=0)
+    ax.tick_params(axis="x", labelsize=10, colors=t["muted"], length=3)
+    ax.grid(axis="y", visible=False)
+    ax.grid(axis="x", which="major", color=t["grid"], zorder=0)
+    ax.xaxis.set_major_formatter(FuncFormatter(TICK))
+    ax.xaxis.set_minor_formatter(FuncFormatter(lambda *_: ""))
+    for i, (v, _, _) in enumerate(rows):
+        # On the page's colour, so a gridline does not run through the number.
+        ax.text(v * 1.14, i, fmt(v), va="center", fontsize=10.5, color=t["ink"], zorder=4,
+                bbox=dict(facecolor=t["bg"], edgecolor="none", pad=1.2))
+    sns.despine(ax=ax, left=True, bottom=True)
 
 
-def clone(src, theme):
-    """Copying a running app64 into n that answer: grouped bars by n."""
+def compare(src, theme, path):
+    """Five rankings of the 64 MiB app, each in its own order, since one order
+    cannot rank them all; a row is the same height in every panel."""
+    kvm = summaries(src)
+    cloud, nodes = fleet_summaries(src)
+    pvm, _ = fleet_summaries(src, "pvm")
     cl = clones(src)
-    shown = [(k, label) for k, label in CLONES if k in cl]
-    if len(shown) < 2:
-        return None
+    if not nodes or len(kvm) < 2 or "sandstorm-fc" not in cl:
+        return False
+    app = lambda d, k: d.get(k, {}).get("app64", (None, None))
+    fork = {"sandstorm-fc-warm": "sandstorm-fc", "sandstorm-gvisor-warm": "sandstorm-gvisor", "cubesandbox": "cubesandbox", "microsandbox": "microsandbox"}
+    forked = lambda k, f: f(cl[fork[k]]) if k in fork and fork[k] in cl else None
     t = THEMES[theme]
-    colours = {"sandstorm-fc": t["series"][0], "cubesandbox": t["series"][1],
-               "sandstorm-gvisor": t["series"][2], "microsandbox": t["muted"]}
-    c = Chart(theme, "Cloning a running sandbox",
-              "Snapshot a running 64 MiB app, then start n copies; until all answer (microsandbox: until running).",
-              h=360, left=56, right=24, title_left=24,
-              legend=[(colours[k], label, "dot") for k, label in shown])
-    x0, y0, x1, y1 = c.plot
-    c.yscale(0, 2500)
-    c.ygrid([0, 500, 1000, 1500, 2000, 2500], lambda v: f"{v / 1000:g} s" if v else "0")
-    slot = (x1 - x0) / 3
-    bw = min(26, slot / (len(shown) + 1.5))
-    for i, n in enumerate((1, 10, 20)):
-        cx = x0 + slot * (i + 0.5)
-        for j, (k, _) in enumerate(shown):
-            v = cl[k][i]
-            bx = cx + (j - (len(shown) - 1) / 2) * (bw + 4)
-            yt = c.sy(v)
-            r = min(4, y1 - yt)
-            c.out.append(f'<path d="M{bx - bw / 2:.1f},{y1} V{yt + r:.1f} Q{bx - bw / 2:.1f},{yt:.1f} {bx - bw / 2 + r:.1f},{yt:.1f} H{bx + bw / 2 - r:.1f} Q{bx + bw / 2:.1f},{yt:.1f} {bx + bw / 2:.1f},{yt + r:.1f} V{y1} Z" fill="{colours[k]}"/>')
-            c.text(bx, yt - 6, f"{v:,.0f}", size=10, colour=t["ink"], anchor="middle", weight=600)
-        c.text(cx, y1 + 22, f"n = {n}", anchor="middle")
-    return c.svg("Time to clone a running sandbox into 1, 10 and 20 copies, by runtime")
-
-
-CHARTS = {"baremetal-start": start, "baremetal-clone": clone, "fleet-start": fleet}
+    sns.set_theme(style="whitegrid", font="Arial", rc={
+        "axes.facecolor": t["bg"], "figure.facecolor": t["bg"], "axes.edgecolor": t["grid"], "text.color": t["ink"],
+        "xtick.color": t["ink"], "ytick.color": t["ink"], "svg.fonttype": "path"})
+    fig = plt.figure(figsize=(15, 5.5))
+    gs = fig.add_gridspec(13, 4, left=0.125, right=0.985, top=0.93, bottom=0.07, wspace=1.02, hspace=0)
+    panels = [(gs[:13, 0], "Start, KVM machine", lambda k: app(kvm, k)[0], MS, (30, 20000)),
+              (gs[:11, 1], "Start, cloud VM", lambda k: app(cloud, k)[0] or app(pvm, k)[0], MS, (30, 20000)),
+              (gs[:13, 2], "Memory per instance", lambda k: app(kvm, k)[1], MIB, (5, 2000)),
+              (gs[:4, 3], "Clone into 20", lambda k: forked(k, lambda c: c[1][2]), MS, (100, 20000)),
+              (gs[6:9, 3], "Snapshot", lambda k: forked(k, lambda c: c[0] or None), MS, (10, 4000))]
+    for slot, title, get, fmt, lim in panels:
+        rows = sorted(((get(k), name, ours) for k, name, ours in ROWS if get(k)), key=lambda r: r[0])
+        panel(fig.add_subplot(slot), t, title, rows, fmt, lim)
+    fig.savefig(path, facecolor=t["bg"])
+    plt.close(fig)
+    return True
 
 
 def main():
     src, dst = Path(sys.argv[1]), Path(sys.argv[2])
     dst.mkdir(parents=True, exist_ok=True)
-    wrote = []
-    for name, draw in CHARTS.items():
-        for theme in THEMES:
-            svg = draw(src, theme)
-            if svg is None:
-                break
-            (dst / f"{name}-{theme}.svg").write_text(svg)
-        else:
-            wrote.append(name)
-    print(f"wrote {', '.join(wrote) or 'nothing'} to {dst}")
+    wrote = [compare(src, theme, dst / f"compare-{theme}.svg") for theme in THEMES]
+    print(f"wrote compare to {dst}" if all(wrote) else "wrote nothing: data is missing")
 
 
 if __name__ == "__main__":
