@@ -26,7 +26,7 @@
 //! node is under its memory floor, it makes room by putting the
 //! longest-idle sandboxes here to disk (`victims`) rather than refusing.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -200,7 +200,7 @@ impl Wakeups {
         self.saw_at(id, Instant::now());
     }
 
-    fn saw_at(&self, id: &str, now: Instant) {
+    pub(super) fn saw_at(&self, id: &str, now: Instant) {
         let mut demand = self.demand.lock();
         let d = demand.entry(id.to_string()).or_insert((0.0, now));
         *d = (decayed(*d, now) + 1.0, now);
@@ -302,6 +302,10 @@ impl Wakeups {
     /// the returned guard is dropped -- once the answer is in hand, or the
     /// caller has gone -- the sandbox is not put away to make room.
     pub fn hold(self: &Arc<Self>, id: &str) -> InFlight {
+        // Serialize enrollment with the tier-change check, then let the
+        // request run without holding this lock (a wake needs it too).
+        let lock = self.lock(id);
+        let _held = lock.lock();
         *self.in_flight.lock().entry(id.to_string()).or_default() += 1;
         InFlight {
             wake: self.clone(),
@@ -420,29 +424,40 @@ impl Wakeups {
     /// waiting for a permit.
     pub async fn wake(self: &Arc<Self>, id: &str) -> Result<Duration> {
         let deadline = Instant::now() + self.budget;
-        let ahead = self.waiting.fetch_add(1, Ordering::SeqCst);
-        let waiting = Waiting(&self.waiting);
-        if ahead >= self.max_waiting {
-            return Err(super::HeldBack(format!(
-                "node held it back: {ahead} wakes already waiting to restore, at most {}",
-                self.max_waiting
-            ))
-            .into());
-        }
-        let permit =
-            match tokio::time::timeout_at(deadline.into(), self.restores.clone().acquire_owned())
-                .await
-            {
-                Ok(p) => p.context("shutting down")?,
-                Err(_) => {
+        // Only a wake that has to queue counts as waiting. Counting every
+        // wake on the way in let one that was about to take a free permit
+        // push another over `max_waiting`, refusing a wake that would have
+        // started at once.
+        let permit = match self.restores.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(tokio::sync::TryAcquireError::Closed) => bail!("shutting down"),
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                let ahead = self.waiting.fetch_add(1, Ordering::SeqCst);
+                let _waiting = Waiting(&self.waiting);
+                if ahead >= self.max_waiting {
                     return Err(super::HeldBack(format!(
-                        "node held it back: no restore could start within {:?}",
-                        self.budget
+                        "node held it back: {ahead} wakes already waiting to restore, at most {}",
+                        self.max_waiting
                     ))
-                    .into())
+                    .into());
                 }
-            };
-        drop(waiting);
+                match tokio::time::timeout_at(
+                    deadline.into(),
+                    self.restores.clone().acquire_owned(),
+                )
+                .await
+                {
+                    Ok(p) => p.context("shutting down")?,
+                    Err(_) => {
+                        return Err(super::HeldBack(format!(
+                            "node held it back: no restore could start within {:?}",
+                            self.budget
+                        ))
+                        .into())
+                    }
+                }
+            }
+        };
         let me = self.clone();
         let id = id.to_string();
         let me2 = self.clone();

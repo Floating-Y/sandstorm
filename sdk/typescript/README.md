@@ -31,7 +31,7 @@ const ctrl = new Controller({
 const [source] = await ctrl.spawnSandboxes({
   snapshotTag: "langgraph-react",
 });
-await ctrl.execCommand(source.id, ["python3", "/opt/agent.py"]);
+await ctrl.execCommand(source.id, ["python3", "/opt/agent.py"], { sandboxToken: source.token });
 
 // BRANCH: pause source briefly, snapshot, resume. Children inherit
 // source's exact state and diverge under copy-on-write.
@@ -79,6 +79,12 @@ const branch = await sb.branch({ diff: true });
 await sb.kill();
 ```
 
+Keep the creation response, including its `token`: v0.6 requires this sandbox
+token in addition to the API Bearer credential for exec/eval/ping. `Sandbox.create`
+forwards it automatically, as does `new Sandbox(ctrl, info)` when `info` is the
+creation result. GET/LIST responses do not contain it. Older servers may omit
+it; missing or incorrect tokens still produce the server's authentication error.
+
 `Sandbox.with(options, fn)` is the recommended pattern for short-lived
 work — automatic cleanup even on exception.
 
@@ -102,7 +108,7 @@ const branch = await ctrl.branchSandbox(sandboxId, { diff: true });
 ```
 
 Measured numbers (full table in
-[RESULTS-v0.3.md](https://github.com/deeplethe/sandstorm/blob/main/bench/pause-window/RESULTS-v0.3.md)):
+[RESULTS-v0.3.md](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.3.md)):
 
 - Idle 4 GiB SSD source: 29 s → 205 ms = **143×**
 - Typical agent workload (30-300 MiB dirty): **6-15×**
