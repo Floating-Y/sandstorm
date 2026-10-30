@@ -10,6 +10,7 @@ master -- and the gateway wakes whatever it finds cold.
     workloads.py sleep  --template app64 --count 84
     workloads.py herd   --template app64 --sizes 6,24,60,120,240
     workloads.py mixed  --template app64 --count 1200 --rates 5,10,20,40 --phase-secs 180
+    workloads.py mixed  ... --retries 3      # callers that wait out retry-after
     workloads.py sizes  --templates idle,app16,app64,app256
     workloads.py fill   --template web --count 3400 --rate 3.4 --tokens t.jsonl
     workloads.py probe  --count 100 --tokens t.jsonl   # call a sample of them
@@ -156,17 +157,39 @@ def wait_on_disk(fleet, a, group, timeout=600):
 
 def request(fleet, sb, timeout=60):
     """One GET through the gateway. Returns (status, seconds, woke_ms)."""
+    st, secs, woke, _ = attempt(fleet, sb, timeout)
+    return st, secs, woke
+
+
+def attempt(fleet, sb, timeout):
+    """One GET, also returning the retry-after a refusal came with."""
     req = urllib.request.Request(fleet.url(sb), headers={"x-sandstorm-sandbox-token": sb["token"]})
     t0 = time.perf_counter()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             r.read()
             woke = r.headers.get("x-sandstorm-woke-ms")
-            return r.status, time.perf_counter() - t0, float(woke) if woke else None
+            return r.status, time.perf_counter() - t0, float(woke) if woke else None, None
     except urllib.error.HTTPError as e:
-        return e.code, time.perf_counter() - t0, None
+        after = e.headers.get("retry-after")
+        return e.code, time.perf_counter() - t0, None, float(after) if after else None
     except Exception:
-        return 0, time.perf_counter() - t0, None
+        return 0, time.perf_counter() - t0, None, None
+
+
+def patient(fleet, sb, retries, timeout=60):
+    """A caller that does as a refusal asks: on a 503 with retry-after it
+    waits that long (plus up to half again, so refused callers do not all
+    come back at once) and tries again, at most `retries` times. Returns
+    (status, seconds from the first try, woke_ms, statuses of every try)."""
+    t0 = time.perf_counter()
+    tries = []
+    while True:
+        st, _, woke, after = attempt(fleet, sb, timeout)
+        tries.append(st)
+        if st != 503 or after is None or len(tries) > retries:
+            return st, time.perf_counter() - t0, woke, tries
+        time.sleep(after * (1 + random.random() / 2))
 
 
 def sampler(fleet, out, every, stop):
@@ -305,9 +328,9 @@ def cmd_mixed(fleet, out, a):
     pool = cf.ThreadPoolExecutor(a.max_inflight)
 
     def fire(sb, rate):
-        st, secs, woke = request(fleet, sb)
+        st, secs, woke, tries = patient(fleet, sb, a.retries)
         out.write("req", id=sb["id"], rank=rank[sb["id"]], node=sb["node_id"], rate=rate,
-                  status=st, latency_s=round(secs, 4), woke_ms=woke)
+                  status=st, latency_s=round(secs, 4), woke_ms=woke, tries=tries)
 
     for rate in [float(x) for x in a.rates.split(",")]:
         out.write("phase", rate=rate)
@@ -423,6 +446,8 @@ def main():
     ap.add_argument("--phase-secs", type=float, default=180)
     ap.add_argument("--zipf", type=float, default=1.1)
     ap.add_argument("--max-inflight", type=int, default=256)
+    ap.add_argument("--retries", type=int, default=0,
+                    help="mixed: retry a 503 that came with retry-after this many times, after waiting it out")
     ap.add_argument("--create-workers", type=int, default=8)
     ap.add_argument("--sample-secs", type=float, default=5)
     ap.add_argument("--settle", type=float, default=5)

@@ -39,7 +39,6 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
-use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -47,6 +46,7 @@ use tokio::task::JoinHandle;
 
 use super::wake::Wakeups;
 use crate::master::SANDBOX_TOKEN_HEADER;
+use crate::proxy;
 
 /// How the response says a request had to wait for a wake, and for how
 /// long. For whoever is measuring cold starts; nothing depends on it.
@@ -54,6 +54,8 @@ pub const WAKE_HEADER: &str = "x-sandstorm-woke-ms";
 
 /// How long a request waits for a sandbox that is up but not yet listening.
 const BOOT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// The longest pause between tries while it waits: at most this long late.
+const BOOT_POLL_MAX: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Everything the gateway needs to serve one sandbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,7 +96,9 @@ impl From<&Exposed> for Binding {
 
 struct Target {
     id: String,
-    upstream: String,
+    sandbox_ip: Ipv4Addr,
+    /// Where a request goes when it does not name a port.
+    sandbox_port: u16,
     /// Updated in place when the sandbox is re-registered with a new token.
     ///
     /// Restarting the listener instead meant rebinding the same port right
@@ -103,7 +107,6 @@ struct Target {
     /// no gateway at all when it lost in production. A token change no
     /// longer touches the socket; only a port or address change does.
     token: std::sync::RwLock<String>,
-    client: reqwest::Client,
     /// `None` only in tests that exercise the token check alone.
     wake: Option<Arc<Wakeups>>,
 }
@@ -179,27 +182,70 @@ impl Gateway {
                 }
                 continue;
             }
-            match spawn_one(e.clone(), self.wake.clone()).await {
-                Ok((target, handle)) => {
-                    tracing::info!(
-                        id = %e.id, port = e.gateway_port,
-                        upstream = %format!("{}:{}", e.sandbox_ip, e.sandbox_port),
-                        "gateway listening"
-                    );
-                    self.running.insert(
-                        e.id.clone(),
-                        Live {
-                            exposed: e.clone(),
-                            target,
-                            handle,
-                        },
-                    );
-                }
-                Err(err) => tracing::warn!(
-                    id = %e.id, port = e.gateway_port, error = %err,
-                    "gateway could not bind; the sandbox stays unreachable from off-box"
-                ),
+            // Still reported while it is being destroyed, by which time
+            // its port may belong to the sandbox that replaced it.
+            if self
+                .running
+                .values()
+                .any(|l| l.exposed.gateway_port == e.gateway_port)
+            {
+                continue;
             }
+            self.start(e).await;
+        }
+    }
+
+    /// Open one sandbox's listener now, if it has none, instead of at the
+    /// next `reconcile`. For a sandbox just created: the node reports, and
+    /// so reconciles, only after a whole batch of commands, and on bm the
+    /// first of 20 forked children ran at 201 ms but could not be reached
+    /// until 1,852.
+    pub async fn expose(&mut self, e: &Exposed) {
+        if self.running.contains_key(&e.id) {
+            return;
+        }
+        // The master hands a port on only once its sandbox is deleted, and
+        // a node destroys off its command loop, so the old listener can
+        // still be up: on bare metal one in five creates straight after a
+        // delete could not bind, and waited a second for the next report.
+        // Whatever holds this port now is on its way out.
+        let holders: Vec<String> = self
+            .running
+            .iter()
+            .filter(|(_, l)| l.exposed.gateway_port == e.gateway_port)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in holders {
+            if let Some(live) = self.running.remove(&id) {
+                live.handle.abort();
+                let _ = live.handle.await;
+                tracing::info!(id = %id, port = live.exposed.gateway_port, "gateway stopped: its port was handed on");
+            }
+        }
+        self.start(e).await;
+    }
+
+    async fn start(&mut self, e: &Exposed) {
+        match spawn_one(e.clone(), self.wake.clone()).await {
+            Ok((target, handle)) => {
+                tracing::info!(
+                    id = %e.id, port = e.gateway_port,
+                    upstream = %format!("{}:{}", e.sandbox_ip, e.sandbox_port),
+                    "gateway listening"
+                );
+                self.running.insert(
+                    e.id.clone(),
+                    Live {
+                        exposed: e.clone(),
+                        target,
+                        handle,
+                    },
+                );
+            }
+            Err(err) => tracing::warn!(
+                id = %e.id, port = e.gateway_port, error = %err,
+                "gateway could not bind; the sandbox stays unreachable from off-box"
+            ),
         }
     }
 
@@ -216,13 +262,9 @@ async fn spawn_one(
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let target = Arc::new(Target {
         id: e.id.clone(),
-        upstream: format!("http://{}:{}", e.sandbox_ip, e.sandbox_port),
+        sandbox_ip: e.sandbox_ip,
+        sandbox_port: e.sandbox_port,
         token: std::sync::RwLock::new(e.token.clone()),
-        // No connect pooling across sandboxes: one client per listener, so
-        // a connection can never be reused against a different sandbox.
-        client: reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()?,
         wake,
     });
     let app = axum::Router::new()
@@ -232,6 +274,70 @@ async fn spawn_one(
         let _ = axum::serve(listener, app).await;
     });
     Ok((target, handle))
+}
+
+/// Which port inside the sandbox a request is for, when not the one the
+/// sandbox was created with.
+///
+/// One host port per sandbox, whatever it exposes: an E2B sandbox serves
+/// envd on 49983 and whatever the user starts on 8000 or 3000, and giving
+/// each its own host port would make port use grow with every server a
+/// sandbox starts. The token check is the same for every port, which is
+/// what RFC 16.5 asks -- the token is required on any port of the sandbox.
+pub const PORT_HEADER: &str = "x-sandstorm-port";
+
+/// How long a connection to a sandbox on this machine may take to open. It
+/// is a veth away, so anything slower than this is not coming.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long one connect to a sandbox waits before it is sent again. The
+/// sandbox is on this machine, a veth away, so an answer takes microseconds;
+/// one that has not come in 50 ms was dropped, typically because the guest's
+/// network was not up yet. Left to the kernel, the SYN is resent after a
+/// second: on bare metal every cold Firecracker sandbox answered 1.1 s after
+/// it was created, its program listening since 0.57 s.
+const CONNECT_ATTEMPT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Connect to a sandbox, sending a fresh SYN every `CONNECT_ATTEMPT` until
+/// `CONNECT_TIMEOUT`. A refusal still comes back at once: that is how a cold
+/// sandbox is told apart.
+async fn connect_upstream(addr: SocketAddr) -> std::io::Result<tokio::net::TcpStream> {
+    let deadline = std::time::Instant::now() + CONNECT_TIMEOUT;
+    loop {
+        match proxy::connect(addr, CONNECT_ATTEMPT).await {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::TimedOut
+                    && std::time::Instant::now() < deadline => {}
+            r => return r,
+        }
+    }
+}
+
+/// The port a request names, `Err` when it names one badly.
+fn requested_port(h: &HeaderMap) -> Result<Option<u16>, ()> {
+    let Some(v) = h.get(PORT_HEADER) else {
+        return Ok(None);
+    };
+    match v.to_str().ok().and_then(|s| s.trim().parse::<u16>().ok()) {
+        Some(p) if p > 0 => Ok(Some(p)),
+        _ => Err(()),
+    }
+}
+
+/// Held by a response body until it is done: the sandbox stays in flight
+/// for the whole of a streamed answer, and counts as used when it ends.
+struct Answering {
+    _in_flight: Option<super::wake::InFlight>,
+    wake: Option<Arc<Wakeups>>,
+    id: String,
+}
+
+impl Drop for Answering {
+    fn drop(&mut self) {
+        if let Some(w) = &self.wake {
+            w.in_use(&self.id);
+        }
+    }
 }
 
 /// Check the token, then pass the request through.
@@ -249,66 +355,60 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
         )
             .into_response();
     }
-
-    let (parts, body) = req.into_parts();
-    let path = parts
-        .uri
-        .path_and_query()
-        .map(|p| p.as_str())
-        .unwrap_or("/");
-    let bytes = match axum::body::to_bytes(body, 32 * 1024 * 1024).await {
-        Ok(b) => b,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, format!("unreadable body: {e}")).into_response()
+    let port = match requested_port(req.headers()) {
+        Ok(p) => p.unwrap_or(t.sandbox_port),
+        Err(()) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("content-type", "application/json")],
+                format!(r#"{{"error":"{PORT_HEADER} must be a port number, 1-65535"}}"#),
+            )
+                .into_response()
         }
     };
+    let upstream = SocketAddr::from((t.sandbox_ip, port));
 
-    let mut headers = parts.headers.clone();
-    // Not forwarded: it authenticates the caller to the gateway and has no
-    // meaning to the sandbox, which should never see a credential it could
-    // log or leak.
-    headers.remove(SANDBOX_TOKEN_HEADER);
-    headers.remove(axum::http::header::HOST);
-
-    let url = format!("{}{}", t.upstream, path);
-    let send = || {
-        t.client
-            .request(parts.method.clone(), &url)
-            .headers(headers.clone())
-            .body(bytes.clone())
-            .send()
-    };
-
-    // Before forwarding, so a demotion that arrives while this request is
+    // Before connecting, so a demotion that arrives while this request is
     // in flight is deferred rather than pulling the sandbox out from under
     // it.
     if let Some(w) = &t.wake {
         w.saw(&t.id);
     }
-    // Held to the end of this request, the wake included: a sandbox with a
+    // Held to the end of the answer, the wake included: a sandbox with a
     // request in flight is never put away to make room.
-    let _in_flight = t.wake.as_ref().map(|w| w.hold(&t.id));
-    let mut sent = send().await;
+    let in_flight = t.wake.as_ref().map(|w| w.hold(&t.id));
+
+    // A connection first, and the request only once there is one. A cold
+    // sandbox refuses (#327), or has no route when it is on disk, before any
+    // of the body is read, so it can be woken and the same request sent -- a
+    // streamed body cannot be resent.
+    let mut conn = connect_upstream(upstream).await;
     let mut woke = None;
-    if let (Err(e), Some(w)) = (&sent, &t.wake) {
-        if e.is_connect() {
+    if let (Err(e), Some(w)) = (&conn, &t.wake) {
+        if proxy::is_cold(e) {
             match w.wake(&t.id).await {
                 Ok(took) => {
                     tracing::info!(id = %t.id, ms = took.as_millis() as u64, "woke on traffic");
                     woke = Some(took);
-                    sent = send().await;
+                    conn = connect_upstream(upstream).await;
                     // Up and still refusing: the program is still starting
                     // -- a sandbox created a moment ago, typically. Wait for
                     // it a while rather than answer 502 to a request that
                     // would have succeeded a second later.
+                    //
+                    // Short pauses: a refused connect to the sandbox's own
+                    // address costs microseconds, and every pause is time
+                    // the caller waits after the program is up. Backing off
+                    // to 500 ms held the first answer of an app64 on bare
+                    // metal 300-370 ms past the moment it listened.
                     let deadline = std::time::Instant::now() + BOOT_WAIT;
-                    let mut pause = std::time::Duration::from_millis(50);
-                    while sent.as_ref().is_err_and(|e| e.is_connect())
+                    let mut pause = std::time::Duration::from_millis(5);
+                    while conn.as_ref().is_err_and(proxy::is_cold)
                         && std::time::Instant::now() < deadline
                     {
                         tokio::time::sleep(pause).await;
-                        pause = (pause * 2).min(std::time::Duration::from_millis(500));
-                        sent = send().await;
+                        pause = (pause * 2).min(BOOT_POLL_MAX);
+                        conn = connect_upstream(upstream).await;
                     }
                 }
                 Err(e) => {
@@ -339,70 +439,100 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
         );
     };
 
-    match sent {
-        Ok(r) => {
-            let status = r.status();
-            let hdrs = r.headers().clone();
-            let body = r.bytes().await;
-            // It has just been working, however long ago the request
-            // arrived.
-            if let Some(w) = &t.wake {
-                w.in_use(&t.id);
-            }
-            match body {
-                Ok(b) => {
-                    let mut out = Response::builder().status(status);
-                    for (k, v) in hdrs.iter() {
-                        out = out.header(k, v);
-                    }
-                    if let Some(took) = woke {
-                        out = out.header(WAKE_HEADER, took.as_millis().to_string());
-                    }
-                    out.body(Body::from(b)).unwrap_or_else(|e| {
-                        bad_gateway(&format!("building the response: {e}"));
-                        (StatusCode::BAD_GATEWAY, format!("{e}")).into_response()
-                    })
-                }
-                Err(e) => {
-                    bad_gateway(&format!("reading the sandbox's answer: {e:#}"));
-                    (StatusCode::BAD_GATEWAY, format!("upstream body: {e}")).into_response()
-                }
-            }
-        }
+    let stream = match conn {
+        Ok(s) => s,
         // A sandbox that is not hot REJECTs with a reset (#327), so this is
         // the ordinary cold case and arrives in milliseconds rather than as
         // a timeout. A gateway that wakes has already tried that and only
         // gets here if the sandbox came up and still refused. Said plainly,
         // because a bare 502 would look like the sandbox had crashed.
-        Err(e) if e.is_connect() && woke.is_some() => {
+        Err(e) if proxy::is_cold(&e) && woke.is_some() => {
             bad_gateway(&format!(
                 "woken, but connections still refused after {BOOT_WAIT:?}: {e:#}"
             ));
-            (
-            StatusCode::BAD_GATEWAY,
-            [("content-type", "application/json")],
-            format!(
-                r#"{{"error":"sandbox {} was woken but nothing is listening on port {} inside it"}}"#,
-                t.id,
-                t.upstream.rsplit(':').next().unwrap_or("?")
-            ),
-        )
-            .into_response()
+            return (
+                StatusCode::BAD_GATEWAY,
+                [("content-type", "application/json")],
+                format!(
+                    r#"{{"error":"sandbox {} was woken but nothing is listening on port {port} inside it"}}"#,
+                    t.id
+                ),
+            )
+                .into_response();
         }
-        Err(e) if e.is_connect() => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [("content-type", "application/json")],
-            format!(
-                r#"{{"error":"sandbox {} is not serving: it is frozen, snapshotted or detached. Promote it with POST /v1/sandboxes/{}/touch and retry."}}"#,
-                t.id, t.id
-            ),
-        )
-            .into_response(),
-        Err(e) if e.is_timeout() => (
-            StatusCode::GATEWAY_TIMEOUT,
-            format!("sandbox {} did not answer within 60s", t.id),
-        )
-            .into_response(),
+        Err(e) if proxy::is_cold(&e) && t.wake.is_some() => {
+            // Awake and refusing: the sandbox is up, the port is not.
+            return (
+                StatusCode::BAD_GATEWAY,
+                [("content-type", "application/json")],
+                format!(
+                    r#"{{"error":"nothing is listening on port {port} inside sandbox {}"}}"#,
+                    t.id
+                ),
+            )
+                .into_response();
+        }
+        Err(e) if proxy::is_cold(&e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [("content-type", "application/json")],
+                format!(
+                    r#"{{"error":"sandbox {} is not serving: it is frozen, snapshotted or detached. Promote it with POST /v1/sandboxes/{}/touch and retry."}}"#,
+                    t.id, t.id
+                ),
+            )
+                .into_response();
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                format!("sandbox {} did not accept a connection: {e}", t.id),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            bad_gateway(&format!("connecting: {e:#}"));
+            return (StatusCode::BAD_GATEWAY, format!("{e}")).into_response();
+        }
+    };
+
+    let (mut parts, body) = req.into_parts();
+    // Not forwarded: they address the gateway and mean nothing to the
+    // sandbox, which should never see a credential it could log or leak.
+    parts.headers.remove(SANDBOX_TOKEN_HEADER);
+    parts.headers.remove(PORT_HEADER);
+    // HTTP/1.1 requires a Host, and Go's server -- envd is one -- refuses a
+    // request without it. The caller's is kept when there is one, since a
+    // dev server may check it.
+    if !parts.headers.contains_key(axum::http::header::HOST) {
+        if let Ok(v) = upstream.to_string().parse() {
+            parts.headers.insert(axum::http::header::HOST, v);
+        }
+    }
+    if let Some(pq) = parts.uri.path_and_query().cloned() {
+        parts.uri = pq.as_str().parse().unwrap_or_default();
+    }
+
+    match proxy::send(stream, Request::from_parts(parts, body)).await {
+        Ok(res) => {
+            // It has just been working, however long ago the request
+            // arrived.
+            if let Some(w) = &t.wake {
+                w.in_use(&t.id);
+            }
+            let (mut parts, body) = res.into_parts();
+            if let Some(took) = woke {
+                if let Ok(v) = took.as_millis().to_string().parse() {
+                    parts.headers.insert(WAKE_HEADER, v);
+                }
+            }
+            let held = Answering {
+                _in_flight: in_flight,
+                wake: t.wake.clone(),
+                id: t.id.clone(),
+            };
+            Response::from_parts(parts, proxy::Holding::wrap(body, held))
+        }
         Err(e) => {
             bad_gateway(&format!("forwarding: {e:#}"));
             (StatusCode::BAD_GATEWAY, format!("{e}")).into_response()
@@ -474,7 +604,7 @@ mod tests {
     ///
     /// These stay under 32768 so `:0` never collides with them, on Linux or
     /// macOS. Do not "simplify" them back to `:0`. The wake tests use
-    /// 28461-28464 for the same reason.
+    /// 28461-28469 for the same reason, and the E2B test 28471.
     async fn free_pair() -> (u16, u16) {
         let a = tokio::net::TcpListener::bind(("127.0.0.1", 28451u16))
             .await
@@ -575,6 +705,61 @@ mod tests {
         g.reconcile(&[]).await;
     }
 
+    /// A program that starts listening a while after its sandbox is up is
+    /// answered soon after it does. The retries used to back off to 500 ms,
+    /// which held one listening at 400 ms until 750.
+    #[tokio::test]
+    async fn a_program_still_starting_is_answered_soon_after_it_listens() {
+        let (gw_port, upstream) = (28473u16, 28474u16);
+        let w = Arc::new(Wakeups::new(move |_, _, _| {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                serve_hi(upstream);
+            });
+            Ok(())
+        }));
+        let mut g = Gateway::waking(w);
+        let mut e = spec("sb-starting", gw_port);
+        e.sandbox_ip = "127.0.0.1".parse().unwrap();
+        e.sandbox_port = upstream;
+        g.reconcile(&[e]).await;
+
+        let t0 = std::time::Instant::now();
+        let r = get(gw_port).await;
+        let took = t0.elapsed();
+        assert_eq!(r.status(), 200);
+        assert!(
+            took < std::time::Duration::from_millis(600),
+            "answered {took:?} after asking, for a program up at 400 ms"
+        );
+        g.reconcile(&[]).await;
+    }
+
+    /// A port the master has handed to a new sandbox goes to it, even while
+    /// the old sandbox's listener is still up because its destroy has not
+    /// finished; and the old one, still reported, does not take it back.
+    #[tokio::test]
+    async fn a_port_handed_on_goes_to_the_new_sandbox() {
+        let mut g = Gateway::new();
+        let port = 28477u16;
+        let old = spec("sb-old", port);
+        g.reconcile(std::slice::from_ref(&old)).await;
+        assert!(g.running.contains_key("sb-old"));
+
+        let new = spec("sb-new", port);
+        g.expose(&new).await;
+        assert!(
+            g.running.contains_key("sb-new"),
+            "the new sandbox has the port"
+        );
+        assert!(!g.running.contains_key("sb-old"));
+
+        g.reconcile(&[old, new]).await;
+        assert!(g.running.contains_key("sb-new"));
+        assert!(!g.running.contains_key("sb-old"), "the old one is skipped");
+        g.reconcile(&[]).await;
+    }
+
     /// A sandbox is spared from being put away while a request to it is in
     /// flight, however long that takes, and is not once it has answered.
     #[tokio::test]
@@ -597,6 +782,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_streamed_answer_stays_protected_after_headers_and_releases_on_finish_or_cancel() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 28481u16))
+            .await
+            .unwrap();
+        let (release_first, first_released) = tokio::sync::oneshot::channel::<()>();
+        let (release_second, second_released) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            for release in [first_released, second_released] {
+                let (mut stream, _) = upstream.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                assert!(stream.read(&mut request).await.unwrap() > 0);
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n")
+                    .await
+                    .unwrap();
+                let _ = release.await;
+                let _ = stream.write_all(b"hi").await;
+            }
+        });
+
+        let wake = Arc::new(Wakeups::new(|_, _, _| Ok(())));
+        let mut gateway = Gateway::waking(wake.clone());
+        let mut exposed = spec("sb-stream", 28480);
+        exposed.sandbox_ip = "127.0.0.1".parse().unwrap();
+        exposed.sandbox_port = 28481;
+        gateway.reconcile(&[exposed]).await;
+
+        let first = get(28480).await;
+        assert_eq!(first.status(), 200);
+        assert!(wake.protected("sb-stream", std::time::Instant::now()));
+        release_first.send(()).unwrap();
+        assert_eq!(first.text().await.unwrap(), "hi");
+        assert!(!wake.protected("sb-stream", std::time::Instant::now()));
+
+        let second = get(28480).await;
+        assert_eq!(second.status(), 200);
+        assert!(wake.protected("sb-stream", std::time::Instant::now()));
+        drop(second);
+        for _ in 0..100 {
+            if !wake.protected("sb-stream", std::time::Instant::now()) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!wake.protected("sb-stream", std::time::Instant::now()));
+        let _ = release_second.send(());
+        server.await.unwrap();
+        gateway.reconcile(&[]).await;
+    }
+
+    #[tokio::test]
     async fn a_wake_the_node_refuses_is_a_503_with_the_reason() {
         let gw_port = 28463u16;
         let w = Arc::new(Wakeups::new(|_, _, _| {
@@ -614,6 +852,40 @@ mod tests {
         assert!(r.headers().contains_key("retry-after"));
         let body = r.text().await.unwrap();
         assert!(body.contains("512 MiB floor"), "{body}");
+        g.reconcile(&[]).await;
+    }
+
+    /// One host port serves every port in the sandbox: the header picks
+    /// which, and never reaches the sandbox itself.
+    #[tokio::test]
+    async fn the_port_header_reaches_another_port_in_the_sandbox() {
+        let (gw_port, default_port, other_port) = (28467u16, 28468u16, 28469u16);
+        serve_hi(other_port);
+        let mut g = Gateway::new();
+        let mut e = spec("sb-ports", gw_port);
+        e.sandbox_ip = "127.0.0.1".parse().unwrap();
+        // Nothing listens on the default port.
+        e.sandbox_port = default_port;
+        g.reconcile(&[e]).await;
+
+        let r = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{gw_port}/x"))
+            .header(SANDBOX_TOKEN_HEADER, "a".repeat(32))
+            .header(PORT_HEADER, other_port.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.text().await.unwrap(), "hi");
+
+        let r = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{gw_port}/x"))
+            .header(SANDBOX_TOKEN_HEADER, "a".repeat(32))
+            .header(PORT_HEADER, "not-a-port")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
         g.reconcile(&[]).await;
     }
 

@@ -1,7 +1,7 @@
 //! The master's HTTP surface: sandboxes for callers, poll and register for
 //! nodes.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -17,6 +17,7 @@ use tokio::sync::{oneshot, Notify};
 use super::metrics;
 use crate::auth::{require_token, AuthConfig};
 use crate::identity::{random_token, Ca};
+use crate::node::BackendKind;
 use crate::proto::{
     Command, CommandResult, FetchFrom, PollRequest, PollResponse, RegisterRequest, RegisterResponse,
 };
@@ -85,7 +86,28 @@ pub struct MasterState {
     /// master over loopback, so an unauthenticated control plane means a
     /// sandbox can mint node tokens and delete other sandboxes.
     api_token: Option<Arc<String>>,
+    /// The address each polling node last reached the master from.
+    ///
+    /// A node that dials in has no address in the database, and the E2B
+    /// front door has to reach its gateway. The source address of its poll
+    /// is one the master can route to by construction -- the same reasoning
+    /// as `install_script` taking the Host the caller used. In memory only:
+    /// every node polls within its hold, so a restart relearns it in
+    /// seconds.
+    node_addrs: Mutex<HashMap<String, std::net::IpAddr>>,
+    /// When an E2B caller last paused a sandbox. See `EXPLICIT_TIER_HOLD`.
+    explicit_tier: Mutex<HashMap<String, Instant>>,
+    /// Nodes asked to restart onto another backend, the backend, and when.
+    /// Nothing is placed on one until it reports that backend or
+    /// `SWITCH_HOLD` passes, so a create cannot land on a node about to
+    /// leave the format it was placed for.
+    switching: Mutex<HashMap<String, (BackendKind, Instant)>>,
 }
+
+/// How long a node asked to switch backends is kept out of placement if it
+/// never comes back reporting the new one. A restart takes seconds; this is
+/// for the node that refused after answering, or never restarted at all.
+const SWITCH_HOLD: Duration = Duration::from_secs(120);
 
 /// A held store lock that reports how long it was held when it is dropped.
 pub struct StoreGuard<'a> {
@@ -130,7 +152,7 @@ impl Admission {
     /// Why this node cannot take another sandbox, if it cannot.
     ///
     /// `load` is how many sandboxes it is already carrying. It is passed in
-    /// rather than read here so that the scheduler and the panel answer
+    /// rather than read here so that the scheduler and the console answer
     /// from the same number: the scheduler needs the count anyway, and two
     /// separate reads could disagree across a concurrent create.
     pub fn refuse(&self, n: &Node, load: u32) -> Option<String> {
@@ -213,6 +235,9 @@ impl MasterState {
             pending_exec: Mutex::new(HashMap::new()),
             drivers: Mutex::new(HashMap::new()),
             api_token: opts.api_token.map(Arc::new),
+            node_addrs: Mutex::new(HashMap::new()),
+            explicit_tier: Mutex::new(HashMap::new()),
+            switching: Mutex::new(HashMap::new()),
             max_net_index: opts.max_net_index,
             require_node_certs: opts.require_node_certs,
             metrics: metrics::Metrics::default(),
@@ -259,6 +284,43 @@ impl MasterState {
         self.api_token.as_deref().cloned().unwrap_or_default()
     }
 
+    /// Whether `presented` is the API token. True for anything when the API
+    /// is open, which only tests do.
+    pub(super) fn api_token_matches(&self, presented: &str) -> bool {
+        match self.api_token.as_deref() {
+            Some(t) => crate::auth::secrets_match(presented, t),
+            None => true,
+        }
+    }
+
+    /// An E2B caller paused this sandbox: keep it paused against traffic
+    /// that was already on its way. See `EXPLICIT_TIER_HOLD`.
+    pub(super) fn hold_pause(&self, id: &str) {
+        let mut held = self.explicit_tier.lock();
+        held.retain(|_, at| at.elapsed() < EXPLICIT_TIER_HOLD);
+        held.insert(id.to_string(), Instant::now());
+    }
+
+    /// The pause is undone by the caller, so traffic may wake it again.
+    pub(super) fn release_pause(&self, id: &str) {
+        self.explicit_tier.lock().remove(id);
+    }
+
+    /// Where to reach a node's gateway from here: the address of a node the
+    /// master connects to, or the one a polling node last came from.
+    pub(super) fn node_ip(&self, store: &Store, node_id: &str) -> Option<std::net::IpAddr> {
+        if let Ok(Some(a)) = store.agent_node(node_id) {
+            let host = a
+                .address
+                .rsplit_once(':')
+                .map_or(a.address.as_str(), |(h, _)| h);
+            if let Ok(ip) = host.trim_matches(['[', ']']).parse() {
+                return Some(ip);
+            }
+        }
+        self.node_addrs.lock().get(node_id).copied()
+    }
+
     pub(super) fn waker(&self, node_id: &str) -> Arc<Notify> {
         self.wake
             .lock()
@@ -278,6 +340,36 @@ impl MasterState {
     /// park has no permit, and losing a real change would be far worse.
     pub fn wake_node(&self, node_id: &str) {
         self.waker(node_id).notify_one();
+    }
+
+    /// The backend this node is being moved to, while that is under way.
+    fn switching_to(&self, node_id: &str) -> Option<BackendKind> {
+        let mut s = self.switching.lock();
+        s.retain(|_, (_, at)| at.elapsed() < SWITCH_HOLD);
+        s.get(node_id).map(|(k, _)| *k)
+    }
+
+    /// Whether this node said it can start this template on its backend.
+    /// A node that has not said is taken to, as before nodes said.
+    fn can_start(&self, node_id: &str, template: &str) -> bool {
+        self.metrics
+            .node_templates
+            .lock()
+            .get(node_id)
+            .is_none_or(|ts| ts.iter().any(|t| t == template))
+    }
+}
+
+/// Which backend an engine's `--version` names: runsc says
+/// `runsc version release-…`, Firecracker `Firecracker v…`.
+pub(super) fn backend_of_engine(engine: &str) -> Option<BackendKind> {
+    let e = engine.trim().to_ascii_lowercase();
+    if e.starts_with("runsc") {
+        Some(BackendKind::Runsc)
+    } else if e.starts_with("firecracker") {
+        Some(BackendKind::Firecracker)
+    } else {
+        None
     }
 }
 
@@ -300,6 +392,21 @@ pub const DEFAULT_SANDBOX_PORT: u16 = 8080;
 /// plan before admission control gets a word in.
 pub const MAX_FORK_WIDTH: u32 = 256;
 
+/// How long an E2B pause is kept against traffic.
+///
+/// Traffic reaches the master as a report, after the fact: a node that
+/// listens reports every 5 s. A request answered just before a pause
+/// therefore arrives just after it, and was read as a wake -- measured on
+/// bm, the E2B SDK's `beta_pause` came back `running` because the previous
+/// call's report landed 50 ms behind it. Within this window the report
+/// still marks the sandbox used; it only does not overrule the pause. The
+/// same length as the node's own grace, which defers the demotion itself
+/// while recent traffic drains.
+///
+/// E2B's pause only: `/v1`'s tier requests keep the rule that traffic at
+/// the gateway is a wake, which the idle tiers depend on.
+const EXPLICIT_TIER_HOLD: Duration = Duration::from_secs(15);
+
 pub fn router(st: St) -> Router {
     // Open: a health probe needs no credential, and registration carries
     // its own single-use token -- a node has nothing else yet.
@@ -309,7 +416,7 @@ pub fn router(st: St) -> Router {
     let open = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/node/register", post(register))
-        .route("/", get(panel))
+        .route("/", get(console_page))
         // The page only: everything it shows comes from the guarded
         // routes below, with the token the operator types into it.
         .route("/console", get(console_page))
@@ -353,6 +460,7 @@ pub fn router(st: St) -> Router {
         .route("/v1/node-tokens", post(create_node_token))
         .route("/v1/node-bootstrap", post(node_bootstrap))
         .route("/v1/node/revoke/:id", post(revoke_node))
+        .route("/v1/nodes/:id/backend", post(set_node_backend))
         .route("/v1/sandboxes", get(list_sandboxes).post(create_sandbox))
         .route("/v1/sandboxes/:id", get(get_sandbox).delete(delete_sandbox))
         .route("/v1/sandboxes/:id/touch", post(touch_sandbox))
@@ -429,10 +537,21 @@ async fn metrics_endpoint(State(st): State<St>) -> Result<impl IntoResponse, Api
 
 // ---- console ---------------------------------------------------------------
 
+/// The console: one file, served from this binary at `/` and `/console`.
+///
+/// Open, like any login page -- it holds no secrets. The API token is typed
+/// into it and kept in that tab's sessionStorage, so it never reaches disk
+/// through the page and is gone when the tab closes. Every call the page
+/// makes goes through the same guarded API as any other client.
+///
+/// Built into the binary rather than shipped separately so the console is
+/// always the version of the master it is talking to, and so a single-box
+/// deployment stays a single file. The page is `web/console`, built to one
+/// file; `build.rs` puts it, or a page saying it was not built, in OUT_DIR.
 async fn console_page() -> impl IntoResponse {
     (
         [("content-type", "text/html; charset=utf-8")],
-        include_str!("console.html"),
+        include_str!(concat!(env!("OUT_DIR"), "/console.html")),
     )
 }
 
@@ -497,6 +616,14 @@ struct EventsQuery {
     since: i64,
     #[serde(default = "default_events_limit")]
     limit: u32,
+    #[serde(default)]
+    offset: u32,
+    /// Comma-separated event kinds; all of them if absent.
+    #[serde(default)]
+    kind: Option<String>,
+    /// Matched against subject and detail, ignoring case.
+    #[serde(default)]
+    q: Option<String>,
 }
 
 fn default_events_since() -> i64 {
@@ -507,24 +634,44 @@ fn default_events_limit() -> u32 {
     100
 }
 
+/// A page of what the master recorded, newest first, with the number that
+/// match in `x-total-count` -- the same shape as `GET /v1/sandboxes`.
 async fn console_events(
     State(st): State<St>,
     axum::extract::Query(q): axum::extract::Query<EventsQuery>,
-) -> Result<Json<Vec<super::series::Event>>, ApiErr> {
+) -> Result<impl IntoResponse, ApiErr> {
     let series = console_history(&st)?;
     let since = now_secs() - q.since.max(0);
     let limit = q.limit.clamp(1, 1000);
-    let ev = tokio::task::spawn_blocking(move || series.events(since, limit))
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(ev))
+    let kinds: Vec<String> = q
+        .kind
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(String::from)
+        .collect();
+    let needle = q.q.unwrap_or_default().trim().to_string();
+    let (ev, total) = tokio::task::spawn_blocking(move || {
+        series.events_page(since, &kinds, &needle, limit, q.offset)
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(([("x-total-count", total.to_string())], Json(ev)))
 }
 
 #[derive(Serialize)]
 struct ConsoleNode {
     id: String,
     pool: String,
+    /// The pool's own hash; a node in a derived pool `<asked>#<fp8>` landed
+    /// there because this differs from the rest of `<asked>`.
+    fingerprint: String,
+    /// What `fingerprint` is made of, once the node has reported it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host: Option<crate::proto::HostInfo>,
     connected: bool,
     last_seen_age: i64,
     free_mib: u64,
@@ -532,6 +679,15 @@ struct ConsoleNode {
     max_sandboxes: u32,
     tiers: HashMap<String, u32>,
     features: Vec<String>,
+    /// Snapshot tags baked on this node. Like its sandboxes, they are in its
+    /// backend's format, so they too keep it from switching.
+    snapshots: u32,
+    /// The templates it can start on its backend, once it has said.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    templates: Option<Vec<String>>,
+    /// `runsc` or `firecracker` while it restarts onto that backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    switching_to: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -545,6 +701,9 @@ struct ConsoleFailing {
 #[derive(Serialize)]
 struct ConsoleNow {
     now: i64,
+    /// Which pool each node was in, and when, so the console can add the
+    /// per-node history up per pool.
+    pool_history: Vec<crate::state::PoolStretch>,
     uptime_secs: u64,
     idle: [u64; 3],
     tiers: HashMap<String, u32>,
@@ -555,12 +714,25 @@ struct ConsoleNow {
     nodes: Vec<ConsoleNode>,
     failing: Vec<ConsoleFailing>,
     counters: HashMap<&'static str, u64>,
+    /// The admission thresholds a node is held to, so the console marks
+    /// the figures it actually refuses at rather than the defaults.
+    floor_mib: u64,
+    max_psi: f64,
 }
 
 /// Everything the console draws that is a single "now" rather than a line.
 async fn console_now(State(st): State<St>) -> Result<Json<ConsoleNow>, ApiErr> {
     let ise = |e: anyhow::Error| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
-    let (nodes, by_tier, by_node_tier, failed, (snapshots, snapshot_bytes), failing, templates) = {
+    let (
+        nodes,
+        by_tier,
+        by_node_tier,
+        failed,
+        (snapshots, snapshot_bytes),
+        failing,
+        templates,
+        mut snaps_by_node,
+    ) = {
         let store = st.store();
         (
             store.list_nodes().map_err(ise)?,
@@ -570,10 +742,19 @@ async fn console_now(State(st): State<St>) -> Result<Json<ConsoleNow>, ApiErr> {
             store.snapshot_totals().map_err(ise)?,
             store.failing_sandboxes(12).map_err(ise)?,
             store.list_templates().map_err(ise)?,
+            store.count_snapshots_by_node().map_err(ise)?,
         )
     };
     let now = now_secs();
     let features = st.metrics.node_features.lock().clone();
+    let node_templates = st.metrics.node_templates.lock().clone();
+    let (mut hosts, pool_history) = {
+        let store = st.store();
+        (
+            store.node_hosts().map_err(ise)?,
+            store.node_pools().map_err(ise)?,
+        )
+    };
     let mut tiers_by_node: HashMap<String, HashMap<String, u32>> = HashMap::new();
     for (node, tier, n) in by_node_tier {
         tiers_by_node.entry(node).or_default().insert(tier, n);
@@ -592,6 +773,9 @@ async fn console_now(State(st): State<St>) -> Result<Json<ConsoleNow>, ApiErr> {
     ]);
     Ok(Json(ConsoleNow {
         now,
+        pool_history,
+        floor_mib: st.admit.min_free_mib,
+        max_psi: st.admit.max_psi_avg10,
         uptime_secs: m.uptime().as_secs(),
         idle: [
             st.idle.to_frozen.as_secs(),
@@ -609,8 +793,13 @@ async fn console_now(State(st): State<St>) -> Result<Json<ConsoleNow>, ApiErr> {
                 last_seen_age: (now - n.last_seen_at).max(0),
                 tiers: tiers_by_node.remove(&n.id).unwrap_or_default(),
                 features: features.get(&n.id).cloned().unwrap_or_default(),
+                snapshots: snaps_by_node.remove(&n.id).unwrap_or(0),
+                templates: node_templates.get(&n.id).cloned(),
+                switching_to: st.switching_to(&n.id).map(BackendKind::as_str),
+                host: hosts.remove(&n.id),
                 id: n.id,
                 pool: n.pool,
+                fingerprint: n.fingerprint,
                 connected: n.connected,
                 free_mib: n.free_mib,
                 psi: n.psi_some_avg10,
@@ -675,23 +864,6 @@ fn require_sandbox_token(st: &St, id: &str, headers: &axum::http::HeaderMap) -> 
              response that created the sandbox"
         ),
     ))
-}
-
-/// The admin panel: one file, served from this binary.
-///
-/// Open, like any login page -- it holds no secrets. The API token is typed
-/// into it and kept in that tab's sessionStorage, so it never reaches disk
-/// through the panel and is gone when the tab closes. Every call the page
-/// makes goes through the same guarded API as any other client.
-///
-/// Built into the binary rather than shipped separately so the panel is
-/// always the version of the master it is talking to, and so a single-box
-/// deployment stays a single file.
-async fn panel() -> impl IntoResponse {
-    (
-        [("content-type", "text/html; charset=utf-8")],
-        include_str!("panel.html"),
-    )
 }
 
 /// The join script, with this master's address filled in.
@@ -842,6 +1014,175 @@ async fn revoke_node(
     Ok(Json(serde_json::json!({ "revoked": id })))
 }
 
+#[derive(Deserialize)]
+struct SetBackendReq {
+    /// `gvisor` (or `runsc`) or `firecracker`.
+    backend: String,
+}
+
+#[derive(Serialize)]
+struct BackendSwitchView {
+    node: String,
+    from: Option<&'static str>,
+    to: &'static str,
+    /// False when the node was on it already and nothing happened.
+    restarting: bool,
+    /// What the node said.
+    message: String,
+}
+
+/// Move a node to another backend.
+///
+/// A backend switch is a restart onto another engine (`node/switch.rs`),
+/// and a sandbox or snapshot on the node is in the old engine's format: it
+/// could never be restored afterwards. So it is refused while the master has
+/// any on record for the node, and the node refuses again if its disk holds
+/// any. The node's fingerprint names its engine, so once it is back it is in
+/// another pool -- the console says so before anyone confirms.
+///
+/// Nothing is placed on the node from the moment this is accepted until it
+/// reports the new backend (or `SWITCH_HOLD` passes).
+async fn set_node_backend(
+    State(st): State<St>,
+    Path(id): Path<String>,
+    Json(req): Json<SetBackendReq>,
+) -> Result<Json<BackendSwitchView>, ApiErr> {
+    let want: BackendKind = req
+        .backend
+        .parse()
+        .map_err(|e: anyhow::Error| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let switchable = st
+        .metrics
+        .node_features
+        .lock()
+        .get(&id)
+        .is_some_and(|f| f.iter().any(|x| x == "backend-switch"));
+
+    // Out of placement before the count, and the count under the store lock
+    // a create holds while it places: a create either finished first and is
+    // counted, or comes after and passes this node by.
+    {
+        let mut s = st.switching.lock();
+        s.retain(|_, (_, at)| at.elapsed() < SWITCH_HOLD);
+        if let Some((k, _)) = s.get(&id) {
+            return Err(err(
+                StatusCode::CONFLICT,
+                format!("{id} is already switching to {k}; wait for it to come back"),
+            ));
+        }
+        s.insert(id.clone(), (want, Instant::now()));
+    }
+    let release = |e: ApiErr| {
+        st.switching.lock().remove(&id);
+        e
+    };
+    let ise = |e: anyhow::Error| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    let from = {
+        let store = st.store();
+        let Some(node) = store
+            .list_nodes()
+            .map_err(ise)
+            .map_err(release)?
+            .into_iter()
+            .find(|n| n.id == id)
+        else {
+            return Err(release(err(StatusCode::NOT_FOUND, format!("no node {id}"))));
+        };
+        if !node.connected {
+            return Err(release(err(
+                StatusCode::CONFLICT,
+                format!(
+                    "{id} is not answering; a switch is a command to the node, so it has to be up"
+                ),
+            )));
+        }
+        let sandboxes = store
+            .count_sandboxes_on_node(&id)
+            .map_err(ise)
+            .map_err(release)?;
+        let snapshots = store
+            .count_snapshots_by_node()
+            .map_err(ise)
+            .map_err(release)?
+            .remove(&id)
+            .unwrap_or(0);
+        if sandboxes > 0 || snapshots > 0 {
+            return Err(release(err(
+                StatusCode::CONFLICT,
+                format!(
+                    "{id} holds {sandboxes} sandbox(es) and {snapshots} snapshot(s). Each is in \
+                     its current backend's format and could never be restored on another, \
+                     so delete them first; a backend can only change on an empty node"
+                ),
+            )));
+        }
+        store
+            .node_hosts()
+            .map_err(ise)
+            .map_err(release)?
+            .remove(&id)
+            .and_then(|h| backend_of_engine(&h.engine))
+    };
+    if from == Some(want) {
+        st.switching.lock().remove(&id);
+        return Ok(Json(BackendSwitchView {
+            node: id.clone(),
+            from: from.map(BackendKind::as_str),
+            to: want.as_str(),
+            restarting: false,
+            message: format!("already on {want}; nothing to do"),
+        }));
+    }
+    if !switchable {
+        return Err(release(err(
+            StatusCode::CONFLICT,
+            format!(
+                "{id} was not installed with a backend file, so its backend is fixed by \
+                 its command line. Reinstall it with this master's installer (the console's \
+                 \"Add a node\"), or change --backend in its unit by hand"
+            ),
+        )));
+    }
+
+    let result_id = random_token();
+    let (tx, rx) = oneshot::channel();
+    st.pending_exec.lock().insert(result_id.clone(), tx);
+    st.exec_queue
+        .lock()
+        .entry(id.clone())
+        .or_default()
+        .push_back(Command::SetBackend {
+            backend: want.as_str().into(),
+            result_id: result_id.clone(),
+        });
+    st.wake_node(&id);
+    match tokio::time::timeout(Duration::from_secs(60), rx).await {
+        Ok(Ok(r)) if r.exit_code == 0 => {
+            tracing::warn!(node = %id, ?from, to = %want, "backend switch accepted; the node is restarting");
+            Ok(Json(BackendSwitchView {
+                node: id.clone(),
+                from: from.map(BackendKind::as_str),
+                to: want.as_str(),
+                restarting: true,
+                message: r.stdout,
+            }))
+        }
+        Ok(Ok(r)) => Err(release(err(
+            StatusCode::CONFLICT,
+            format!("{id} refused: {}", r.stderr.trim()),
+        ))),
+        _ => {
+            st.pending_exec.lock().remove(&result_id);
+            // Left out of placement: it may have switched and lost the
+            // answer. SWITCH_HOLD lets it back in if it did not.
+            Err(err(
+                StatusCode::GATEWAY_TIMEOUT,
+                format!("{id} did not answer the switch within 60s"),
+            ))
+        }
+    }
+}
+
 pub(super) fn err(
     code: StatusCode,
     msg: impl Into<String>,
@@ -868,7 +1209,7 @@ struct NodeView {
 }
 
 async fn list_nodes(State(st): State<St>) -> Result<Json<Vec<NodeView>>, ApiErr> {
-    // Nodes and their loads are read under one lock, so the panel cannot
+    // Nodes and their loads are read under one lock, so the console cannot
     // show a node refused against a count taken after someone else's delete.
     let nodes = {
         let store = st.store();
@@ -1046,6 +1387,9 @@ async fn add_node(
         store
             .set_node_agent(&node_id, &address, &pin, secret)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if let Some(h) = &about.host {
+            record_host(&st, &store, &node_id, h)?;
+        }
     }
     super::drive::start(
         st.clone(),
@@ -1123,6 +1467,57 @@ struct BootstrapReq {
     /// this out for itself: the address a node must dial is whatever the
     /// operator's network puts in front of us, not the socket we bound.
     master_url: String,
+    /// Which backend the new node runs: `auto` (Firecracker where the
+    /// machine has /dev/kvm, gVisor elsewhere), `gvisor` or `firecracker`.
+    /// Absent leaves it to the installer, which picks gVisor.
+    #[serde(default)]
+    backend: Option<String>,
+    /// For Firecracker: the guest kernel, if not `<work dir>/vmlinux`.
+    #[serde(default)]
+    fc_kernel: Option<String>,
+    /// The node's work dir, if not /var/lib/sandstorm. Firecracker needs it
+    /// on XFS (reflink=1) or btrfs.
+    #[serde(default)]
+    state_dir: Option<String>,
+}
+
+/// The installer variables a bootstrap request sets, checked: they go into a
+/// shell command someone runs as root, so a path is held to characters that
+/// need no quoting.
+fn install_env(req: &BootstrapReq) -> Result<String, ApiErr> {
+    let mut env = String::new();
+    if let Some(b) = req.backend.as_deref().filter(|b| !b.is_empty()) {
+        if !["auto", "gvisor", "runsc", "firecracker"].contains(&b) {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                format!("backend must be auto, gvisor or firecracker, not {b:?}"),
+            ));
+        }
+        env.push_str(&format!(" SANDSTORM_BACKEND={b}"));
+    }
+    for (name, var, v) in [
+        ("fc_kernel", "SANDSTORM_FC_KERNEL", &req.fc_kernel),
+        ("state_dir", "SANDSTORM_STATE_DIR", &req.state_dir),
+    ] {
+        let Some(v) = v.as_deref().filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        let plain = v.starts_with('/')
+            && !v.contains("..")
+            && v.bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"/._-".contains(&c));
+        if !plain {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "{name} must be an absolute path of letters, digits and . _ - / only, \
+                     not {v:?}"
+                ),
+            ));
+        }
+        env.push_str(&format!(" {var}={v}"));
+    }
+    Ok(env)
 }
 
 #[derive(Serialize)]
@@ -1130,7 +1525,7 @@ struct BootstrapView {
     token: String,
     pool: String,
     expires_at: i64,
-    /// What the panel shows for "add a machine". It is a command, not a
+    /// What the console shows for "add a node". It is a command, not a
     /// machine: the master cannot reach a host that has never dialled in,
     /// so one line has to be run over there. Same shape as k3s, Tailscale
     /// or an Actions runner, and for the same reason.
@@ -1154,6 +1549,7 @@ async fn node_bootstrap(
     State(st): State<St>,
     Json(req): Json<BootstrapReq>,
 ) -> Result<Json<BootstrapView>, ApiErr> {
+    let env = install_env(&req)?;
     let secret = random_token();
     st.store()
         .create_node_token(&secret, &req.pool, req.ttl_secs)
@@ -1172,7 +1568,7 @@ async fn node_bootstrap(
     // verified too copies pki/ca.pem over and sets SANDSTORM_CA.
     Ok(Json(BootstrapView {
         install_command: format!(
-            "curl -sSfL -k {master}/install.sh | sudo SANDSTORM_MASTER_URL={master} \\\n    SANDSTORM_NODE_TOKEN={token} sh"
+            "curl -sSfL -k {master}/install.sh | sudo SANDSTORM_MASTER_URL={master} \\\n    SANDSTORM_NODE_TOKEN={token}{env} sh"
         ),
         token,
         pool: req.pool,
@@ -1277,6 +1673,9 @@ async fn register(
     st.store()
         .set_node_cert(&req.node_id, &cert_fp)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(h) = &req.host {
+        record_host(&st, &st.store(), &req.node_id, h)?;
+    }
 
     tracing::info!(node = %req.node_id, pool = %pool, cert = %cert_fp, "node registered");
     Ok(Json(RegisterResponse {
@@ -1297,6 +1696,7 @@ async fn register(
 async fn poll(
     State(st): State<St>,
     Extension(who): Extension<NodeIdentity>,
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     Json(req): Json<PollRequest>,
 ) -> Result<Json<PollResponse>, ApiErr> {
     // The certificate decides which node this is, not the body. Otherwise a
@@ -1312,6 +1712,11 @@ async fn poll(
             StatusCode::FORBIDDEN,
             "this certificate is not registered for that node id",
         ));
+    }
+    if let Some(axum::extract::ConnectInfo(addr)) = peer {
+        st.node_addrs
+            .lock()
+            .insert(req.node_id.clone(), addr.ip().to_canonical());
     }
     // Held open, not polled. The node dials in and this request stays
     // parked until there is work for it, so dispatch costs one round trip
@@ -1377,8 +1782,8 @@ pub(super) fn take_execs(st: &St, node_id: &str) -> Vec<Command> {
 }
 
 #[derive(Deserialize)]
-struct SetTierReq {
-    tier: Tier,
+pub(super) struct SetTierReq {
+    pub(super) tier: Tier,
 }
 
 /// Ask for a tier directly, rather than waiting for the idle policy.
@@ -1386,7 +1791,7 @@ struct SetTierReq {
 /// Demotion still goes one step at a time -- the node has no direct
 /// hot -> detached transition, because each leg is cheap and a jump would
 /// stall it on a tar. So this walks the intermediate tiers itself.
-async fn set_tier(
+pub(super) async fn set_tier(
     State(st): State<St>,
     Path(id): Path<String>,
     Json(req): Json<SetTierReq>,
@@ -1803,7 +2208,7 @@ async fn branch_sandbox(
         ));
     }
 
-    let (node_id, template, tier) = {
+    let (node_id, template, tier, port) = {
         let store = st.store();
         if store
             .get_snapshot(&req.tag)
@@ -1821,7 +2226,7 @@ async fn branch_sandbox(
         else {
             return Err(err(StatusCode::NOT_FOUND, "no such sandbox"));
         };
-        (sb.node_id, sb.template, sb.tier)
+        (sb.node_id, sb.template, sb.tier, sb.port)
     };
 
     // Only a running sandbox has memory to checkpoint.
@@ -1875,6 +2280,7 @@ async fn branch_sandbox(
         from_sandbox: Some(id),
         created_at: now_secs(),
         size_bytes: r.size_bytes,
+        port,
     };
     {
         let store = st.store();
@@ -2036,10 +2442,15 @@ pub(super) fn apply_traffic(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
             .observed
             .iter()
             .any(|o| &o.id == id && o.tier.is_serving());
-        if serving && sb.tier != Tier::Hot {
+        let asked_for = st
+            .explicit_tier
+            .lock()
+            .get(id)
+            .is_some_and(|at| at.elapsed() < EXPLICIT_TIER_HOLD);
+        if serving && sb.tier != Tier::Hot && !asked_for {
             tracing::info!(sandbox = %id, node = %req.node_id, was = %sb.tier, "woken by traffic at its gateway");
             store.set_tier(id, Tier::Hot).map_err(ise)?;
-            st.metrics.woken.fetch_add(1, Relaxed);
+            st.metrics.woke(sb.tier);
         }
     }
     Ok(())
@@ -2076,6 +2487,28 @@ pub(super) fn apply_evictions(st: &St, req: &PollRequest) -> Result<(), ApiErr> 
     Ok(())
 }
 
+/// Keep what a node says its fingerprint is made of. Every full report
+/// carries it, so it is written only when it differs from the last one seen
+/// -- once per node per master start, and again only if the host changes.
+/// Takes the store the caller already holds: every caller has it locked, and
+/// locking it again here would deadlock the poll.
+fn record_host(
+    st: &St,
+    store: &Store,
+    node: &str,
+    host: &crate::proto::HostInfo,
+) -> Result<(), ApiErr> {
+    let mut seen = st.metrics.node_hosts.lock();
+    if seen.get(node) == Some(host) {
+        return Ok(());
+    }
+    store
+        .set_node_host(node, host)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    seen.insert(node.to_string(), host.clone());
+    Ok(())
+}
+
 /// Desired state minus what the node reports holding. Sync and short, so the
 /// store lock is never held across an await.
 pub(super) fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
@@ -2089,6 +2522,34 @@ pub(super) fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
             .node_features
             .lock()
             .insert(req.node_id.clone(), req.features.clone());
+    }
+    if let Some(ts) = &req.templates {
+        st.metrics
+            .node_templates
+            .lock()
+            .insert(req.node_id.clone(), ts.clone());
+    }
+    if let Some(h) = &req.host {
+        record_host(st, &store, &req.node_id, h)?;
+        // Back on the backend it was asked for: placeable again.
+        let mut s = st.switching.lock();
+        if s.get(&req.node_id).map(|(k, _)| *k) == backend_of_engine(&h.engine) {
+            s.remove(&req.node_id);
+        }
+    }
+    // An upgrade under a registered node changes its fingerprint; it has to
+    // leave a pool whose snapshots it can no longer restore.
+    if let Some(fp) = req.fingerprint.as_deref().filter(|f| !f.is_empty()) {
+        let moved = store
+            .refingerprint_node(&req.node_id, fp)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if let Some((from, to)) = moved {
+            tracing::warn!(
+                node = %req.node_id, %from, %to, fingerprint = %fp,
+                "the node's fingerprint changed; it moved pools so snapshots it can no \
+                 longer restore are not scheduled onto it"
+            );
+        }
     }
 
     // The node owns addressing, so what it reports is the truth.
@@ -2243,7 +2704,7 @@ fn fetch_from(store: &Store, tag: &str, node: &str) -> Result<Option<FetchFrom>,
 /// where to reach it, `created_at_unix` for its age. Duplication on the
 /// wire is cheap; a field an SDK cannot find is not.
 #[derive(Serialize)]
-struct SandboxView {
+pub(super) struct SandboxView {
     id: String,
     node_id: String,
     pool: String,
@@ -2277,7 +2738,7 @@ struct SandboxView {
     ip: Option<String>,
     created_at: i64,
     last_active_at: i64,
-    /// Why it is not up, when it is not. The panel shows this instead of
+    /// Why it is not up, when it is not. The console shows this instead of
     /// leaving an operator to guess from a node's log.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error: Option<String>,
@@ -2321,8 +2782,8 @@ impl From<Sandbox> for SandboxView {
 /// Same body the v0.5 controller took, so the SDKs keep working: fork `n`
 /// children from `snapshot_tag`. `template` is the v0.6 way to start one
 /// cold; exactly one of the two is required.
-#[derive(Deserialize)]
-struct NewSandbox {
+#[derive(Deserialize, Default)]
+pub(super) struct NewSandbox {
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
@@ -2338,6 +2799,12 @@ struct NewSandbox {
     pool: Option<String>,
     #[serde(default)]
     node_id: Option<String>,
+    /// Only on nodes running this backend, `gvisor` or `firecracker`. For a
+    /// template: whether a template can run is a matter of the backend (a
+    /// rootfs directory or an ext4 image), and a pool's host groups can mix
+    /// them. A fork already runs where its snapshot can be restored.
+    #[serde(default)]
+    backend: Option<String>,
     #[serde(default)]
     volume: Option<String>,
     #[serde(default)]
@@ -2371,7 +2838,20 @@ struct NewSandbox {
     hugepages: Option<bool>,
 }
 
-async fn create_sandbox(
+impl NewSandbox {
+    /// One sandbox from a template, under an id the caller chose: what the
+    /// E2B surface creates.
+    pub(super) fn named(id: &str, template: &str, port: u16) -> Self {
+        Self {
+            id: Some(id.to_string()),
+            template: Some(template.to_string()),
+            port: Some(port),
+            ..Default::default()
+        }
+    }
+}
+
+pub(super) async fn create_sandbox(
     State(st): State<St>,
     Json(req): Json<NewSandbox>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiErr> {
@@ -2451,6 +2931,21 @@ async fn create_sandbox(
         ));
     }
 
+    let backend: Option<BackendKind> = match req.backend.as_deref().filter(|b| !b.is_empty()) {
+        None => None,
+        Some(_) if from_tag.is_some() => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "backend is for a template; a fork runs on the backend its snapshot was \
+                 taken on",
+            ))
+        }
+        Some(b) => Some(
+            b.parse()
+                .map_err(|e: anyhow::Error| err(StatusCode::BAD_REQUEST, e.to_string()))?,
+        ),
+    };
+
     let store = st.store();
 
     // Where the children may go. A template goes to its pool. A fork goes
@@ -2459,7 +2954,7 @@ async fn create_sandbox(
     // connects to, since a node that dials in has no address to fetch from.
     // Otherwise, and for a tag too old to have a recorded fingerprint, it
     // stays on the node that holds the image.
-    let (template, place) = match &from_tag {
+    let (template, place, tag_port) = match &from_tag {
         Some(tag) => {
             let Some(snap) = store
                 .get_snapshot(tag)
@@ -2525,7 +3020,7 @@ async fn create_sandbox(
                 },
                 (None, _) => Place::Node(snap.node_id.clone()),
             };
-            (snap.template, place)
+            (snap.template, place, snap.port)
         }
         None => {
             if store
@@ -2539,10 +3034,39 @@ async fn create_sandbox(
                 ));
             }
             let place = match &req.node_id {
-                Some(n) => Place::Node(n.clone()),
-                None => Place::Pool(req.pool.clone().unwrap_or_else(|| "default".into())),
+                Some(n) => {
+                    // Asked for by name, so refused by name: placed anyway,
+                    // it would only fail on the node for want of a rootfs.
+                    if let Some(want) = backend {
+                        let have = store
+                            .node_hosts()
+                            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                            .remove(n)
+                            .and_then(|h| backend_of_engine(&h.engine));
+                        if have != Some(want) {
+                            return Err(err(
+                                StatusCode::CONFLICT,
+                                format!("node {n} does not run {want}"),
+                            ));
+                        }
+                    }
+                    if !st.can_start(n, &template) {
+                        return Err(err(
+                            StatusCode::CONFLICT,
+                            format!(
+                                "node {n} has no template {template} for its backend; \
+                                 {TEMPLATE_FORMS}"
+                            ),
+                        ));
+                    }
+                    Place::Node(n.clone())
+                }
+                None => Place::Pool(
+                    req.pool.clone().unwrap_or_else(|| "default".into()),
+                    backend,
+                ),
             };
-            (template, place)
+            (template, place, None)
         }
     };
 
@@ -2550,15 +3074,17 @@ async fn create_sandbox(
     // only partly fits is refused whole rather than half created.
     let placed: Vec<(String, String)> = match &place {
         // A template's children share one node, as they always have.
-        Place::Pool(pool) => {
-            let n = pick_node(&st, &store, pool).inspect_err(|_| {
+        Place::Pool(pool, backend) => {
+            let n = pick_node(&st, &store, pool, *backend, &template, count).inspect_err(|_| {
                 // Counted here rather than from the status code: a 503
                 // out of the scheduler means the fleet had no room,
                 // which is a different thing from the master being
                 // broken.
                 st.metrics.creates_refused.fetch_add(1, Relaxed);
             })?;
-            vec![(n, pool.clone()); count as usize]
+            // The pool the node is in, which may be one of the asked
+            // pool's host groups.
+            vec![(n.id, n.pool); count as usize]
         }
         Place::Node(n) => {
             let pool = store
@@ -2583,6 +3109,7 @@ async fn create_sandbox(
                     &format!("the pool tag {tag} restores in"),
                     |n| &n.fingerprint == fingerprint,
                     &extra,
+                    1,
                 )
                 .inspect_err(|_| {
                     st.metrics.creates_refused.fetch_add(1, Relaxed);
@@ -2594,11 +3121,18 @@ async fn create_sandbox(
         }
     };
 
+    // All of them or none: a slot or port that runs out partway through
+    // must not leave the ones before it behind.
+    let batch = store
+        .transaction()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let mut made = Vec::with_capacity(count as usize);
     for (node_id, pool) in &placed {
         // The port is the sandbox's own, inside its namespace, so there is
         // nothing to allocate -- two sandboxes may both listen on 8080.
-        let port = Some(req.port.unwrap_or(DEFAULT_SANDBOX_PORT));
+        // A fork serves where its parent did unless the caller says
+        // otherwise: the image holds the program already listening there.
+        let port = Some(req.port.or(tag_port).unwrap_or(DEFAULT_SANDBOX_PORT));
         // A host port for the gateway, distinct from `port` above, which is
         // inside the namespace and is 8080 for nearly every sandbox.
         //
@@ -2670,6 +3204,10 @@ async fn create_sandbox(
         made.push(v);
     }
 
+    batch
+        .commit()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
     st.metrics
         .creates_placed
         .fetch_add(made.len() as u64, Relaxed);
@@ -2694,17 +3232,69 @@ async fn create_sandbox(
     })
 }
 
-/// Least-loaded admitting node in a pool.
-fn pick_node(st: &St, store: &Store, pool: &str) -> Result<String, ApiErr> {
+/// Least-loaded admitting node in a pool, whichever of its host groups
+/// (`<pool>#<fp8>`) the node is in. Only a snapshot is tied to a host
+/// fingerprint; a sandbox started from a template boots on any host, so a
+/// group split off by an upgrade or another kind of machine still takes
+/// its share of new work.
+///
+/// Only nodes that can start the template on their own backend: a template
+/// is a rootfs directory for runsc and an ext4 image for Firecracker, and a
+/// pool that mixes the two may have only one form installed. When no node
+/// in the pool has it the create is refused here, saying so, rather than
+/// failed on a node about a missing file.
+fn pick_node(
+    st: &St,
+    store: &Store,
+    pool: &str,
+    backend: Option<BackendKind>,
+    template: &str,
+    count: u32,
+) -> Result<Node, ApiErr> {
+    let group = format!("{pool}#");
+    let hosts = match backend {
+        Some(_) => store
+            .node_hosts()
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        None => HashMap::new(),
+    };
+    let on_backend = |n: &Node| {
+        backend
+            .is_none_or(|b| hosts.get(&n.id).and_then(|h| backend_of_engine(&h.engine)) == Some(b))
+    };
+    let in_pool = |n: &Node| (n.pool == pool || n.pool.starts_with(&group)) && on_backend(n);
+    let pool = match backend {
+        Some(b) => format!("{pool} on {b}"),
+        None => pool.to_string(),
+    };
+    let up: Vec<Node> = store
+        .list_nodes()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .filter(|n| n.connected && in_pool(n))
+        .collect();
+    if !up.is_empty() && !up.iter().any(|n| st.can_start(&n.id, template)) {
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!(
+                "no node in pool {pool} has template {template} for its backend; {TEMPLATE_FORMS}"
+            ),
+        ));
+    }
     pick_node_where(
         st,
         store,
         &format!("pool {pool}"),
-        |n| n.pool == pool,
+        |n| in_pool(n) && st.can_start(&n.id, template),
         &HashMap::new(),
+        count,
     )
-    .map(|n| n.id)
 }
+
+/// Where each backend reads a template from, for refusals that name one.
+const TEMPLATE_FORMS: &str = "a gVisor node reads <work-dir>/templates/<name>/rootfs \
+     (a directory), a Firecracker node <work-dir>/templates/<name>/rootfs.ext4 \
+     (an ext4 image)";
 
 /// Least-loaded admitting node among those `fits` accepts. `extra` counts
 /// sandboxes already decided for a node in this request but not yet written,
@@ -2715,6 +3305,7 @@ fn pick_node_where(
     what: &str,
     fits: impl Fn(&Node) -> bool,
     extra: &HashMap<String, u32>,
+    batch_size: u32,
 ) -> Result<Node, ApiErr> {
     let nodes = store
         .list_nodes()
@@ -2722,12 +3313,25 @@ fn pick_node_where(
     let mut best: Option<(Node, u32)> = None;
     let mut refused: Vec<String> = Vec::new();
     for n in nodes.into_iter().filter(|n| n.connected && fits(n)) {
+        if let Some(to) = st.switching_to(&n.id) {
+            refused.push(format!("{}: restarting onto {to}", n.id));
+            continue;
+        }
         let load = store
             .count_sandboxes_on_node(&n.id)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
             + extra.get(&n.id).copied().unwrap_or(0);
         if let Some(why) = st.admit.refuse(&n, load) {
             refused.push(format!("{}: {why}", n.id));
+            continue;
+        }
+        if n.max_sandboxes > 0
+            && u64::from(load) + u64::from(batch_size) > u64::from(n.max_sandboxes)
+        {
+            refused.push(format!(
+                "{}: {load} sandboxes plus batch of {batch_size} exceeds its cap of {}",
+                n.id, n.max_sandboxes
+            ));
             continue;
         }
         if best.as_ref().is_none_or(|(_, b)| load < *b) {
@@ -2751,19 +3355,67 @@ fn pick_node_where(
 enum Place {
     /// This node, for every child.
     Node(String),
-    /// The least loaded node of this pool, for every child.
-    Pool(String),
+    /// The least loaded node of this pool, for every child, on this
+    /// backend if one was asked for.
+    Pool(String, Option<BackendKind>),
     /// Each child to the least loaded node whose fingerprint matches the
     /// tag it is forked from.
     Like { fingerprint: String, tag: String },
 }
 
-async fn list_sandboxes(State(st): State<St>) -> Result<Json<Vec<SandboxView>>, ApiErr> {
+/// Optional filters and a page for `GET /v1/sandboxes`. With none of them
+/// the answer is every sandbox, as it always was.
+#[derive(Deserialize, Default)]
+struct ListSandboxes {
+    tier: Option<Tier>,
+    node: Option<String>,
+    /// Part of the id or the template name.
+    q: Option<String>,
+    /// Only those carrying an error.
+    #[serde(default)]
+    failing: bool,
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: usize,
+}
+
+/// Every sandbox, or a filtered page of them.
+///
+/// A page is what the console asks for: on a 20,000-sandbox fleet the whole
+/// list is about 10 MB, too much to fetch every few seconds to show 50 rows.
+/// The matching total is in `x-total-count`, so a page can say what it is a
+/// page of.
+async fn list_sandboxes(
+    State(st): State<St>,
+    Query(f): Query<ListSandboxes>,
+) -> Result<impl IntoResponse, ApiErr> {
     let all = st
         .store()
         .list_sandboxes()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(all.into_iter().map(Into::into).collect()))
+    let q =
+        f.q.as_deref()
+            .map(str::to_lowercase)
+            .filter(|q| !q.is_empty());
+    let matched: Vec<_> = all
+        .into_iter()
+        .filter(|s| f.tier.is_none_or(|t| s.tier == t))
+        .filter(|s| f.node.as_deref().is_none_or(|n| s.node_id == n))
+        .filter(|s| !f.failing || s.last_error.is_some())
+        .filter(|s| {
+            q.as_deref().is_none_or(|q| {
+                s.id.to_lowercase().contains(q) || s.template.to_lowercase().contains(q)
+            })
+        })
+        .collect();
+    let total = matched.len();
+    let page: Vec<SandboxView> = matched
+        .into_iter()
+        .skip(f.offset)
+        .take(f.limit.unwrap_or(usize::MAX))
+        .map(Into::into)
+        .collect();
+    Ok(([("x-total-count", total.to_string())], Json(page)))
 }
 
 async fn get_sandbox(
@@ -2780,7 +3432,7 @@ async fn get_sandbox(
 
 /// Mark a sandbox used. Promotion to hot is what a real request does; this
 /// just resets the idle clock so the demoter leaves it alone.
-async fn touch_sandbox(
+pub(super) async fn touch_sandbox(
     State(st): State<St>,
     Path(id): Path<String>,
 ) -> Result<Json<SandboxView>, ApiErr> {
@@ -2808,7 +3460,7 @@ async fn touch_sandbox(
     Ok(Json(fresh.into()))
 }
 
-async fn delete_sandbox(
+pub(super) async fn delete_sandbox(
     State(st): State<St>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiErr> {
