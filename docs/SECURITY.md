@@ -2,49 +2,37 @@
 
 sandstorm is alpha software. The threat model and current guarantees are
 documented below so operators can decide what workload they are
-willing to point at it.
+willing to point at it. This document describes the current v0.6 development
+tree; v0.6 has not been released yet.
 
 ## Which boundary you actually get
 
-**This section used to say every child ran in a KVM-backed microVM, so
-escaping needed a KVM or Firecracker vulnerability -- "the same boundary
-AWS Lambda relies on". That is not what `sandstormd` runs.** It is written
-out here rather than quietly edited, because anyone who read it and sized
-their risk by it sized it against the wrong kernel.
+`sandstormd` defaults to gVisor (`--backend runsc`) and also implements
+a Firecracker backend (`--backend firecracker`). The isolation boundary
+depends on the backend selected for the node.
 
-v0.6 ships one sandbox backend, gVisor (`runsc`), and the isolation it gives
-is weaker than a microVM's in a specific way: the host kernel is shared.
-
-| | `sandstormd` (v0.6) | v0.5.3 and earlier (`sandstorm` CLI) |
+| | gVisor backend | Firecracker backend |
 |---|---|---|
 | Sandbox | gVisor `runsc` container | Firecracker microVM |
 | Guest kernel | the gVisor Sentry, in user space | its own Linux kernel |
-| Host kernel | **shared with every sandbox** | reached only through KVM |
-| Escaping needs | a Sentry bug, or a hole in the host seccomp behind it | a KVM or Firecracker bug |
+| Host boundary | Sentry runs as a host process | the VMM uses host KVM |
 | Needs `/dev/kvm` | no | yes |
 
-**Why gVisor is the default.** Firecracker needs `/dev/kvm`, and most cloud
-instances do not expose nested virtualisation -- none of the three machines
-sandstorm is developed and measured on do. A backend that cannot run on the
-machines operators actually have is not a default. The Firecracker runtime
-is no longer in this tree; it lives in the
-[`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3). A
-Firecracker backend for `sandstormd` is still the plan for hosts that do
-have KVM, where it would be the stronger choice, but it is not built (see
-[ADR 2](adr/0002-gvisor-runtime-no-kvm.md)).
+**Why gVisor is the default.** It can run without `/dev/kvm`. The
+Firecracker backend requires a host with KVM and a guest kernel image.
 
 So, concretely:
 
-1. **The host kernel and `runsc` are part of the TCB.** A
-   compromised host can do anything to its sandboxes. sandstorm does not try to
+1. **The host kernel and the selected runtime (`runsc` or Firecracker) are
+   part of the TCB.** A compromised host can do anything to its sandboxes.
+   sandstorm does not try to
    protect against a hostile administrator.
 
 2. **Sandboxes are mutually untrusted, with the boundary above.** Each
    sandbox gets its own network namespace, its own cgroup and its own
-   writable layer. Under `runsc` they also share one host kernel, so a
-   Sentry escape reaches the host and therefore its siblings. Do not treat
-   a `runsc` sandbox as equivalent to a VM for hostile code; v0.6 has no
-   microVM backend yet, so that workload needs a different runtime.
+   writable layer. gVisor uses a user-space Sentry; Firecracker runs a
+   separate guest kernel in a microVM. Assess the selected runtime and its
+   host configuration together; a host compromise affects its sandboxes.
 
 3. **The control plane is a root credential.** The API's bearer token grants
    full control over the sandboxes and snapshots of every node attached to
@@ -53,52 +41,46 @@ So, concretely:
 
 ## Default posture
 
-These are `sandstormd`'s defaults. Several were off in v0.5 and are now
-on, so a v0.5 runbook will describe a weaker posture than you have.
+These are `sandstormd`'s defaults in the current development tree.
 
 | Concern | Default | Notes |
 |---|---|---|
 | Daemon bind | `127.0.0.1:8080` (loopback only) | `--bind` to expose it; do not do that without the token below |
-| Control-plane TLS | **on** | `--insecure-transport` turns it off for a single box on loopback, and logs what that gives up |
-| Node authentication | **client certificates, required** | A node's identity is the certificate the master issued it, not the node id in its messages. `POST /v1/node/revoke/:id` stops one |
+| Control-plane TLS | **on** | `--insecure-transport` disables both TLS and node client-certificate checks |
+| Node authentication | **client certificates, required with TLS** | A node's identity is the certificate the master issued it, not the node id in its messages. `POST /v1/node/revoke/:id` stops one |
 | Registration | single-use token, 15 min, carrying the CA fingerprint to pin | So a stand-in master fails the handshake before the token is sent to it |
-| API authentication | **on**, token generated on first run | `--api-token-file`; `--api-open` disables it and warns. Code inside a sandbox can reach the master over loopback, so an open API lets a sandbox mint node tokens |
+| API authentication | **on**, token generated on first run | `--api-token-file`; `--api-open` disables it and warns. Any caller able to reach an open API can mint node tokens and control sandboxes |
 | Per-sandbox netns | **always** | Not an option any more. `per_child_netns` is accepted and ignored |
 | Sibling and egress traffic | **dropped** (`FORWARD`) | Covers siblings and the internet without relying on `ip_forward` |
 | Host services on the veth | **dropped** (`INPUT`) | sshd listens on `0.0.0.0`, so it answers on the veth too; only established replies are let back |
-| Cold sandbox ports | **refused** (`SANDSTORM-COLD`, TCP reset) | A caller reaching a frozen, snapshotted or detached sandbox gets 7-12 ms instead of its own timeout |
-| Per-sandbox memory cap | none | `memory_limit_mib` per sandbox, written as `memory.max` |
+| Cold sandbox ports | Direct connections are **refused** (`SANDSTORM-COLD`, TCP reset) | The HTTP gateway can wake a cold sandbox and retry the connection before forwarding the request |
+| Per-sandbox memory cap | gVisor: none; Firecracker: 512 MiB guest memory by default | `memory_limit_mib` configures the limit; Firecracker adds 64 MiB for the VMM to its cgroup `memory.max` |
 | Audit log | `/var/log/sandstorm/audit.log`, JSON lines | tail with vector / fluentbit; rotate with logrotate |
+
+Sandbox HTTP gateways listen on `0.0.0.0` at their assigned node ports and
+check `x-sandstorm-sandbox-token`, as do the API's `exec`, `eval` and `ping`
+endpoints. Tokens contain 128 random bits. Automatically generated IDs are
+`sb-` plus 32 hex characters (128 random bits); supplied IDs need not be
+random and do not replace access tokens.
 
 ## Known gaps
 
 Stated because each is the kind of thing that reads as covered when it is
 not:
 
-- **A sandbox's `token` is issued and never checked.** Every sandbox is
-  created with a 128-bit token and it is returned to the caller, but nothing
-  verifies it, because there is no gateway in front of a sandbox for it to
-  gate: a sandbox listens inside its own namespace and the rules above drop
-  traffic from siblings and from off-box, so today it is reachable only from
-  its own node. The moment a port is exposed, that token has to become
-  mandatory on the path that exposes it -- the v0.6 RFC's
-  [section 16.5](https://github.com/deeplethe/sandstorm/blob/7b3986150b71feeece318ce1b4475f3c291d3aae/DESIGN-v0.6.md)
-  calls this layer two, and it is not built.
-- **Sandbox ids are `sb-` plus 12 hex characters**, not 128 bits. Section
-  16.5 asks for unguessable ids; this is weaker than that.
+- **Node gateways serve plain HTTP.** Control-plane TLS does not encrypt
+  their sandbox tokens or application traffic.
 - **One API token, no scopes or tenants.** The `owner` column exists in the
   schema and nothing reads it.
-- **Multi-node has never been run.** Master and node authenticate each other
-  properly now, but they have only ever run on one machine.
 
 ## Kubernetes deployment
 
-The shipped `packaging/k8s/sandstormd.yaml` runs the daemon
-with `privileged: true`, `runAsUser: 0`, and a writable
-`/sys/fs/cgroup` hostPath mount. This is **necessary** — the node creates
-network namespaces and veth pairs, writes cgroup v2 for the tiers and the
-memory caps, and runs `runsc`. (It does *not* need `/dev/kvm`.) It is also **node-level blast-radius**:
-a compromised `sandstormd` pod can escape to the node it runs on.
+The shipped `packaging/k8s/sandstormd.yaml` is outdated: it still passes
+`--state`, `--snapshot-root` and `--token-file`, which are not the current
+daemon's arguments. It requests `privileged: true`, `runAsUser: 0`, a writable
+`/sys/fs/cgroup` hostPath mount and `/dev/kvm`. KVM is required for
+Firecracker, not gVisor. These privileges give the pod **node-level
+blast-radius**: a compromised `sandstormd` pod can compromise its host.
 
 Operational consequences:
 
@@ -106,17 +88,13 @@ Operational consequences:
   node. Rotate on any access change.
 - Pin the pod to a dedicated node pool. Do not co-schedule untrusted
   tenants.
-- The daemon refuses to start if the manifest's placeholder bearer
-  token (`REPLACE_ME_*` / `CHANGE_ME_*`) is left in place — a forgotten
-  `sed` step becomes a noisy fail rather than a silent compromise.
 - For multi-tenant deployments, run one master per tenant on dedicated
   nodes rather than sharing one. The API token is not scoped, so sharing a
   master means sharing root over every tenant's sandboxes.
 
 ## Concurrency caps
 
-`DEFAULT_BRANCH_CONCURRENCY` and the `boot_wait_secs` cap were
-`sandstorm-controller`'s, and went with it. What v0.6 bounds instead:
+The current daemon's limits are:
 
 - **Fork width.** One request may ask for at most `MAX_FORK_WIDTH` (256)
   children of a tag.
@@ -151,14 +129,16 @@ Operationally:
   Its parked connection is dropped at once.
 - **TLS does not imply API authentication.** The bearer token is separate
   and is on by default; `--api-open` turns it off and says so loudly.
-- If you terminate TLS somewhere else, the master must still be the thing
-  nodes verify. A proxy holding its own certificate breaks the pin, and
-  client certificates do not survive it, so nodes lose their identity and
-  the master falls back to believing what they claim.
+- Nodes must verify the master's pinned CA. A TLS-terminating proxy with a
+  different CA breaks that pin. With node certificate checks enabled, the
+  master rejects node control requests without a recognized client
+  certificate; it does not automatically fall back to trusting a claimed
+  node ID. `--insecure-transport` explicitly disables those checks.
 
 ## What sandstorm does not do (yet)
 
-- **Multi-node scheduling.** One daemon = one host. No HA, no failover.
+- **Control-plane HA and failover.** Multi-node scheduling is implemented;
+  control-plane HA and failover are not.
 - **Egress allow-lists.** Egress is denied outright rather than filtered:
   `FORWARD` drops it. That is safe, and also means a sandbox cannot reach
   the internet at all, so there is no policy to express yet. Giving one

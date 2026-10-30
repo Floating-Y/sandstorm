@@ -1336,7 +1336,7 @@ plan (#101, kept as honest record + revival starting point).
   the file at `<snapshot_root>/<tag>/snapshot.json` — letting an
   authenticated attacker control volume mounts of grandchild VMs.
   Full advisory:
-  [docs/SECURITY.md → 2026-05-17](./docs/SECURITY.md#past-advisories).
+  [v0.5.3 security policy → 2026-05-17](https://github.com/deeplethe/sandstorm/blob/v0.5.3/docs/SECURITY.md#past-advisories).
 - **K8s manifest placeholder bearer token**. The shipped
   `packaging/k8s/forkd-controller.yaml` ships `token: REPLACE_ME_*`.
   Users who forget to `sed` it before `kubectl apply` would get a
@@ -1392,7 +1392,7 @@ plan (#101, kept as honest record + revival starting point).
   Affects 0.1.0–0.1.2. Fixed by validating tags against
   `[A-Za-z0-9_][A-Za-z0-9._-]{0,63}` at every CLI surface and again
   on the manifest's `tag` field. Full advisory:
-  [docs/SECURITY.md → Past advisories](./docs/SECURITY.md#past-advisories).
+  [v0.5.3 security policy → Past advisories](https://github.com/deeplethe/sandstorm/blob/v0.5.3/docs/SECURITY.md#past-advisories).
 - `forkd cleanup` would mis-classify live VMs as "safe to delete"
   because `lsof` returns empty stdout (only warnings on stderr) for
   Firecracker UNIX domain API sockets. Under `forkd cleanup --yes`
