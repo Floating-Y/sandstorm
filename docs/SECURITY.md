@@ -32,9 +32,10 @@ So, concretely:
    sandbox gets its own network namespace, its own cgroup and its own
    writable layer. gVisor uses a user-space Sentry and shares the host
    kernel. An escape from the Sentry can expose the host and other
-   sandboxes on it. Firecracker runs a separate guest kernel in a microVM.
-   Assess the selected runtime and its host configuration together; a host
-   compromise affects its sandboxes.
+   sandboxes on it. Do not treat gVisor as equivalent to a VM for hostile
+   code. Firecracker runs a separate guest kernel in a microVM. Assess the
+   selected runtime and its host configuration together; a host compromise
+   affects its sandboxes.
 
 3. **The control plane is a root credential.** The API's bearer token grants
    full control over the sandboxes and snapshots of every node attached to
