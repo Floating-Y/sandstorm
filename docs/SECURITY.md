@@ -30,9 +30,11 @@ So, concretely:
 
 2. **Sandboxes are mutually untrusted, with the boundary above.** Each
    sandbox gets its own network namespace, its own cgroup and its own
-   writable layer. gVisor uses a user-space Sentry; Firecracker runs a
-   separate guest kernel in a microVM. Assess the selected runtime and its
-   host configuration together; a host compromise affects its sandboxes.
+   writable layer. gVisor uses a user-space Sentry and shares the host
+   kernel. An escape from the Sentry can expose the host and other
+   sandboxes on it. Firecracker runs a separate guest kernel in a microVM.
+   Assess the selected runtime and its host configuration together; a host
+   compromise affects its sandboxes.
 
 3. **The control plane is a root credential.** The API's bearer token grants
    full control over the sandboxes and snapshots of every node attached to
@@ -53,9 +55,9 @@ These are `sandstormd`'s defaults in the current development tree.
 | Per-sandbox netns | **always** | Not an option any more. `per_child_netns` is accepted and ignored |
 | Sibling and egress traffic | **dropped** (`FORWARD`) | Covers siblings and the internet without relying on `ip_forward` |
 | Host services on the veth | **dropped** (`INPUT`) | sshd listens on `0.0.0.0`, so it answers on the veth too; only established replies are let back |
-| Cold sandbox ports | Direct connections are **refused** (`SANDSTORM-COLD`, TCP reset) | The HTTP gateway can wake a cold sandbox and retry the connection before forwarding the request |
+| Cold sandbox ports | From the node host, frozen sandboxes reject direct TCP connections (`SANDSTORM-COLD`, TCP reset); snapshotted sandboxes have no reachable namespace | The HTTP gateway can wake a cold sandbox and retry the connection before forwarding the request |
 | Per-sandbox memory cap | gVisor: none; Firecracker: 512 MiB guest memory by default | `memory_limit_mib` configures the limit; Firecracker adds 64 MiB for the VMM to its cgroup `memory.max` |
-| Audit log | `/var/log/sandstorm/audit.log`, JSON lines | tail with vector / fluentbit; rotate with logrotate |
+| API audit log | not wired up | The audit middleware exists but is not attached to the API router |
 
 Sandbox HTTP gateways listen on `0.0.0.0` at their assigned node ports and
 check `x-sandstorm-sandbox-token`, as do the API's `exec`, `eval` and `ping`
@@ -70,6 +72,12 @@ not:
 
 - **Node gateways serve plain HTTP.** Control-plane TLS does not encrypt
   their sandbox tokens or application traffic.
+- **The E2B front door does not authenticate sandbox port requests.** When
+  enabled, it supplies the sandbox token itself for E2B-created sandboxes.
+  Anyone who can reach the front door and knows such a sandbox's ID can
+  access its ports without an API key or sandbox token, subject to any
+  authentication in the application. The E2B management API still requires
+  an API key.
 - **One API token, no scopes or tenants.** The `owner` column exists in the
   schema and nothing reads it.
 
