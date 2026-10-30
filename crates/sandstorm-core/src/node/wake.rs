@@ -200,7 +200,7 @@ impl Wakeups {
         self.saw_at(id, Instant::now());
     }
 
-    fn saw_at(&self, id: &str, now: Instant) {
+    pub(super) fn saw_at(&self, id: &str, now: Instant) {
         let mut demand = self.demand.lock();
         let d = demand.entry(id.to_string()).or_insert((0.0, now));
         *d = (decayed(*d, now) + 1.0, now);
@@ -302,6 +302,10 @@ impl Wakeups {
     /// the returned guard is dropped -- once the answer is in hand, or the
     /// caller has gone -- the sandbox is not put away to make room.
     pub fn hold(self: &Arc<Self>, id: &str) -> InFlight {
+        // Serialize enrollment with the tier-change check, then let the
+        // request run without holding this lock (a wake needs it too).
+        let lock = self.lock(id);
+        let _held = lock.lock();
         *self.in_flight.lock().entry(id.to_string()).or_default() += 1;
         InFlight {
             wake: self.clone(),

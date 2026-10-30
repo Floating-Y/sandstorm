@@ -740,6 +740,14 @@ enum Step {
     Answered(CommandResult),
 }
 
+/// Keep an exec or branch protected while its backend does synchronous work.
+fn run_active<T>(wake: &Arc<Wakeups>, id: &str, work: impl FnOnce() -> T) -> T {
+    let _in_flight = wake.hold(id);
+    let lock = wake.lock(id);
+    let _held = lock.lock();
+    work()
+}
+
 /// Offer one command. Shared by both ways a node can be driven, so the
 /// backoff, the admission check and the failure book behave identically
 /// whichever side opened the connection.
@@ -747,7 +755,7 @@ fn run_one(
     cfg: &NodeConfig,
     rt: &Runtime,
     failing: &mut HashMap<String, Failing>,
-    wake: &Wakeups,
+    wake: &Arc<Wakeups>,
     cmd: &Command,
     now: Instant,
 ) -> Step {
@@ -759,17 +767,7 @@ fn run_one(
         }
     }
 
-    // A sandbox that just served a request is not demoted on a view of it
-    // that predates the request. The master issued this before it heard
-    // about the traffic; once it has, it stops asking. Not a failure, so
-    // the failure book is left alone.
     if let Command::SetTier { tier, .. } = cmd {
-        if !tier.is_serving() {
-            if let Some(left) = wake.in_grace(&id, now) {
-                tracing::debug!(sandbox = %id, %tier, wait_ms = left.as_millis() as u64, "in use; demotion deferred");
-                return Step::Later(left);
-            }
-        }
         // And the other way: a sandbox this node put to disk to make room
         // is not brought back on a view of it that predates that. The
         // master stops asking once a report has told it.
@@ -791,7 +789,9 @@ fn run_one(
             timeout_secs,
         } => {
             return Step::Answered(
-                match rt.exec(sb, args, Duration::from_secs(*timeout_secs)) {
+                match run_active(wake, sb, || {
+                    rt.exec(sb, args, Duration::from_secs(*timeout_secs))
+                }) {
                     Ok((stdout, stderr, exit_code)) => CommandResult {
                         result_id: exec_id.clone(),
                         stdout,
@@ -814,7 +814,7 @@ fn run_one(
             tag,
             result_id,
         } => {
-            return Step::Answered(match rt.branch(sb, tag) {
+            return Step::Answered(match run_active(wake, sb, || rt.branch(sb, tag)) {
                 Ok(size_bytes) => CommandResult {
                     result_id: result_id.clone(),
                     stdout: String::new(),
@@ -872,6 +872,18 @@ fn run_one(
     // runsc on this sandbox at the same time.
     let lock = wake.lock(&id);
     let _held = lock.lock();
+    // Check at the tier-change boundary: a request can outlive grace or
+    // arrive while this command waits for the sandbox lock.
+    if let Command::SetTier { tier, .. } = cmd {
+        if !tier.is_serving() {
+            if let Some(left) = wake.in_grace(&id, Instant::now()) {
+                return Step::Later(left);
+            }
+            if wake.protected(&id, Instant::now()) {
+                return Step::Later(HELD_BACK_RETRY);
+            }
+        }
+    }
     let out = if let Command::SetTier {
         id,
         tier: Tier::Hot,
@@ -1027,7 +1039,7 @@ async fn poll_once(
     failing: &mut HashMap<String, Failing>,
     hold: Duration,
     gw: &mut Gateway,
-    wake: &Wakeups,
+    wake: &Arc<Wakeups>,
 ) -> Result<Option<Duration>> {
     let req = report(cfg, rt, failing, gw, wake, Some(hold)).await?;
     let url = format!("{}/v1/node/poll", cfg.master_url.trim_end_matches('/'));
@@ -1324,7 +1336,7 @@ mod wake_tests {
     fn a_sandbox_in_use_is_not_demoted() {
         let dir = tempfile::tempdir().unwrap();
         let (cfg, rt) = node(dir.path());
-        let w = Wakeups::new(|_, _, _| Ok(()));
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
         let mut failing = HashMap::new();
         w.saw("sb");
 
@@ -1354,7 +1366,8 @@ mod wake_tests {
         // And once the grace is over, demotion goes ahead (to the same
         // runtime failure).
         failing.clear();
-        let later = Instant::now() + wake::GRACE;
+        w.saw_at("sb", Instant::now() - wake::GRACE);
+        let later = Instant::now();
         run_one(
             &cfg,
             &rt,
@@ -1364,6 +1377,149 @@ mod wake_tests {
             later,
         );
         assert!(failing.contains_key("sb"));
+    }
+
+    #[test]
+    fn an_active_request_outlives_its_grace_period() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, rt) = node(dir.path());
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
+        let mut failing = HashMap::new();
+        w.saw_at("sb", Instant::now() - wake::GRACE);
+        let now = Instant::now();
+        let request = w.hold("sb");
+
+        assert!(matches!(
+            run_one(&cfg, &rt, &mut failing, &w, &set_tier(Tier::Snapshot), now),
+            Step::Later(_)
+        ));
+        assert!(failing.is_empty());
+
+        drop(request);
+        let result = run_one(&cfg, &rt, &mut failing, &w, &set_tier(Tier::Snapshot), now);
+        assert!(matches!(result, Step::Later(_)));
+        assert!(
+            !failing.is_empty(),
+            "the released sandbox should reach the runtime"
+        );
+    }
+
+    #[test]
+    fn active_command_excludes_reclamation_but_not_other_sandboxes() {
+        use std::path::{Path, PathBuf};
+        use std::sync::mpsc;
+
+        struct BlockingBackend {
+            entered: mpsc::Sender<()>,
+            release: parking_lot::Mutex<mpsc::Receiver<()>>,
+        }
+
+        impl backend::Backend for BlockingBackend {
+            fn version(&self) -> String {
+                "blocking-test".into()
+            }
+            fn template_root(&self, dir: &Path) -> PathBuf {
+                dir.join("rootfs")
+            }
+            fn prepare(&self, _: &RuntimeConfig, _: &bundle::BuildRequest<'_>) -> Result<PathBuf> {
+                unreachable!()
+            }
+            fn layer(&self, cfg: &RuntimeConfig, id: &str) -> PathBuf {
+                cfg.work_dir.join("layers").join(id)
+            }
+            fn unmount(&self, _: &RuntimeConfig, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn teardown(&self, _: &RuntimeConfig, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn boot(&self, _: &str, _: &Path) -> Result<()> {
+                Ok(())
+            }
+            fn restore(&self, _: &str, _: &Path, _: &Path) -> Result<()> {
+                Ok(())
+            }
+            fn checkpoint(&self, _: &str, image: &Path, _: bool) -> Result<()> {
+                self.entered.send(()).unwrap();
+                self.release.lock().recv().unwrap();
+                std::fs::write(image.join("checkpoint.img"), b"pages")?;
+                Ok(())
+            }
+            fn validate(&self, image: &Path) -> Result<()> {
+                anyhow::ensure!(image.join("checkpoint.img").is_file(), "missing checkpoint");
+                Ok(())
+            }
+            fn remove(&self, _: &str) {}
+            fn kill(&self, _: &str) {}
+            fn exec(&self, _: &str, _: &[String], _: Duration) -> Result<(String, String, i64)> {
+                self.entered.send(()).unwrap();
+                self.release.lock().recv().unwrap();
+                anyhow::bail!("fake exec failure")
+            }
+            fn resume_after_checkpoint(&self, _: &str, _: &Path) -> Result<bool> {
+                Ok(true)
+            }
+        }
+
+        for id in ["exec", "branch"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (cfg, _) = node(dir.path());
+            let bundle = cfg.runtime.work_dir.join("bundles").join(id);
+            std::fs::create_dir_all(&bundle).unwrap();
+            std::fs::write(bundle.join("config.json"), "{}").unwrap();
+            let (entered, running) = mpsc::channel();
+            let (release, released) = mpsc::channel();
+            let backend = Arc::new(BlockingBackend {
+                entered,
+                release: parking_lot::Mutex::new(released),
+            });
+            let rt = Runtime::with_backend(cfg.runtime.clone(), backend).unwrap();
+            let wake = Arc::new(Wakeups::new(|_, _, _| Ok(())));
+            let worker_wake = wake.clone();
+            let worker = std::thread::spawn(move || {
+                let command = if id == "exec" {
+                    Command::Exec {
+                        exec_id: "result".into(),
+                        id: id.into(),
+                        args: vec!["true".into()],
+                        timeout_secs: 1,
+                    }
+                } else {
+                    Command::Branch {
+                        id: id.into(),
+                        tag: "copy".into(),
+                        result_id: "result".into(),
+                    }
+                };
+                run_one(
+                    &cfg,
+                    &rt,
+                    &mut HashMap::new(),
+                    &worker_wake,
+                    &command,
+                    Instant::now(),
+                )
+            });
+            running.recv().unwrap();
+
+            assert!(wake.protected(id, Instant::now()));
+            assert!(
+                wake.lock(id).try_lock().is_none(),
+                "a pressure reclaim must skip this sandbox"
+            );
+            assert!(wake.lock("other").try_lock().is_some());
+
+            release.send(()).unwrap();
+            let expected_exit_code = if id == "exec" { -1 } else { 0 };
+            assert!(
+                matches!(worker.join().unwrap(), Step::Answered(result) if result.exit_code == expected_exit_code)
+            );
+            assert!(!wake.protected(id, Instant::now()));
+            assert!(
+                wake.lock(id).try_lock().is_some(),
+                "reclamation can resume after completion"
+            );
+        }
     }
 
     /// A bundle with nothing running and no snapshot is dead once it is old
@@ -1402,7 +1558,7 @@ mod wake_tests {
     fn a_wake_short_of_swap_is_not_waited_out() {
         let dir = tempfile::tempdir().unwrap();
         let (_, rt) = node(dir.path());
-        let w = Wakeups::new(|_, _, _| Ok(()));
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
         let t0 = Instant::now();
         let r = promote_reading(512, 8.0, &rt, &w, "sb", Duration::from_secs(5), &|| {
             runtime::HostReading {
@@ -1424,7 +1580,7 @@ mod wake_tests {
     fn a_wake_waits_for_pressure_to_pass() {
         let dir = tempfile::tempdir().unwrap();
         let (_, rt) = node(dir.path());
-        let w = Wakeups::new(|_, _, _| Ok(()));
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
         let held = |r: &Result<()>| {
             r.as_ref()
                 .err()
@@ -1467,7 +1623,7 @@ mod wake_tests {
         let (mut cfg, rt) = node(dir.path());
         // Any pressure reading, 0 included, is over this.
         cfg.admit_max_psi = -1.0;
-        let w = Wakeups::new(|_, _, _| Ok(()));
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
         let mut failing = HashMap::new();
         let mut create = fork_from_elsewhere("sb", "127.0.0.1:1");
         if let Command::Create {
@@ -1518,7 +1674,7 @@ mod wake_tests {
     async fn a_fork_waits_for_its_image_and_a_failed_fetch_counts() {
         let dir = tempfile::tempdir().unwrap();
         let (cfg, rt) = node(dir.path());
-        let w = Wakeups::new(|_, _, _| Ok(()));
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
         let mut failing = HashMap::new();
         // Nothing listens on port 1, so the fetch fails.
         let cmd = fork_from_elsewhere("sb", "127.0.0.1:1");
@@ -1546,7 +1702,7 @@ mod wake_tests {
     fn a_dropped_tag_leaves_the_disk() {
         let dir = tempfile::tempdir().unwrap();
         let (cfg, rt) = node(dir.path());
-        let w = Wakeups::new(|_, _, _| Ok(()));
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
         let mut failing = HashMap::new();
         std::fs::create_dir_all(rt.tags_dir().join("old")).unwrap();
         std::fs::write(rt.tags_dir().join("old/pages.img"), b"x").unwrap();

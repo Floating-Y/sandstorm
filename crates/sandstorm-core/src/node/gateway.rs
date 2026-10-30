@@ -782,6 +782,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_streamed_answer_stays_protected_after_headers_and_releases_on_finish_or_cancel() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 28481u16))
+            .await
+            .unwrap();
+        let (release_first, first_released) = tokio::sync::oneshot::channel::<()>();
+        let (release_second, second_released) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            for release in [first_released, second_released] {
+                let (mut stream, _) = upstream.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                assert!(stream.read(&mut request).await.unwrap() > 0);
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n")
+                    .await
+                    .unwrap();
+                let _ = release.await;
+                let _ = stream.write_all(b"hi").await;
+            }
+        });
+
+        let wake = Arc::new(Wakeups::new(|_, _, _| Ok(())));
+        let mut gateway = Gateway::waking(wake.clone());
+        let mut exposed = spec("sb-stream", 28480);
+        exposed.sandbox_ip = "127.0.0.1".parse().unwrap();
+        exposed.sandbox_port = 28481;
+        gateway.reconcile(&[exposed]).await;
+
+        let first = get(28480).await;
+        assert_eq!(first.status(), 200);
+        assert!(wake.protected("sb-stream", std::time::Instant::now()));
+        release_first.send(()).unwrap();
+        assert_eq!(first.text().await.unwrap(), "hi");
+        assert!(!wake.protected("sb-stream", std::time::Instant::now()));
+
+        let second = get(28480).await;
+        assert_eq!(second.status(), 200);
+        assert!(wake.protected("sb-stream", std::time::Instant::now()));
+        drop(second);
+        for _ in 0..100 {
+            if !wake.protected("sb-stream", std::time::Instant::now()) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!wake.protected("sb-stream", std::time::Instant::now()));
+        let _ = release_second.send(());
+        server.await.unwrap();
+        gateway.reconcile(&[]).await;
+    }
+
+    #[tokio::test]
     async fn a_wake_the_node_refuses_is_a_503_with_the_reason() {
         let gw_port = 28463u16;
         let w = Arc::new(Wakeups::new(|_, _, _| {
