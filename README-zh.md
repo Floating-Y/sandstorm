@@ -11,29 +11,30 @@
 
 <div align="center">
 
-[工作原理](#工作原理) · [实测数据](#实测数据) · [快速开始](#快速开始) · [状态](#状态)
+[工作原理](#工作原理) · [延迟](#延迟) · [快速开始](#快速开始) · [状态](#状态)
 
 [![CI](https://img.shields.io/github/actions/workflow/status/deeplethe/sandstorm/ci.yml?branch=dev&style=flat-square&label=CI&labelColor=161B22)](https://github.com/deeplethe/sandstorm/actions)
 [![License](https://img.shields.io/badge/LICENSE-APACHE%202.0-3FB950?style=flat-square&labelColor=161B22)](LICENSE)
 [![Rust](https://img.shields.io/badge/BUILT%20WITH-RUST-F74C00?style=flat-square&labelColor=161B22&logo=rust&logoColor=FFFFFF)](https://www.rust-lang.org)
 [![DeepLethe](https://img.shields.io/badge/BUILT%20BY-DEEPLETHE-F1F2F5?style=flat-square&labelColor=161B22)](https://deeplethe.com)
-[![gVisor](https://img.shields.io/badge/ISOLATION-GVISOR-2D333B?style=flat-square&labelColor=161B22)](https://gvisor.dev)
+[![gVisor](docs/assets/badges/gvisor.svg)](https://gvisor.dev)
+[![Firecracker](docs/assets/badges/firecracker.svg)](https://firecracker-microvm.github.io)
 [![English](https://img.shields.io/badge/LANG-ENGLISH-2D333B?style=flat-square&labelColor=161B22)](README.md)
 
 </div>
 
-**一个有意超卖的沙箱集群。** agent 的沙箱大部分时间都闲着。Sandstorm 先把闲置的沙箱暂停，再把它 checkpoint 到磁盘；请求一到，马上恢复。所以一台机器能装下的沙箱，远多于它能同时跑着的数量。每个沙箱都是一个 [gVisor](https://gvisor.dev) 容器，有自己的网络命名空间。Sandstorm 跑在普通云主机上，不需要 KVM，也不需要嵌套虚拟化。
-
-六台 2 核 2 GB 的云主机，全部常驻只能放 **286** 个 Python HTTP 服务；用 Sandstorm 放了 **20,000** 个。之后随机抽 1,200 个去请求，1,198 个都正常响应。
+**一台机器，万千沙箱。** Sandstorm 通过暂停闲置沙箱并将其快照保存到磁盘，在请求到达时快速恢复，使单台机器能够承载远超其实际并发运行能力的沙箱数量。支持 [gVisor](https://gvisor.dev) 容器和 [Firecracker](https://firecracker-microvm.github.io) microVM 两种沙箱后端。每个沙箱都拥有独立的网络命名空间，不同后端可以在同一集群中运行，并形成各自独立的资源池。主控节点提供 Web 控制台，用于查看和管理沙箱及集群调度。
 
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-overview-dark.svg">
-  <img alt="六台 2 核 2 GB 机器，全部常驻只能放 286 个，Sandstorm 放了 20,000 个沙箱；下面四张小图：按闲置时长看请求延迟，流量加大时的延迟和拒绝比例（对照 round 3），按堆大小看每个节点能常驻的数量，按堆大小看从磁盘唤醒的时间" src="docs/assets/charts/fleet-overview-light.svg" width="800">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/compare-dark.svg">
+  <img alt="各运行时 64 MiB 应用的启动时间、内存和克隆时间：云主机上 Sandstorm Firecracker 预热模板 84 ms，CubeSandbox 87 ms；KVM 机器上 100 ms 和 129 ms，内存 11 和 12 MiB，克隆成 20 份 938 ms 和 1.1 s；Docker + gVisor 685 ms，microsandbox 1.1 s，Kata 3.4 s。" src="docs/assets/charts/compare-light.svg" width="100%">
 </picture>
 
 </div>
+
+<sub>64 MiB 应用，启动 20 次取 p50，对数坐标。每栏各自排名，第一名是金色；Sandstorm 的其他行是蓝色。FC：[Firecracker](https://firecracker-microvm.github.io)。Cube：[CubeSandbox](https://github.com/TencentCloud/CubeSandbox)。另有 [microsandbox](https://github.com/superradcompany/microsandbox)、[Kata](https://katacontainers.io)、[Docker](https://www.docker.com)、[Podman](https://podman.io)、[bubblewrap](https://github.com/containers/bubblewrap)。warm：从应用已启动好的镜像恢复。云主机：[gVisor](https://gvisor.dev) 和容器用 6 台 2 核 2 GB 节点；Firecracker 和 CubeSandbox 用一台 [PVM](https://github.com/virt-pvm/linux) 下的 2 核 3.6 GB VM。KVM 机器：2 × Xeon E5-2637 v2、31 GB。克隆指运行中的应用，到 20 份全部响应为止（microsandbox 到运行为止）。</sub>
 
 ## 工作原理
 
@@ -51,65 +52,35 @@
 - **节点会保护自己。** 内存不够时，节点会拒绝新任务，不会把自己撑爆，ssh 也一直能连上。
 - **只有一个二进制。** `sandstormd` 既是 master，也是节点，还带 web 面板。
 
-## 延迟和开销
+master 在 `/` 提供控制台：每个沙箱在哪一档、在各档之间流动多快、每个节点还剩多少内存。
 
-开头总览图下面的四张小图，依次是：
-
-- **唤醒。** 在节点本机上测，不经过网络。热的沙箱 3.8 ms 就有响应。冻结的沙箱，解冻只要 11 ms，其余时间主要花在把堆内存从 zswap 读回来，合计约 100 ms。已落盘的沙箱，64 MiB 的堆恢复约 230 ms。
-- **有流量的时候。** 每个节点放 40 个沙箱，只装得下约 12 个同时醒着，少数几个沙箱拿走大部分请求。唤醒时内存不够，节点会先把最少被用到的沙箱落盘腾出位置；2 秒内起不来的唤醒直接拒绝，不排队。所以每个节点每秒 1、2、4、8 个请求时，被拒绝的只有 **1.1%、0.1%、0.2%、2.5%**，修复前是 13%、26%、32%、33%（三遍，共 40,500 个请求）。代价在长尾：要等恢复的请求，p99 在各个速率下都是 2 秒左右。超过节点的周转能力时——每节点 80 个、每秒 8 个请求——会拒绝 10.6%，p99 是 3.2 秒。
-- **更重的沙箱。** 堆内存大的时候，一个沙箱的开销和同一个程序直接作为普通进程跑差不多：64 MiB 时每个节点 13 个对 11 个，256 MiB 时 6 个对 4 个，因为节点会把闲置的页压进 zswap，而测试用的堆特别好压缩。堆小的时候，gVisor 自身的开销占大头，分档正是用来弥补这个差距的。从磁盘恢复的时间随堆增长：64 MiB 要 0.2 s，256 和 512 MiB 约 1 s，1 GiB 要 3.6 s。
-
-## 同样的机器，不用 Sandstorm
-
-<div align="center">
-
+<p align="center">
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-compare-dark.svg">
-  <img alt="一台 2 核 2 GB 节点能放的 Python HTTP 服务：普通进程约 96 个，bubblewrap 94 个，Podman 88 个，Docker 60 个，Docker + gVisor 32 个，Sandstorm 全部常驻 48 个，Sandstorm 闲置的分档落盘 3,333 个" src="docs/assets/charts/fleet-compare-light.svg" width="800">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/console-dark.webp">
+  <img alt="Sandstorm 控制台：顶部是沙箱数、常驻数、节点数、每分钟创建数和 API p99；左边是常驻、冻结、磁盘、离线四档之间的流动；右边是各档沙箱数随时间变化、生命周期速率、节点余量和延迟。" src="docs/assets/console-light.webp">
 </picture>
+</p>
 
-</div>
+## 延迟
 
-同一个 Python HTTP 服务，同样六个节点，每种运行时都全部放在内存里，一直加到只剩 512 MiB，每个节点测两遍（[`baselines.py`](bench/fleet/baselines.py)）。同样是 gVisor 隔离，Sandstorm 全部常驻时比 Docker + gVisor 多放一半，因为它没有守护进程，也不需要每个容器一个 shim；闲置的分档落盘之后，比任何全部常驻的方式都多出两个数量级。
-
-| 每节点，2 vCPU，1.9 GB | HTTP 服务常驻数 | 64 MiB 堆 |
-|---|---:|---:|
-| 普通进程 | 96 | 11 |
-| bubblewrap | 94 | 11 |
-| Podman (crun) | 88 | 12 |
-| Docker (runc) | 60 | 10 |
-| Docker + gVisor | 32 | 9 |
-| **Sandstorm，全部常驻** | **48** | **13** |
-| **Sandstorm，闲置的分档** | **3,333** | |
-
-启动速度在同一台机器上测（bm：AMD EPYC 9K65，2 vCPU，3.6 GB；dev 872682b），方法和基线一样：一次启动一个，每 50 ms 请求一次，直到它响应（[`starttime.py`](bench/fleet/starttime.py)）。Sandstorm 的时间包括 master 调度和节点建网络。
-
-| 启动到首次响应，p50 | web | 64 MiB 应用 |
-|---|---:|---:|
-| 普通进程 | 52 ms | 103 ms |
-| bubblewrap | 52 ms | 103 ms |
-| Docker (runc) | 192 ms | 244 ms |
-| Docker + gVisor | 217 ms | 333 ms |
-| **Sandstorm** | **167 ms** | **289 ms** |
-| **Sandstorm，预热模板** | **159 ms** | **168 ms** |
-
-Sandstorm 启动 64 MiB 应用的 289 ms 里，master 和建网络 37 ms，准备 bundle 5 ms，runsc 55 ms，剩下 189 ms 是 Python 导入 numpy、填充堆。预热模板直接恢复一个已经启动好的应用镜像，省掉了最后这段；它需要手动开启，因为每个沙箱都从同一份内存开始，模板要说明怎么重新播种随机数。50 ms 的轮询间隔是下限。
-
-Podman 下的 CRIU checkpoint/restore 是标准工具里最接近落盘档位的做法：64 MiB 应用落盘 0.3 s，恢复到首次响应 0.24 s；Sandstorm 恢复同一个应用要 0.2 s。E2B、CubeSandbox、microsandbox 都基于 Firecracker，需要 KVM，这几台云主机没有，所以没法在这里跑；同类项目的对比见 [docs/COMPARISON.md](docs/COMPARISON.md)。
-
-## 实测数据
-
-六个节点（AMD EPYC，每台 2 vCPU、1.9 GB），一个 master（2 vCPU），runsc `release-20261019.0`，2026-10-28。
+6 台 2 核 2 GB 云主机，gVisor，没有 KVM，2026-10-30。请求从每个节点发给它自己的 gateway，路径上没有网络。
 
 | | |
-|---|---|
-| 以每秒 20 个的速度创建 20,000 个 Python HTTP 服务 | 两遍都是 20,000 个全部起来，没有人工重试 |
-| 每个节点随机抽 100 个去请求 | 1,200 个里 1,198 个响应；p50 1.3 s，p99 2.8–5.5 s |
-| 唤醒：冻结的 / 从磁盘，64 MiB 应用 | 11 ms / 200 ms（Sandstorm 自身耗时） |
-| 一个节点同时唤醒 20 / 40 个 | 全部醒来；最慢 6 s / 13 s |
-| 64 MiB 应用从创建到首次响应 | 一个节点同时启动 5 个、每 0.25 s 查一次时 p50 1.4 s；一次一个时 0.29 s（见上文） |
+|---|---:|
+| 从冻结唤醒，64 MiB 应用 | 100-170 ms |
+| 从磁盘唤醒，16 / 64 / 256 MiB 应用 | 130 / 150 / 750 ms |
+| 从磁盘唤醒，512 MiB / 1 GiB 应用 | 1.1 / 3.3 s |
+| 每节点常驻内存：web / 64 MiB / 256 MiB 应用 | 50 / 13 / 6 |
 
-几点说明：为了让一轮测试在几分钟内跑完，闲置计时被调短了。测试用的堆是 `numpy.ones`，在 zswap 里压缩率异常高。20,000 是这次测试停下来的地方，不是上限。方法、原始数据、每一遍运行，以及测试中发现的 bug，都在 [bench/fleet/results/2026-10-28](bench/fleet/results/2026-10-28/README.md)；上一轮见 [2026-10-26](bench/fleet/results/2026-10-26/README.md)。
+流量下，每节点 40 个沙箱（只放得下约 12 个醒着的），少数沙箱拿到大部分请求：每节点每秒 1、2、4、8 个请求时，40,523 个请求里分别有 **1.3%、0.2%、0.1%、1.3%** 被拒绝。p50 是 6-8 ms；p99 约 2 s，是需要等恢复的请求。2 秒内起不来的唤醒会被拒绝，而不是排队：节点同时恢复 2 个、排队 4 个，所以同一瞬间唤醒 10 个或更多时，6 个得到响应，其余立刻返回 503。
+
+## 测试方法
+
+顶部的图：每种运行时一次启动一个，每 5 ms 请求一次，测 20 次取 p50（[`compare.py`](bench/baremetal/compare.py)）。Sandstorm 的时间包括 master 调度和节点建网络。云主机一栏是 6 台 2 核 2 GB 节点的中位数；Firecracker 和 CubeSandbox 是一台 2 核 3.6 GB 的 VM，用 CubeSandbox 的 PVM 内核，让没有 KVM 的 VM 也有 `/dev/kvm`。
+
+预热模板恢复的是应用已经启动好的镜像，CubeSandbox 一直是这样启动的；Sandstorm 这边需要主动开启，因为所有沙箱都从同一份内存开始，模板得说明怎么重新播种随机数。CubeSandbox 的 API 始终从快照恢复，所以它的 cold 数字来自它自己的 `cubemastercli multirun`：用模板的创建请求，去掉快照注解，探针 5 ms 一次，从客户端调用到程序响应，和其他行口径一致。
+
+PVM 上两边的 warm 启动基本持平：web 和 64 MiB 应用，Sandstorm 是 52 / 83 ms，CubeSandbox 是 53 / 87 ms。KVM 机器上 Sandstorm 领先：67 / 100 ms 对 78 / 129 ms。cold 启动 Sandstorm 都领先：KVM 机器上 545 / 921 ms 对 828 / 999 ms，PVM 上 667 / 869 ms 对 845 / 1,094 ms。PVM 上 guest 默认不开串口，需要时用 `--fc-serial-console` 打开。同一台机器、同一个二进制，一天前 64 MiB 应用是 74 ms 和 78 ms，所以这一栏看相对差距。给运行中的沙箱打快照，Sandstorm 要 30 ms，CubeSandbox 要 304 ms。克隆成 1、10、20 份，Sandstorm 是 138、507、938 ms，CubeSandbox 是 494、1,046、1,064 ms；Sandstorm 在节点上逐个创建，每个约 45 ms，CubeSandbox 是同时创建，所以 n 更大时差距会缩小。E2B 自托管没有搭，PVM 上的内存没有测。原始数据见 [bench/baremetal/results/2026-10-30](bench/baremetal/results/2026-10-30/README.md)、[bench/fleet/results/2026-10-30](bench/fleet/results/2026-10-30/README.md)。
 
 ## 快速开始
 
@@ -131,10 +102,10 @@ scripts/fleet.sh seed     # 在每个节点放一个模板
 scripts/fleet.sh verify   # 启动一个沙箱，确认真的能跑
 ```
 
-**已经装好的节点**，用 `SANDSTORM_LISTEN=0.0.0.0:80` 监听。第一次启动时它会把配对码写到 `/var/lib/sandstorm/pki/node/pairing-code`。把地址和配对码交给 master：
+**已经装好的节点**，用 `SANDSTORM_LISTEN=0.0.0.0:80` 监听。第一次启动时它会把配对码写到 `/var/lib/sandstorm/pki/node/pairing-code`。把地址和配对码交给 master，CA 和 API token 用 master 上 `/var/lib/sandstorm/pki` 里的那两个文件：
 
 ```bash
-curl --cacert ca.pem -H "Authorization: Bearer $SANDSTORM_TOKEN" \
+curl --cacert ca.pem -H "Authorization: Bearer $(cat api-token)" -H 'Content-Type: application/json' \
   https://master:8080/v1/nodes -d '{"address": "10.0.0.5", "pairing_code": "<配对码>"}'
 ```
 
@@ -144,7 +115,7 @@ HTTP API 见 [docs/API.md](docs/API.md)。集群压测见 [bench/fleet](bench/fl
 
 ## 状态
 
-v0.6 还没有发布，改动很大：后端从 Firecracker 微虚拟机换成 gVisor，从单机变成集群。最近一次发布是 v0.5.3，那是基于 Firecracker 的 fork 运行时，它的 README 见[那个 tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3)。设计文档在 [DESIGN-v0.6.md](DESIGN-v0.6.md)。
+v0.6 还没有发布，改动很大：后端从 Firecracker 微虚拟机换成 gVisor，从单机变成集群。最近一次发布是 v0.5.3，那是基于 Firecracker 的 fork 运行时，它的 README 见[那个 tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3)。架构决策记录在 [docs/adr](docs/adr/README.md)（英文）。
 
 接下来，来自集群实测发现的问题：
 

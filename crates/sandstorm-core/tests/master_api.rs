@@ -870,7 +870,8 @@ async fn a_requested_port_is_honoured() {
 }
 
 /// Running out of addresses is a clear refusal at create time, not a
-/// sandbox that is accepted and then cannot be given a network.
+/// sandbox that is accepted and then cannot be given a network -- and a
+/// batch that runs out partway is refused whole.
 #[tokio::test]
 async fn an_exhausted_address_plan_is_refused_up_front() {
     let td = TempDir::new().unwrap();
@@ -902,21 +903,29 @@ async fn an_exhausted_address_plan_is_refused_up_front() {
     put_template(&h, "python").await;
     let c = reqwest::Client::new();
 
-    for i in 0..3 {
-        let r = c
-            .post(format!("{}/v1/sandboxes", h.base))
-            .json(&serde_json::json!({ "template": "python" }))
+    let create = |body: serde_json::Value| {
+        c.post(format!("{}/v1/sandboxes", h.base))
+            .json(&body)
             .send()
-            .await
-            .unwrap();
+    };
+    let one = serde_json::json!({ "template": "python" });
+    for i in 0..2 {
+        let r = create(one.clone()).await.unwrap();
         assert_eq!(r.status(), 201, "sandbox {i} should have got a slot");
     }
-    let r = c
-        .post(format!("{}/v1/sandboxes", h.base))
-        .json(&serde_json::json!({ "template": "python" }))
-        .send()
+
+    // Two more when one slot is left: refused whole, nothing written, and
+    // the slot is still there for a single create.
+    let store = Store::open(h._td.path().join("state.db")).unwrap();
+    let before = format!("{:?}", store.list_sandboxes().unwrap());
+    let r = create(serde_json::json!({ "template": "python", "n": 2 }))
         .await
         .unwrap();
+    assert_eq!(r.status(), 503);
+    assert_eq!(format!("{:?}", store.list_sandboxes().unwrap()), before);
+    assert_eq!(create(one.clone()).await.unwrap().status(), 201);
+
+    let r = create(one).await.unwrap();
     assert_eq!(r.status(), 503);
     let body: serde_json::Value = r.json().await.unwrap();
     assert!(
@@ -1486,7 +1495,7 @@ mod exec {
 mod api_auth {
     use super::*;
 
-    /// The console page is public, like the panel; what it shows is not.
+    /// The console page is public, at / and /console; what it shows is not.
     /// Its data routes sit behind the token, and a master that is not
     /// recording history says so rather than answering with nothing.
     #[tokio::test]
@@ -1494,9 +1503,14 @@ mod api_auth {
         let (h, token) = guarded().await;
         let c = reqwest::Client::new();
 
-        let page = c.get(format!("{}/console", h.base)).send().await.unwrap();
-        assert_eq!(page.status(), 200);
-        assert!(page.text().await.unwrap().contains("sandstorm console"));
+        for path in ["/", "/console"] {
+            let page = c.get(format!("{}{path}", h.base)).send().await.unwrap();
+            assert_eq!(page.status(), 200, "{path}");
+            assert!(
+                page.text().await.unwrap().contains("Sandstorm console"),
+                "{path}"
+            );
+        }
 
         for path in [
             "/v1/console/now",
@@ -1518,6 +1532,10 @@ mod api_auth {
             .unwrap();
         assert!(now["nodes"].is_array());
         assert_eq!(now["failed"], 0);
+        // The thresholds the console marks are the master's own; this
+        // harness admits everything, so it says so.
+        assert_eq!(now["floor_mib"], 0);
+        assert!(now["max_psi"].is_number());
 
         // This harness builds a state without a history store.
         let series = c
@@ -2035,6 +2053,21 @@ mod branch {
             .unwrap();
         let arr = kids.as_array().expect("the v0.5 body gets a list back");
         assert_eq!(arr.len(), 4);
+        // One transaction for the four, and each still got its own slot and port.
+        let all = Store::open(h._td.path().join("state.db"))
+            .unwrap()
+            .list_sandboxes()
+            .unwrap();
+        let distinct = |f: fn(&sandstorm_core::state::Sandbox) -> Option<u32>| {
+            all.iter()
+                .filter_map(f)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        };
+        assert_eq!(all.len(), 5);
+        assert_eq!(distinct(|s| s.net_index), 5);
+        assert_eq!(distinct(|s| s.gateway_port.map(u32::from)), 5);
+
         let mut slots = std::collections::HashSet::new();
         for k in arr {
             assert_eq!(k["node_id"], "bm-1", "forks land where the image is");
@@ -2896,6 +2929,69 @@ async fn what_each_node_has_on_shows_in_metrics() {
     assert!(m.contains(r#"feature="swap:zswap"} 1"#));
 }
 
+/// The sandbox list filters and pages when asked, says how many matched,
+/// and is the whole list when not asked.
+#[tokio::test]
+async fn the_sandbox_list_filters_and_pages() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let v: serde_json::Value = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({ "template": "python" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(v["id"].as_str().unwrap().to_string());
+    }
+    let r = c
+        .post(format!("{}/v1/sandboxes/{}/tier", h.base, ids[0]))
+        .json(&serde_json::json!({ "tier": "snapshot" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+
+    let list = |query: String| {
+        let url = format!("{}/v1/sandboxes{query}", h.base);
+        async move {
+            let r = reqwest::Client::new().get(url).send().await.unwrap();
+            let total: usize = r.headers()["x-total-count"]
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let page: Vec<serde_json::Value> = r.json().await.unwrap();
+            (
+                total,
+                page.into_iter()
+                    .map(|v| v["id"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>(),
+            )
+        }
+    };
+    let (total, all) = list(String::new()).await;
+    assert_eq!((total, all.len()), (3, 3));
+    let (total, page) = list("?limit=2".into()).await;
+    assert_eq!((total, page.len()), (3, 2));
+    let (total, rest) = list("?limit=2&offset=2".into()).await;
+    assert_eq!((total, rest.len()), (3, 1));
+    let (total, disk) = list("?tier=snapshot".into()).await;
+    assert_eq!((total, disk), (1, vec![ids[0].clone()]));
+    let (total, found) = list(format!("?q={}", ids[1][3..15].to_uppercase())).await;
+    assert_eq!((total, found), (1, vec![ids[1].clone()]));
+    let (total, _) = list("?node=bm-2".into()).await;
+    assert_eq!(total, 0);
+    let (total, _) = list("?failing=true".into()).await;
+    assert_eq!(total, 0);
+}
+
 /// A node that put a sandbox to disk to make room for a wake is taken at its
 /// word: desired state follows it down and nothing asks for it back, which
 /// would only make the node evict something else. A node that does not hold
@@ -3072,4 +3168,243 @@ async fn a_held_back_create_is_never_given_up_on() {
         get().await["last_error"].is_null(),
         "the error outlived the sandbox coming up"
     );
+}
+
+#[tokio::test]
+async fn pool_batch_respects_whole_node_capacity() {
+    // (capacity, existing count, requested count, expected status)
+    for (capacity, existing, requested, status) in [
+        (1, 0, 2, 503),
+        (2, 1, 2, 503),
+        (3, 1, 2, 201),
+        (0, 1, 3, 201),
+        (1, 0, 1, 201),
+        (1, 1, 1, 503),
+    ] {
+        let h = start().await;
+        register_with_cap(&h, "node", "default", capacity).await;
+        put_template(&h, "python").await;
+        let c = reqwest::Client::new();
+        for _ in 0..existing {
+            let r = c
+                .post(format!("{}/v1/sandboxes", h.base))
+                .json(&serde_json::json!({"template": "python"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 201);
+        }
+        let store = Store::open(h._td.path().join("state.db")).unwrap();
+        let before = format!("{:?}", store.list_sandboxes().unwrap());
+        let port_before = store.allocate_gateway_port("node", 20000, 20010).unwrap();
+        let net_before = store.allocate_net_index("node", 100).unwrap();
+        let r = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({"template": "python", "n": requested}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            status,
+            "capacity={capacity}, existing={existing}, requested={requested}"
+        );
+        if status == 503 {
+            assert_eq!(format!("{:?}", store.list_sandboxes().unwrap()), before);
+            assert_eq!(
+                store.allocate_gateway_port("node", 20000, 20010).unwrap(),
+                port_before
+            );
+            assert_eq!(store.allocate_net_index("node", 100).unwrap(), net_before);
+            let metrics = c
+                .get(format!("{}/metrics", h.base))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            assert!(
+                metrics.contains("sandstorm_sandbox_creates_total{outcome=\"refused\"} 1\n"),
+                "{metrics}"
+            );
+        } else {
+            assert_eq!(
+                store.list_sandboxes().unwrap().len(),
+                (existing + requested) as usize
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn pool_batch_selects_a_node_with_room_without_splitting() {
+    for large_capacity in [2, 3] {
+        let h = start().await;
+        register_with_cap(&h, "small", "default", 1).await;
+        register_with_cap(&h, "large", "default", large_capacity).await;
+        put_template(&h, "python").await;
+        let c = reqwest::Client::new();
+        let r = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({"template": "python", "node_id": "large"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 201);
+        let store = Store::open(h._td.path().join("state.db")).unwrap();
+        assert_eq!(store.count_sandboxes_on_node("large").unwrap(), 1);
+        let before = format!("{:?}", store.list_sandboxes().unwrap());
+        let r = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({"template": "python", "n": 2}))
+            .send()
+            .await
+            .unwrap();
+        if large_capacity == 2 {
+            assert_eq!(r.status(), 503);
+            assert_eq!(format!("{:?}", store.list_sandboxes().unwrap()), before);
+        } else {
+            assert_eq!(r.status(), 201);
+            let children: Vec<serde_json::Value> = r.json().await.unwrap();
+            assert_eq!(children.len(), 2);
+            assert!(children.iter().all(|child| child["node_id"] == "large"));
+        }
+        assert_eq!(store.count_sandboxes_on_node("small").unwrap(), 0);
+    }
+}
+
+/// A node registered before it reported what its fingerprint is made of
+/// (an older node, or any node after a master restart) brings it with its
+/// next poll, and the master keeps it for the console. The poll already holds
+/// the store, so recording the host must not take it again: this deadlocked
+/// once, hence the timeout rather than a hang.
+#[tokio::test]
+async fn a_poll_brings_the_hosts_parts_to_the_console() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    let c = reqwest::Client::new();
+    let host = serde_json::json!({
+        "engine": "runsc version release-20261019.0",
+        "kernel": "7.0.0-1003-aws",
+        "cpu_vendor": "AuthenticAMD",
+        "cpu_model": "AMD EPYC 7K62 48-Core Processor",
+        "cpu_flags": "fpu sse2 avx2",
+    });
+    for _ in 0..2 {
+        let poll = c
+            .post(format!("{}/v1/node/poll", h.base))
+            .json(&serde_json::json!({
+                "node_id": "bm-1", "observed": [],
+                "free_memory_mib": 2000, "pressure_some_avg10": 0.0,
+                "hold_ms": 0, "host": host,
+            }))
+            .send();
+        let r = tokio::time::timeout(std::time::Duration::from_secs(5), poll)
+            .await
+            .expect("the poll never answered: recording the host deadlocked")
+            .unwrap();
+        assert_eq!(r.status(), 200);
+    }
+    let now: serde_json::Value = c
+        .get(format!("{}/v1/console/now", h.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(now["nodes"][0]["fingerprint"], "abc123");
+    assert_eq!(now["nodes"][0]["host"], host);
+}
+
+/// A registered node whose fingerprint changes under it -- runsc or the
+/// kernel upgraded -- is moved out of a pool whose other nodes it no longer
+/// matches, on its next poll.
+#[tokio::test]
+async fn a_node_whose_fingerprint_changes_leaves_its_pool() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    register(&h, "bm-2", "default").await;
+    let c = reqwest::Client::new();
+    let r = c
+        .post(format!("{}/v1/node/poll", h.base))
+        .json(&serde_json::json!({
+            "node_id": "bm-2", "observed": [],
+            "free_memory_mib": 2000, "pressure_some_avg10": 0.0,
+            "hold_ms": 0, "fingerprint": "def45678upgraded",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let nodes: serde_json::Value = c
+        .get(format!("{}/v1/nodes", h.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pool = |id: &str| {
+        nodes
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == id)
+            .unwrap()["pool"]
+            .clone()
+    };
+    assert_eq!(pool("bm-1"), "default");
+    assert_eq!(pool("bm-2"), "default#def45678");
+}
+
+/// A host group split off a pool -- another kind of machine, or one already
+/// upgraded -- still takes new sandboxes asked of the pool: only a snapshot
+/// is tied to a fingerprint, and a template boots anywhere. The sandbox
+/// records the group it landed in.
+#[tokio::test]
+async fn a_pools_split_off_host_group_takes_new_sandboxes() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    let c = reqwest::Client::new();
+    let tok: serde_json::Value = c
+        .post(format!("{}/v1/node-tokens", h.base))
+        .json(&serde_json::json!({ "pool": "default" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let joined: serde_json::Value = c
+        .post(format!("{}/v1/node/register", h.base))
+        .json(&serde_json::json!({
+            "token": tok["token"], "node_id": "bm-2",
+            "fingerprint": "intel999", "max_sandboxes": 100,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(joined["pool"], "default#intel999");
+    // Only the split-off node is left to place on.
+    c.post(format!("{}/v1/node/revoke/bm-1", h.base))
+        .send()
+        .await
+        .unwrap();
+    put_template(&h, "python").await;
+
+    let r = c
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python", "pool": "default" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "{}", r.text().await.unwrap());
+    let made: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(made["node_id"], "bm-2");
+    assert_eq!(made["pool"], "default#intel999");
 }

@@ -6,6 +6,97 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### A node's backend is chosen from the console
+
+"Add a node" offers Auto, gVisor or Firecracker and carries the choice into the
+install command (`SANDSTORM_BACKEND`, and `SANDSTORM_FC_KERNEL` and
+`SANDSTORM_STATE_DIR` where they are needed). The installer checks the machine
+before it installs anything, then has the node's own binary check again
+(`sandstormd preflight`, the checks a node makes when it starts), and refuses
+saying what is missing. It now also refuses gVisor where runsc is not
+installed, which used to be a warning. An empty node can change backend later:
+`POST /v1/nodes/:id/backend` has the node rewrite `--backend-file` and restart.
+Refused while the node holds any sandbox or snapshot. Nodes installed before
+this have no backend file and have to be reinstalled to switch.
+
+Nodes now report the templates they can start on their backend, the master
+places a template only on those, and a create can ask for a `backend`. A
+create no node can run is a 409 rather than a failure on a node.
+
+### A checkpoint that fails leaves no snapshot behind
+
+A checkpoint used to create `snapshots/<id>` before it ran and leave it there
+if it failed or timed out, and the node reported any such directory as the
+Snapshot tier: the master stopped retrying, and a wake restored from nothing.
+Each attempt now writes into a directory of its own, the backend checks the
+image's files (`Backend::validate`), the image is sealed with the length of
+every file, and only then is it renamed into place without replacing
+anything. A tag from `branch` is published the same way. A sandbox with
+processes in its cgroup is reported by them, whatever is on disk.
+### The official E2B SDKs work against Sandstorm
+
+`sandstormd serve --master --e2b-bind 0.0.0.0:443 --e2b-domain <domain>`
+serves E2B's REST API at `api.<domain>` (create, get, list, kill, connect,
+resume, pause, timeout, refresh, templates; `X-API-Key` is the master's API
+token) and every sandbox at `<port>-<id>.<domain>`, so `e2b`'s Python and JS
+SDKs work with only `E2B_DOMAIN` and `E2B_API_KEY` set. Sandboxes need a
+template with E2B's `envd` in it: `recipes/e2b-codeinterpreter` builds one.
+A create answers once envd has taken its environment and a freshly generated
+access token. `hot` and `frozen` read as `running`, `snapshot` and `detached`
+as `paused`. On bm the SDK's create, connect, commands (streamed), PTY,
+files, `watch_dir`, `get_host`, pause and resume all pass
+(`scripts/dev/e2b-sdk.py`).
+
+Not yet: the `timeout` deadline is recorded but nothing acts on it, and
+`secure=false`, `allowInternetAccess=false`, metrics and logs are accepted
+and ignored. `sudo` inside a sandbox is refused by `noNewPrivileges`.
+
+### The gateway streams, and one host port reaches every port of a sandbox
+
+The node gateway used to read a request's whole body, send it, then read the
+sandbox's whole answer before replying, with a 60 s limit on all of it. A
+server stream -- envd's `commands.run`, server-sent events, a long download
+-- arrived in one piece at the end or not at all. It now speaks HTTP/1.1 on
+a connection of its own per request and passes both bodies through as they
+arrive, with no overall time limit; a WebSocket upgrade is spliced through.
+The sandbox counts as in flight until its answer has been read to the end,
+not only until its headers arrived.
+
+`x-sandstorm-port: <port>` sends a request to that port inside the sandbox
+instead of the one it was created with. The token check is the same for every
+port, and neither header reaches the sandbox.
+
+### Design decisions are ADRs
+
+The design documents at the root are gone: `DESIGN.md`, the five
+`DESIGN-v0.4*.md` files, `DESIGN-v0.5-diff-snapshot-chains.md`,
+`DESIGN-v0.6.md`, and `docs/design/`. In their place,
+[`docs/adr/`](docs/adr/README.md) holds one architecture decision record per
+decision v0.6 is built on: gVisor rather than KVM, the four tiers, the master
+and its nodes, mTLS, pools, waking on traffic, nodes that protect themselves,
+making room on a wake, one binary, and the optional Firecracker backend. Each says only what holds for the code.
+
+`DESIGN-v0.6.md` was the RFC v0.6 started from, and parts of it were changed
+or dropped as it was built -- the `cold` tier, PostgreSQL on the master, gRPC
+between master and node. Its last version is at
+[`7b39861`](https://github.com/deeplethe/sandstorm/blob/7b3986150b71feeece318ce1b4475f3c291d3aae/DESIGN-v0.6.md);
+the Firecracker-era notes are in the
+[`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3), and
+relative links to them further down this file now point there.
+
+### The v0.5 Firecracker runtime leaves the tree
+
+`sandstorm-cli`, `sandstorm-vmm`, `sandstorm-uffd` and the `experiments/`
+crates are removed, with the design notes, benchmarks and scripts that only
+described or drove them; the guest-kernel scripts stay, since
+`--backend firecracker` boots that kernel. `sandstormd` never depended on any of them; they
+were still workspace members, so CI built them and readers took them for
+part of v0.6. Everything removed is in the
+[`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3), and
+links that pointed at it now point there. `docs/RUNBOOK.md` and
+`docs/ROADMAP.md` described only the v0.5 runtime and are now short
+pointers. The `/v1/sandboxes` refusal of `live_fork` and `hugepages` stays.
+
 ### forkd is now Sandstorm
 
 Everything is renamed at once, with no compatibility layer: the crates
@@ -17,6 +108,103 @@ paths (`/var/lib/sandstorm`, `/etc/sandstorm`), systemd units, HTTP headers
 `@deeplethe/sandstorm` on npm, `sandstorm-sdk` on PyPI (imported as
 `sandstorm`) and `sandstorm-mcp`. Entries below this one describe forkd and
 keep its names.
+
+### One console, at `/`
+
+The console is now the only web page: `/` serves it as well as `/console`,
+and the older panel is gone. It gains **Add a node**, with both ways a node
+joins -- a single-use command for a machine that dials in, and an address and
+pairing code for one the master connects to -- the README's mark and
+wordmark in its header, drawn as SVG in the theme's colours, with titles and
+figures set in the wordmark's Newsreader (a 22 KB subset inlined, since a
+master may have no internet), one neutral accent so colour is left to the
+data, plain tabs over a sliding underline, cards that are outlines with no
+fill on every tab, on columns that meet at the same edges, three corner radii
+(card, control, tag) used everywhere, a favicon in place of forkd's bolt, and
+sparklines that draw in once instead of replaying the sweep on every refresh.
+The header says the time of the last update rather than a count of seconds
+that ticked every second, and has a button to refresh now.
+
+What the panel had and more is in the console too: every sandbox, searchable
+and filtered by tier, node or failing, a page at a time, with wake, freeze,
+to-disk, retry and delete on each; **New sandbox**, which shows the token
+the one time the master hands it out; and the snapshots, with delete.
+`GET /v1/sandboxes` takes `tier`, `node`, `q`, `failing`, `limit` and
+`offset` for this, and says the matching total in `x-total-count`; with none
+of them it is the whole list, as before.
+
+It is in five tabs -- Overview, Nodes, Sandboxes, Snapshots and Activity --
+kept in the URL's hash, with counts on the tabs and a highlight that slides
+to the one picked. The sandbox and snapshot lists, and the activity, are
+fetched only while their tab is open.
+
+The overview fits one screen wherever the window is at least 1201 by 620:
+the cards share the height under the header, and the charts draw to the box
+they get. Smaller, it scrolls as before. Its tier flow is a map: the four
+tiers in a square, each with its count, share of the fleet, how long idle
+puts a sandbox there and its count over the range; idle carries sandboxes
+clockwise round it -- freeze, to disk, detach -- and a request wakes one
+straight back to awake from wherever it is, a line from each tier, every
+line written with its measured rate. For this the master now counts wakes by
+the tier they come from: `rate.wakes` has a series for each of frozen,
+snapshot and detached beside the total. It takes the
+left half of the overview; beside it are sandboxes by tier, lifecycle rates,
+latency, and a new **Node headroom**: free memory on each node now, tightest
+first, against the floor. It replaces an animation of random particles,
+whose tanks filled relative to the largest tier, and a donut that showed the
+same four counts again. The KPI sparklines are a quiet grey but for Awake, in its
+tier's colour, and for a figure gone wrong -- a silent node, refused
+creates, an API p99 over 250 ms -- in the colour that says so; hovering a
+KPI, a tier, a move or a node says what it is, like the charts.
+
+Every choice list is the console's own dropdown rather than the system's
+menu, focus is shown in the theme's ink rather than the browser's blue, a
+dialog's two ways are a segmented control with its action a button its own
+size, the snapshot builder's steps are outlines like every other box, and a
+node's memory pressure is one thin bar across its column, as the node cards
+had it, with the figure in its hover.
+
+A count on the overview that moved since the last refresh rolls to its new
+value in green going up or red going down, and the change pops in beside it,
++N or −N, gone again in under two seconds. Table and filter rows read calmer:
+a node's row is centred top to bottom, a page's filters are one segmented
+control with the failing count in red text rather than a pill. The header has a
+sun or moon for the theme and a link to the repository.
+
+Until the master first answers, the page under the header is a loading
+screen, the logo's grains swirling, rather than a page of zeros; it says so
+if the master cannot be reached, and comes back if a new time range is slow
+to arrive. An answer for a range already left is dropped rather than drawn.
+Activity's icons are line drawings like the header's, not emoji.
+The tab's icon is the logo's swirl, its grains grown so it reads at 16 px,
+in the lighter orange on a dark system; the old one never loaded, its quotes
+ending the attribute early.
+
+Sandboxes that will not start are a count on the sandbox table's Failing
+filter, which lists them with their errors -- not a line above the table
+nor a second list of the same rows under it. The Nodes tab shows its nodes as a table --
+free memory, sandboxes by tier, pressure, features, when last seen -- or as
+their memory over time, one view at a time on the same search, filter and
+page. Over time is a strip a node on one scale and one time axis, with
+a legend in MiB, so a column read down is one moment across the fleet; time
+under the master's floor is red. The floor and the pressure ceiling the
+table and strips mark are the master's own, now in `GET /v1/console/now`
+as `floor_mib` and `max_psi`.
+
+Sandboxes, nodes and activity share one pager: the range shown, the pages
+within reach, and 20, 50 or 100 a page, 20 to start with, remembered per
+table. A sandbox is one line: id, template, node, tier with any error cut to
+fit beside it, address and last activity. Nodes can be
+searched and narrowed to answering, silent or under pressure. Activity is a
+table like the sandboxes', narrowed by kind, a search and how far back;
+`GET /v1/console/events` takes `offset`, `kind` (comma-separated) and `q`,
+and says the matching total in `x-total-count`.
+
+**Build a snapshot** on the Snapshots tab: start a sandbox from a template or
+a snapshot, run commands in it one after another with their output, and
+save it under a name, optionally deleting the build sandbox and forking one
+from the result. Every step is a public API call, and a build survives a
+reload of the tab.
 
 A machine that ran a forkd node keeps forkd's iptables rules until they are
 removed: an `OUTPUT -j FORKD-COLD` jump and a chain that rejects TCP to the
@@ -624,8 +812,8 @@ Verified end-to-end on the dev box on 2026-06-05:
 | **VMGENID on FC restore** | n/a | dmesg: `random: crng reseeded due to virtual machine fork` |
 
 Two new helper scripts:
-- [`scripts/install-guest-kernel.sh`](./scripts/install-guest-kernel.sh) — downloads the FC CI vmlinux into `/var/lib/forkd/kernels/vmlinux`; the recommended path.
-- [`scripts/build-guest-kernel.sh`](./scripts/build-guest-kernel.sh) — clones Linux 6.1 LTS, applies FC's reference microvm config, builds vmlinux from source (~10 min on a 20-core box). Use this when you want to audit / tune the kernel config or target a non-x86_64 architecture.
+- [`scripts/install-guest-kernel.sh`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/scripts/install-guest-kernel.sh) — downloads the FC CI vmlinux into `/var/lib/forkd/kernels/vmlinux`; the recommended path.
+- [`scripts/build-guest-kernel.sh`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/scripts/build-guest-kernel.sh) — clones Linux 6.1 LTS, applies FC's reference microvm config, builds vmlinux from source (~10 min on a 20-core box). Use this when you want to audit / tune the kernel config or target a non-x86_64 architecture.
 
 **Migration**: existing snapshot vmstates produced under 4.14 still restore on 6.1 — they just don't gain the new entropy device until they're re-baked. Run `forkd from-image <image> --tag <tag>` for each snapshot you care about to pick up CRNG init + `/dev/hwrng` + VMGENID.
 
@@ -641,7 +829,7 @@ warmed base (`base → +numpy → +pandas → +sklearn`) instead of
 producing a flat 1.5-GiB-each snapshot per dependency set. The
 daemon walks the chain at spawn time and assembles the memory image
 in one pass; correctness verified across depths 1-3 by the Phase 5
-bench ([`bench/chain-spawn/RESULTS-v0.5.md`](./bench/chain-spawn/RESULTS-v0.5.md))
+bench ([`bench/chain-spawn/RESULTS-v0.5.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/chain-spawn/RESULTS-v0.5.md))
 with 90/90 (100%) probe passes. Tracking issue
 [#216](https://github.com/deeplethe/forkd/issues/216).
 
@@ -689,7 +877,7 @@ with 90/90 (100%) probe passes. Tracking issue
   rejected at manifest-parse time before any file body is extracted.
 - **Phase 6** — docs (this changelog entry, README v0.5 section,
   `docs/API.md` `SnapshotInfoDetail` + new endpoints, `docs/HUB.md`
-  pack v2 spec, [`DESIGN-v0.5-diff-snapshot-chains.md`](./DESIGN-v0.5-diff-snapshot-chains.md)).
+  pack v2 spec, [`DESIGN-v0.5-diff-snapshot-chains.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/DESIGN-v0.5-diff-snapshot-chains.md)).
 
 ### v0.4 live-fork: user-facing surface complete
 
@@ -733,9 +921,9 @@ the controller share the same page cache) was prototyped in Phase 6
 Firecracker fork from
 [deeplethe/firecracker:forkd-v0.4-mem-backend-shared-v1.12](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12)
 — upstream FC doesn't yet ship `mem_backend.shared = true`. See
-[`docs/VENDORED-FIRECRACKER.md`](./docs/VENDORED-FIRECRACKER.md).
+[`docs/VENDORED-FIRECRACKER.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/docs/VENDORED-FIRECRACKER.md).
 
-**Bench numbers** ([`bench/live-fork-pause-window/RESULTS-v0.4.md`](./bench/live-fork-pause-window/RESULTS-v0.4.md))
+**Bench numbers** ([`bench/live-fork-pause-window/RESULTS-v0.4.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/live-fork-pause-window/RESULTS-v0.4.md))
 on a clean Hub-pulled `python-numpy` source (1.5 GiB, Intel i7-12700,
 ext4 on HDD):
 
@@ -811,7 +999,7 @@ Best-effort: on filesystems that don't support `posix_fallocate`
 and the BRANCH continues with the previous behavior.
 
 Five rounds of probing produced the diagnosis. Full investigation:
-[`bench/pause-window/PROBE-multi-branch-anomaly.md`](./bench/pause-window/PROBE-multi-branch-anomaly.md).
+[`bench/pause-window/PROBE-multi-branch-anomaly.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/PROBE-multi-branch-anomaly.md).
 
 ### Other
 
@@ -895,7 +1083,7 @@ contention (17/250 in-kernel-sleep samples), ext4 journal IO (~2 %),
 and un-symbolized user-space CPU on the snapshot worker thread (FC
 static-pie release has no frame pointers; needs DWARF or a debug
 rebuild to drill further). See
-[`bench/pause-window/PROBE-multi-branch-anomaly.md`](./bench/pause-window/PROBE-multi-branch-anomaly.md).
+[`bench/pause-window/PROBE-multi-branch-anomaly.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/PROBE-multi-branch-anomaly.md).
 Direct consequence: original #118 Phase 2/3 scope needs revision.
 
 ### Other
@@ -963,7 +1151,7 @@ Idle 4 GiB SSD source: 29 s → 205 ms = 143×.
 Typical agent workload (30-300 MiB dirty footprint on 2 GiB source): 6-15×.
 Crossover at ~65 % source RAM dirty. Honest curve and practical
 guidance in
-[`bench/pause-window/RESULTS-v0.3.md`](./bench/pause-window/RESULTS-v0.3.md).
+[`bench/pause-window/RESULTS-v0.3.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.3.md).
 
 This release also bundles v0.2.5's prewarm fix (#100) — variance
 reduction for BRANCH pause on cold-cache hits, sandbox-creation
@@ -1005,7 +1193,7 @@ plan (#101, kept as honest record + revival starting point).
   `diff_logical_bytes` — populated when `diff: true` or
   `measure_diff: true` was set on the BRANCH request.
 - **Measurement**:
-  [`bench/pause-window/RESULTS-v0.3.md`](./bench/pause-window/RESULTS-v0.3.md)
+  [`bench/pause-window/RESULTS-v0.3.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.3.md)
   with the full A/B (5 memory sizes × 3 trials × 2 modes × 2 backends
   = 60 trials). Phase 1a numbers (sidecar Diff inside the existing
   Full pause) match phase 1b numbers (real `diff: true`) within
@@ -1030,7 +1218,7 @@ plan (#101, kept as honest record + revival starting point).
 - **`MemoryBackend::Userfault` enum variant** in `forkd-vmm`,
   reserved for the (now-deferred) live-branching design. Setting it
   today errors out of `restore_many_with` with a pointer to
-  [`docs/design/userfaultfd.md`](./docs/design/userfaultfd.md); no
+  [`docs/design/userfaultfd.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/docs/design/userfaultfd.md); no
   caller can accidentally rely on a behavior we haven't built.
 - **`forkd-uffd` crate, phase 1.** New workspace member containing the
   library half of the userfaultfd page-fault handler. Implements
@@ -1053,7 +1241,7 @@ plan (#101, kept as honest record + revival starting point).
   fork-maintenance cost (own CI, rebase on every upstream tag, track
   CVEs, weakened trust story) isn't justified for the remaining
   pause-window headroom. Reasoning in
-  [`docs/design/userfaultfd.md`](./docs/design/userfaultfd.md) §
+  [`docs/design/userfaultfd.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/docs/design/userfaultfd.md) §
   "Why we won't fork Firecracker"; revival criteria in
   [issue #101](https://github.com/deeplethe/forkd/issues/101).
 
@@ -1067,7 +1255,7 @@ plan (#101, kept as honest record + revival starting point).
   KVM EPT. After prewarm, the first user-visible BRANCH runs at
   steady-state speed instead of paying the measured 2-9x cold-cache
   penalty (see
-  [`bench/pause-window/RESULTS-v0.2.md`](./bench/pause-window/RESULTS-v0.2.md)).
+  [`bench/pause-window/RESULTS-v0.2.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.2.md)).
   The cold cost is **moved**, not eliminated: sandbox creation pays
   one cold-pause-window worth of latency in exchange for a consistent
   BRANCH latency from the first call. Useful when BRANCH is the
@@ -1186,7 +1374,7 @@ plan (#101, kept as honest record + revival starting point).
   **4.26 s ± 0.41 s**, **0 in-flight loss, 5/5 connection survival**.
   Surprising mechanism (in-guest agents are nearly pause-blind via
   kvmclock catch-up) documented in
-  [`bench/pause-window/RESULTS-v0.2.md`](./bench/pause-window/RESULTS-v0.2.md).
+  [`bench/pause-window/RESULTS-v0.2.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.2.md).
 
 ## 0.1.3 — 2026-05-14
 

@@ -26,7 +26,7 @@ The killer one is **`branch_sandbox`**: pause a running agent
 sandbox, snapshot, fan out N children that inherit the source's
 exact state and diverge under copy-on-write. Modal does this as
 their proprietary moat; sandstorm is the open-source equivalent. See
-[`bench/pause-window/RESULTS-v0.3.md`](../../bench/pause-window/RESULTS-v0.3.md)
+[`bench/pause-window/RESULTS-v0.3.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.3.md)
 for the measured numbers.
 
 Each tool maps 1:1 onto a sandstorm-controller REST endpoint
@@ -54,6 +54,26 @@ Environment variables:
 | `SANDSTORM_URL` | `http://127.0.0.1:8889` | Controller base URL |
 | `SANDSTORM_TOKEN` | *unset* | Bearer token, required when daemon is started with `--token-file` |
 | `SANDSTORM_HTTP_TIMEOUT` | `60` | Per-request timeout (seconds) |
+
+## Sandbox credentials (v0.6)
+
+Retain the `token` returned for each sandbox by `spawn_sandboxes`. GET/LIST
+responses do not return it. Pass that sandbox's token on every `exec_command`,
+`eval_code`, `ping_sandbox`, and `wait_for_text` call, for example:
+
+```python
+sandbox = spawn_sandboxes("python", n=1)[0]
+exec_command(sandbox["id"], ["echo", "hello"], sandbox_token=sandbox["token"])
+eval_code(sandbox["id"], "2+2", sandbox_token=sandbox["token"])
+ping_sandbox(sandbox["id"], sandbox_token=sandbox["token"])
+wait_for_text(sandbox["id"], "/tmp/output", "READY", sandbox_token=sandbox["token"])
+```
+
+`sandbox_token` is sent as `x-sandstorm-sandbox-token`, including every poll.
+It is separate from the API Bearer configured with `SANDSTORM_TOKEN`; v0.6
+requires both. The tools do not cache sandbox tokens. The parameter defaults
+to `None` for older servers; missing or incorrect tokens still cause v0.6
+authentication failures.
 
 ## Register with Claude Desktop
 
