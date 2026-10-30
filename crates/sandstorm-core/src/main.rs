@@ -1,6 +1,6 @@
 //! `sandstorm` — one binary, two modes.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -31,6 +31,26 @@ enum Cmd {
     NodeToken(NodeTokenArgs),
     /// List registered nodes.
     Nodes(StateArgs),
+    /// Check that this machine can run a backend, exactly as a node starting
+    /// on it would, and exit non-zero saying why if it cannot. The installer
+    /// runs it before it writes a unit, so a node that cannot run its
+    /// backend is never installed.
+    Preflight(PreflightArgs),
+}
+
+#[derive(Args)]
+struct PreflightArgs {
+    /// runsc (or gvisor) or firecracker.
+    #[arg(long)]
+    backend: String,
+    #[arg(long, default_value = "/var/lib/sandstorm", env = "SANDSTORM_WORK_DIR")]
+    work_dir: PathBuf,
+    #[arg(long, default_value = "runsc")]
+    runsc: String,
+    #[arg(long, default_value = "firecracker")]
+    firecracker: String,
+    #[arg(long, default_value = "/var/lib/sandstorm/vmlinux")]
+    fc_kernel: PathBuf,
 }
 
 #[derive(Args)]
@@ -84,6 +104,13 @@ struct ServeArgs {
     /// firecracker (needs /dev/kvm, and a work dir on XFS or btrfs).
     #[arg(long, default_value = "runsc", value_parser = ["runsc", "firecracker"])]
     backend: String,
+    /// A file naming the backend (`runsc` or `firecracker`), which wins over
+    /// --backend once it exists. The installer writes one, so the master can
+    /// switch the node's backend: it rewrites this file and the node
+    /// restarts onto it (see `node/switch.rs`). Without it a node's backend
+    /// is its command line's, and a switch from the console is refused.
+    #[arg(long, env = "SANDSTORM_BACKEND_FILE")]
+    backend_file: Option<PathBuf>,
     #[arg(long, default_value = "runsc")]
     runsc: String,
     #[arg(long, default_value = "firecracker")]
@@ -288,7 +315,74 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Preflight(a) => {
+            let kind: node::BackendKind = a.backend.parse()?;
+            let cfg = RuntimeConfig {
+                backend: kind,
+                runsc: a.runsc,
+                firecracker: a.firecracker,
+                fc_kernel: a.fc_kernel,
+                work_dir: a.work_dir,
+                ..RuntimeConfig::default()
+            };
+            let engine = node::preflight(&cfg, kind)
+                .with_context(|| format!("this machine cannot run {kind}"))?;
+            println!("{kind} ok: {engine}");
+            Ok(())
+        }
     }
+}
+
+/// Where each master-and-node on this machine records the gateway ports it
+/// allocates from, one file per process.
+const PORT_CLAIMS: &str = "/run/sandstorm/gateway-ports";
+
+/// Refuse to start on a port range another `sandstormd` on this machine is
+/// already allocating gateway ports from.
+///
+/// Every master defaults to 20000-32000 and allocates without knowing of any
+/// other, while the gateways bind on the node's host. Two master-and-node
+/// processes on one machine therefore hand out the same ports, and the second
+/// sandbox on one fails to bind and is never reachable: on bare metal a
+/// gVisor and a Firecracker node both gave out 20000, and the second
+/// sandbox's gateway logged `Address already in use` every 25 s while its
+/// caller waited. Only checked when both halves run here, the case where
+/// the range and the binds are on the same machine.
+fn claim_port_range(min: u16, max: u16, work_dir: &std::path::Path) -> Result<()> {
+    let dir = std::path::Path::new(PORT_CLAIMS);
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let me = std::process::id();
+    for e in std::fs::read_dir(dir)?.flatten() {
+        let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid == me || !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            let _ = std::fs::remove_file(e.path());
+            continue;
+        }
+        let claim = std::fs::read_to_string(e.path()).unwrap_or_default();
+        let mut f = claim.split_whitespace();
+        let (Some(lo), Some(hi)) = (
+            f.next().and_then(|v| v.parse::<u16>().ok()),
+            f.next().and_then(|v| v.parse::<u16>().ok()),
+        ) else {
+            continue;
+        };
+        if lo <= max && min <= hi {
+            let theirs = f.next().unwrap_or("?");
+            bail!(
+                "gateway ports {min}-{max} overlap {lo}-{hi}, which sandstormd pid {pid} \
+                 (work dir {theirs}) allocates from on this machine; give each its own \
+                 range with --port-min and --port-max"
+            );
+        }
+    }
+    std::fs::write(
+        dir.join(me.to_string()),
+        format!("{min} {max} {}\n", work_dir.display()),
+    )
+    .with_context(|| format!("recording this node's ports in {}", dir.display()))?;
+    Ok(())
 }
 
 async fn serve(a: ServeArgs) -> Result<()> {
@@ -296,6 +390,9 @@ async fn serve(a: ServeArgs) -> Result<()> {
         bail!("pass --master, --node, or both");
     }
     raise_open_file_limit();
+    if a.master && a.node {
+        claim_port_range(a.port_min, a.port_max, &a.work_dir)?;
+    }
 
     let idle = IdlePolicy {
         to_frozen: Duration::from_secs(a.idle_frozen_secs),
@@ -451,7 +548,17 @@ async fn serve(a: ServeArgs) -> Result<()> {
         let (compress_snapshots, why) = node::decide_compression(a.compress_snapshots, &a.work_dir);
         tracing::info!(on = compress_snapshots, reason = %why, "snapshot compression");
 
+        // The backend file, when there is one, is the node's own record of
+        // the operator's choice and wins over the flag.
+        let backend = match a.backend_file.as_deref().map(node::read_backend_file) {
+            Some(Ok(Some(kind))) => kind,
+            Some(Err(e)) => return Err(e),
+            _ => a.backend.parse()?,
+        };
         let mut features = Vec::new();
+        if a.backend_file.is_some() {
+            features.push("backend-switch".to_string());
+        }
         if let Some(kind) = node::compressed_swap() {
             features.push(format!("swap:{kind}"));
         }
@@ -476,10 +583,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
             token,
             pki_dir: a.pki_dir.join("node"),
             runtime: RuntimeConfig {
-                backend: match a.backend.as_str() {
-                    "firecracker" => sandstorm_core::node::BackendKind::Firecracker,
-                    _ => sandstorm_core::node::BackendKind::Runsc,
-                },
+                backend,
                 runsc: a.runsc.clone(),
                 runsc_root: a.runsc_root.clone(),
                 firecracker: a.firecracker.clone(),
@@ -513,6 +617,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
             wake_max_waiting: a.wake_max_waiting,
             features,
             fetches: Default::default(),
+            backend_file: a.backend_file.clone(),
         };
         Some(match listening {
             Some(addr) => tokio::spawn(node::serve_listen(cfg, addr)),
