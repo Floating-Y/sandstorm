@@ -101,6 +101,14 @@ hostname). `pool` is a request, not a guarantee: a node whose host
 fingerprint differs from the pool's joins `<pool>#<fp8>` instead, exactly
 as a registering node does.
 
+A node also says what its fingerprint is made of (engine version, kernel
+release, CPU vendor, model and flags): at registration, in a listening
+node's hello, and with every full poll, so nodes that registered before
+it existed fill it in too. The master keeps the last one per node and
+shows it on the console's Pools page, where a split pool lists what
+differs from the pool it asked for. Placement keys on the fingerprint
+alone.
+
 The **pairing code** is `<certificate SHA-256>.<secret>`, written by the node
 to `/var/lib/sandstorm/pki/node/pairing-code` (root only) on first start and kept
 across restarts. The master pins the node's TLS certificate by the first
@@ -248,6 +256,17 @@ leaves a half-written destination snapshot behind.
 ---
 
 ## Sandboxes
+
+### POST /v1/nodes/:id/backend
+
+Moves a node to another backend: `{"backend": "gvisor"}` or `"firecracker"`.
+The node checks it can run that backend, rewrites its `--backend-file` and
+restarts, and its fingerprint then puts it in another host group. Nothing is
+placed on it meanwhile. `409` while it holds any sandbox or snapshot, since
+those are in the old backend's format; when it is not answering; when it was
+installed without a backend file; or when the node itself refuses, with its
+reason. Answers `{node, from, to, restarting, message}`; `restarting` is false
+if it was on that backend already.
 
 ### POST /v1/sandboxes
 

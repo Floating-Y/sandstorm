@@ -19,6 +19,8 @@ mod host;
 mod net;
 mod reclaim;
 mod runtime;
+mod starting;
+mod switch;
 mod tags;
 mod wake;
 
@@ -31,7 +33,8 @@ pub use host::{
     Lever,
 };
 pub use net::NetConfig;
-pub use runtime::{BackendKind, Runtime, RuntimeConfig, WARM_SEED_PREFIX};
+pub use runtime::{preflight, BackendKind, Runtime, RuntimeConfig, WARM_SEED_PREFIX};
+pub use switch::{read as read_backend_file, write as write_backend_file, RESTART_EXIT};
 pub use tags::Fetches;
 pub use wake::Wakeups;
 
@@ -42,7 +45,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::proto::{
-    Command, CommandFailure, CommandResult, ObservedSandbox, PollRequest, PollResponse,
+    Command, CommandFailure, CommandResult, HostInfo, ObservedSandbox, PollRequest, PollResponse,
     RegisterRequest, RegisterResponse,
 };
 use crate::tier::Tier;
@@ -142,6 +145,10 @@ pub struct NodeConfig {
     /// Tags being fetched from other nodes, so one fetch serves every child
     /// of a tag that arrives while it runs.
     pub fetches: Arc<Fetches>,
+    /// Where this node's backend choice lives, if it was installed so the
+    /// master can switch it (`switch.rs`). `None`: the backend is whatever
+    /// the command line said, and a switch is refused.
+    pub backend_file: Option<PathBuf>,
 }
 
 /// How soon to look again at a fork whose image is still being fetched.
@@ -152,13 +159,17 @@ const FETCH_RECHECK: Duration = Duration::from_millis(500);
 /// Only for work that COSTS memory. A teardown or a demotion is how a
 /// node that is short of memory stops being short of memory; refusing
 /// those would turn a busy node into a stuck one.
-fn holding_back(cfg: &NodeConfig, cmd: &Command) -> Option<String> {
-    holding_back_at(
-        cfg.admit_min_free_mib,
-        cfg.admit_max_psi,
-        cmd,
-        runtime::host_reading(),
-    )
+fn holding_back(cfg: &NodeConfig, rt: &Runtime, cmd: &Command) -> Option<String> {
+    let mut reading = runtime::host_reading();
+    let owed = rt.starting_owed_mib();
+    // Never to 0, which means the read failed.
+    if reading.free_mib > 0 {
+        reading.free_mib = reading.free_mib.saturating_sub(owed).max(1);
+    }
+    holding_back_at(cfg.admit_min_free_mib, cfg.admit_max_psi, cmd, reading).map(|why| match owed {
+        0 => why,
+        _ => format!("{why}, counting {owed} MiB for sandboxes still starting"),
+    })
 }
 
 /// The decision, with the host reading passed in.
@@ -179,7 +190,7 @@ fn holding_back_at(
         // Snapshot and Detached all give memory back.
         Command::SetTier { tier, .. } => *tier == crate::tier::Tier::Hot,
         Command::Destroy { .. } | Command::DropTag { .. } => false,
-        Command::Exec { .. } | Command::Branch { .. } => false,
+        Command::Exec { .. } | Command::Branch { .. } | Command::SetBackend { .. } => false,
     };
     if !costs_memory {
         return None;
@@ -389,7 +400,15 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
                  get one from the master with `sandstorm node-token create`"
             );
         };
-        let learned = register(&cfg, token, &rt.fingerprint(), &cert_path, &key_path).await?;
+        let learned = register(
+            &cfg,
+            token,
+            &rt.fingerprint(),
+            rt.host(),
+            &cert_path,
+            &key_path,
+        )
+        .await?;
         if cfg.api_token.is_none() && !learned.is_empty() {
             write_private(&api_token_path, &learned)?;
             cfg.api_token = Some(learned);
@@ -564,6 +583,9 @@ async fn report_wakes(
             evicted: wake.recently_evicted(Instant::now()),
             features: Vec::new(),
             tags: Vec::new(),
+            host: None,
+            fingerprint: None,
+            templates: None,
         };
         let mut rb = client
             .post(&url)
@@ -583,6 +605,7 @@ async fn register(
     cfg: &NodeConfig,
     token: &str,
     fingerprint: &str,
+    host: HostInfo,
     cert_path: &PathBuf,
     key_path: &PathBuf,
 ) -> Result<String> {
@@ -591,6 +614,7 @@ async fn register(
         node_id: cfg.node_id.clone(),
         fingerprint: fingerprint.to_string(),
         max_sandboxes: cfg.runtime.max_sandboxes,
+        host: Some(host),
     };
     let url = format!("{}/v1/node/register", cfg.master_url.trim_end_matches('/'));
     // First contact, and the only request that carries the registration
@@ -700,6 +724,9 @@ async fn report(
         evicted: wake.recently_evicted(Instant::now()),
         features: cfg.features.clone(),
         tags: tags::held(&rt.tags_dir(), tags::REPORT_MIN_AGE),
+        host: Some(rt.host()),
+        fingerprint: Some(rt.fingerprint()),
+        templates: Some(rt.templates()),
     })
 }
 
@@ -813,6 +840,27 @@ fn run_one(
             }
             return Step::Done;
         }
+        Command::SetBackend { backend, result_id } => {
+            let out = backend
+                .parse::<BackendKind>()
+                .and_then(|want| switch::switch(rt, cfg.backend_file.as_deref(), want));
+            return Step::Answered(match out {
+                Ok(msg) => CommandResult {
+                    result_id: result_id.clone(),
+                    stdout: msg,
+                    stderr: String::new(),
+                    exit_code: 0,
+                    size_bytes: 0,
+                },
+                Err(e) => CommandResult {
+                    result_id: result_id.clone(),
+                    stdout: String::new(),
+                    stderr: format!("{e:#}"),
+                    exit_code: 1,
+                    size_bytes: 0,
+                },
+            });
+        }
         _ => {}
     }
 
@@ -839,9 +887,13 @@ fn run_one(
             id,
             Duration::ZERO,
         )
-    } else if let Some(why) = holding_back(cfg, cmd) {
+    } else if let Some(why) = holding_back(cfg, rt, cmd) {
         tracing::warn!(sandbox = %id, reason = %why, "refusing work");
         Err(HeldBack(why).into())
+    } else if switch::switching() && matches!(cmd, Command::Create { .. }) {
+        // Held back, not failed: it is placed again once the node is back
+        // on its new backend, in the pool that backend belongs to.
+        Err(HeldBack("node is restarting onto another backend".into()).into())
     } else {
         match cmd {
             Command::Create {
@@ -881,8 +933,33 @@ fn run_one(
                 }
             }
             Command::SetTier { id, tier } => rt.set_tier(id, *tier),
-            Command::Destroy { id, net_index } => rt.destroy_with_net(id, *net_index),
-            Command::Exec { .. } | Command::Branch { .. } | Command::DropTag { .. } => {
+            Command::Destroy { id, net_index } => {
+                // Off this loop: the commands behind it should not wait for
+                // it. A create straight after a destroy waited out the whole
+                // destroy -- killing the VM, its cgroup, its network -- on
+                // bare metal 25-35 ms of a 70 ms warm start. The sandbox's
+                // own lock is held for the destroy by the thread instead, so
+                // a wake cannot race it, and a repeat while it runs is a
+                // no-op: the master re-sends Destroy until the sandbox is
+                // gone from what this node reports.
+                if DESTROYING.lock().insert(id.clone()) {
+                    rt.quiesce_net(id, *net_index);
+                    let (rt, id, net_index, lock) =
+                        (rt.clone(), id.clone(), *net_index, lock.clone());
+                    std::thread::spawn(move || {
+                        let _held = lock.lock();
+                        if let Err(e) = rt.destroy_with_net(&id, net_index) {
+                            tracing::warn!(sandbox = %id, error = %format!("{e:#}"), "destroy failed; the master will ask again");
+                        }
+                        DESTROYING.lock().remove(&id);
+                    });
+                }
+                Ok(())
+            }
+            Command::Exec { .. }
+            | Command::Branch { .. }
+            | Command::DropTag { .. }
+            | Command::SetBackend { .. } => {
                 unreachable!("answered above")
             }
         }
@@ -899,6 +976,9 @@ fn run_one(
                     }
             ) {
                 wake.started(&id);
+            }
+            if let Command::Create { spec, .. } = cmd {
+                rt.note_started(&id, spec.get("memory_max_mib").and_then(|v| v.as_u64()));
             }
             if matches!(cmd, Command::Destroy { .. }) {
                 drop(_held);
@@ -976,6 +1056,9 @@ async fn poll_once(
         bail!("master refused the poll: {} {reason}", status.as_u16());
     }
     let resp: PollResponse = raw.json().await?;
+    if !resp.commands.is_empty() {
+        tracing::debug!(count = resp.commands.len(), "commands from the master");
+    }
 
     let now = Instant::now();
     let mut soonest: Option<Duration> = None;
@@ -983,7 +1066,7 @@ async fn poll_once(
     for cmd in &resp.commands {
         asked_about.push(command_id(cmd).to_string());
         match run_one(cfg, rt, failing, wake, cmd, now) {
-            Step::Done => {}
+            Step::Done => expose_created(rt, gw, cmd).await,
             Step::Later(wait) => soonest = sooner(soonest, wait),
             // Posted as soon as it exists, not at the end of the batch, so a
             // caller waiting on a fast exec is not held up by a slow create
@@ -1010,6 +1093,20 @@ async fn poll_once(
     Ok(soonest)
 }
 
+/// A sandbox this batch just created is reachable from now, not from the
+/// report after the batch; see `Gateway::expose`.
+pub(super) async fn expose_created(rt: &Runtime, gw: &mut Gateway, cmd: &Command) {
+    if let Command::Create { id, .. } = cmd {
+        if let Some(e) = rt.exposed(id) {
+            gw.expose(&e).await;
+        }
+    }
+}
+
+/// Sandboxes being destroyed on a thread of their own; see `run_one`.
+static DESTROYING: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
 /// Attach the master's bearer token, when there is one.
 fn bearer(rb: reqwest::RequestBuilder, cfg: &NodeConfig) -> reqwest::RequestBuilder {
     match cfg.api_token.as_deref() {
@@ -1026,6 +1123,7 @@ fn command_id(cmd: &Command) -> &str {
         | Command::Branch { id, .. }
         | Command::Exec { id, .. } => id,
         Command::DropTag { tag } => tag,
+        Command::SetBackend { result_id, .. } => result_id,
     }
 }
 
@@ -1205,6 +1303,7 @@ mod wake_tests {
             wake_budget: wake::WAKE_BUDGET,
             wake_max_waiting: None,
             features: Vec::new(),
+            backend_file: None,
             fetches: Default::default(),
         };
         (cfg, Runtime::new(runtime).unwrap())

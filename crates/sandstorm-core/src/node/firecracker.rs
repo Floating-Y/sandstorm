@@ -54,10 +54,21 @@ const GUEST_IP: &str = "10.42.0.2";
 const TAP_CIDR: &str = "10.42.0.1/30";
 const TAP: &str = "tap0";
 const GUEST_MAC: &str = "AA:FC:00:00:00:01";
+/// The tap's, fixed for the same reason as the guest's: a restored guest
+/// still has the tap it was snapshotted beside in its ARP cache, and every
+/// sandbox has a tap of its own. With a random MAC per tap, a restored guest
+/// sent to the seed's until its entry went stale: warm starts took 43 s on
+/// bare metal once the guest's own entry was pinned and nothing asked it.
+const TAP_MAC: &str = "AA:FC:00:00:00:02";
 
 /// The guest agent (`rootfs-init/sandstorm-agent.py`). A template cannot
 /// use this port.
 const AGENT_PORT: u16 = 8888;
+
+/// In a sandbox's bundle when its VM was restored, naming the memory file
+/// it maps: its writes are tracked by the kernel's soft-dirty bits, not by
+/// KVM. See `track_writes`.
+const SOFT_DIRTY: &str = "soft-dirty";
 
 /// Diffs on top of a full image before the next checkpoint starts again
 /// from a full one. Each link costs a pass over its data at assembly.
@@ -140,6 +151,22 @@ impl Firecracker {
         self.bundle(id).join("fc.sock")
     }
 
+    fn pid(&self, id: &str) -> Result<u32> {
+        let p = self.bundle(id).join("fc.pid");
+        std::fs::read_to_string(&p)
+            .with_context(|| format!("reading {}", p.display()))?
+            .trim()
+            .parse()
+            .with_context(|| format!("{} is not a pid", p.display()))
+    }
+
+    /// The memory file a restored VM maps, if its writes are tracked by
+    /// soft-dirty bits.
+    fn tracked(&self, id: &str) -> Option<MappedFile> {
+        let raw = std::fs::read_to_string(self.bundle(id).join(SOFT_DIRTY)).ok()?;
+        serde_json::from_str(&raw).ok()
+    }
+
     fn config(&self, id: &str) -> Result<VmConfig> {
         let p = self.bundle(id).join("config.json");
         let raw = std::fs::read(&p).with_context(|| format!("reading {}", p.display()))?;
@@ -165,14 +192,17 @@ impl Firecracker {
             .open(cg.join("cgroup.procs"))
             .with_context(|| format!("opening {}/cgroup.procs", cg.display()))?;
 
-        let mut cmd = match &cfg.netns {
-            Some(ns) => {
-                let mut c = Exec::new("ip");
-                c.args(["netns", "exec", ns, &self.bin]);
-                c
-            }
-            None => Exec::new(&self.bin),
-        };
+        // Its namespace is entered in the child before exec, not through
+        // `ip netns exec`: that is another process, and it remounts /sys
+        // for a program that only needs the namespace's tap. About 10 ms
+        // of a warm start on bm went on starting Firecracker.
+        let netns = cfg
+            .netns
+            .as_ref()
+            .map(|ns| std::fs::File::open(format!("/var/run/netns/{ns}")))
+            .transpose()
+            .with_context(|| format!("opening {id}'s network namespace"))?;
+        let mut cmd = Exec::new(&self.bin);
         cmd.arg("--api-sock")
             .arg(&sock)
             .current_dir(&disk)
@@ -183,10 +213,11 @@ impl Firecracker {
             use std::os::unix::io::AsRawFd;
             use std::os::unix::process::CommandExt;
             let fd = procs.as_raw_fd();
+            let ns_fd = netns.as_ref().map(|f| f.as_raw_fd());
             // Its own session, so nothing aimed at this process's group
-            // reaches it; and into the cgroup before exec, so there is no
-            // moment when a freeze or a kill would miss it. `ip netns exec`
-            // execs Firecracker in place, so the pid stays the same.
+            // reaches it; into the cgroup before exec, so there is no
+            // moment when a freeze or a kill would miss it; and into its
+            // network namespace.
             unsafe {
                 cmd.pre_exec(move || {
                     if libc::setsid() < 0 {
@@ -194,6 +225,17 @@ impl Firecracker {
                     }
                     if libc::write(fd, b"0".as_ptr().cast(), 1) < 0 {
                         return Err(std::io::Error::last_os_error());
+                    }
+                    if let Some(ns) = ns_fd {
+                        #[cfg(target_os = "linux")]
+                        if libc::setns(ns, libc::CLONE_NEWNET) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            let _ = ns;
+                            return Err(std::io::ErrorKind::Unsupported.into());
+                        }
                     }
                     Ok(())
                 });
@@ -203,6 +245,7 @@ impl Firecracker {
             .spawn()
             .with_context(|| format!("starting {} for {id}", self.bin))?;
         drop(procs);
+        drop(netns);
         let pid = child.id();
         std::fs::write(self.bundle(id).join("fc.pid"), pid.to_string())?;
         // Reaped here while this process lives; after a restart it is
@@ -220,7 +263,7 @@ impl Firecracker {
                 self.stop(id);
                 bail!("firecracker for {id} did not open its API socket; see its log");
             }
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(1));
         }
         Ok(())
     }
@@ -260,6 +303,42 @@ impl Firecracker {
 }
 
 impl Backend for Firecracker {
+    /// The tap and its NAT rules depend on nothing but the namespace: every
+    /// guest is 10.42.0.2 behind its own tap.
+    fn prepare_netns(&self, netns: &str) -> Result<()> {
+        ensure_tap(netns)
+    }
+
+    /// The guest is on the tap, which a pooled namespace already has; the
+    /// veth only carries what the node sends in.
+    fn veth_needed_to_start(&self) -> bool {
+        false
+    }
+
+    /// A paused VM goes on where it stopped. Stopping it and restoring it
+    /// from the image instead, as runsc must, assembled the whole diff chain
+    /// every time: on bm the parent's return grew from 73 to 285 ms over six
+    /// branches of one app64. Its memory now stands on the image's chain, so
+    /// that is the base the next checkpoint diffs against; pages it dirties
+    /// from here are tracked from the snapshot just taken, and a tracker
+    /// that kept older ones too would only make the diff larger.
+    fn resume_after_checkpoint(&self, id: &str, image: &Path) -> Result<bool> {
+        let chain = chain_of(image)?;
+        link_chain(image, &chain, &self.base_dir(id))?;
+        if self.tracked(id).is_some() {
+            clear_soft_dirty(self.pid(id)?)?;
+        }
+        api(
+            &self.sock(id),
+            "PATCH",
+            "/vm",
+            &json!({ "state": "Resumed" }),
+            API_TIMEOUT,
+        )
+        .with_context(|| format!("resuming {id}"))?;
+        Ok(true)
+    }
+
     fn version(&self) -> String {
         Exec::new(&self.bin)
             .arg("--version")
@@ -332,8 +411,10 @@ impl Backend for Firecracker {
     fn boot(&self, id: &str, _bundle: &Path) -> Result<()> {
         let cfg = self.config(id)?;
         self.ensure_net(&cfg)?;
-        // A cold boot has no image under it, so its first checkpoint is full.
+        // A cold boot has no image under it, so its first checkpoint is full,
+        // and KVM tracks what it writes after that.
         std::fs::remove_dir_all(self.base_dir(id)).ok();
+        std::fs::remove_file(self.bundle(id).join(SOFT_DIRTY)).ok();
         self.spawn(id, &cfg)?;
         let sock = self.sock(id);
         let mut calls = vec![
@@ -397,13 +478,18 @@ impl Backend for Firecracker {
         let mem = assemble(image, &chain)?;
         link_chain(image, &chain, &self.base_dir(id))?;
 
+        let marker = self.bundle(id).join(SOFT_DIRTY);
+        std::fs::remove_file(&marker).ok();
         self.spawn(id, &cfg)?;
-        let r = load(
-            &self.sock(id),
-            &image.join("vmstate"),
-            &mem,
-            &disk.join("rootfs.ext4"),
-        );
+        let r = self.pid(id).and_then(|pid| {
+            load(
+                &self.sock(id),
+                &image.join("vmstate"),
+                &mem,
+                &disk.join("rootfs.ext4"),
+                || track_writes(pid, &mem, &marker),
+            )
+        });
         if let Err(e) = r {
             // Never left half-loaded, and never resumed on a disk that was
             // not re-pointed.
@@ -448,17 +534,28 @@ impl Backend for Firecracker {
             } else {
                 ("Full", 0)
             };
-            api(
-                &sock,
-                "PUT",
-                "/snapshot/create",
-                &json!({
-                    "snapshot_type": kind,
-                    "snapshot_path": image.join("vmstate"),
-                    "mem_file_path": image.join(format!("mem.{next}")),
-                }),
-                SNAPSHOT_TIMEOUT,
-            )?;
+            let mem = image.join(format!("mem.{next}"));
+            match self.tracked(id).filter(|_| kind == "Diff") {
+                Some(file) => {
+                    save_vmstate(&sock, &image.join("vmstate"))?;
+                    let len = std::fs::metadata(base.join("mem.0"))?.len();
+                    let pages = write_dirty(self.pid(id)?, &file, &mem, len)?;
+                    tracing::debug!(%id, pages, "soft-dirty diff");
+                }
+                None => {
+                    api(
+                        &sock,
+                        "PUT",
+                        "/snapshot/create",
+                        &json!({
+                            "snapshot_type": kind,
+                            "snapshot_path": image.join("vmstate"),
+                            "mem_file_path": mem,
+                        }),
+                        SNAPSHOT_TIMEOUT,
+                    )?;
+                }
+            }
             // Paused, so the disk is exactly what the memory expects.
             reflink(
                 &self.disk_dir(id).join("rootfs.ext4"),
@@ -468,10 +565,9 @@ impl Backend for Firecracker {
             Ok(())
         })();
         match r {
-            Ok(()) => {
-                self.stop(id);
-                Ok(())
-            }
+            // Left paused: every caller either removes it or, for a branch,
+            // resumes it (`resume_after_checkpoint`).
+            Ok(()) => Ok(()),
             Err(e) => {
                 // Leave it running rather than paused for ever.
                 let _ = api(
@@ -541,8 +637,12 @@ fn boot_args(spec: &TemplateSpec, port: u16, net: bool) -> Result<String> {
         .map(|a| a.replace("{{PORT}}", &port.to_string()))
         .collect();
     let app = json!({ "args": args, "env": spec.env, "cwd": spec.cwd });
+    // The i8042 options are Firecracker's own advice: it emulates no PS/2
+    // controller, and a kernel that probes for one waits it out. On bm that
+    // was 0.49 s of a 0.77 s boot to init; with them, 0.29 s.
     let mut s = String::from(
-        "console=ttyS0 reboot=k panic=1 pci=off clocksource=kvm-clock init=/sandstorm-init.sh",
+        "console=ttyS0 quiet reboot=k panic=1 pci=off clocksource=kvm-clock \
+         i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd init=/sandstorm-init.sh",
     );
     if net {
         s.push_str(&format!(
@@ -565,7 +665,19 @@ fn boot_args(spec: &TemplateSpec, port: u16, net: bool) -> Result<String> {
 /// own, then run it -- the order PR #321 established. The relative disk path
 /// already resolves to this sandbox's copy; the re-point is the second
 /// guarantee, and the guest executes nothing until both have happened.
-fn load(sock: &Path, vmstate: &Path, mem: &Path, disk: &Path) -> Result<()> {
+/// `before_resume` runs last, with the guest still stopped.
+///
+/// Without KVM dirty logging: with it, every page the guest touched first
+/// faulted in on its own, and the first answer of a warm `app64`, which
+/// reads 64 MiB, took 40 ms longer on bm (103 against 65 ms). What a diff
+/// needs is tracked by `track_writes` instead.
+fn load(
+    sock: &Path,
+    vmstate: &Path,
+    mem: &Path,
+    disk: &Path,
+    before_resume: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     api(
         sock,
         "PUT",
@@ -573,7 +685,7 @@ fn load(sock: &Path, vmstate: &Path, mem: &Path, disk: &Path) -> Result<()> {
         &json!({
             "snapshot_path": vmstate,
             "mem_backend": { "backend_type": "File", "backend_path": mem },
-            "enable_diff_snapshots": true,
+            "enable_diff_snapshots": false,
             "resume_vm": false,
         }),
         SNAPSHOT_TIMEOUT,
@@ -587,6 +699,7 @@ fn load(sock: &Path, vmstate: &Path, mem: &Path, disk: &Path) -> Result<()> {
         API_TIMEOUT,
     )
     .context("pointing the disk at this sandbox's own")?;
+    before_resume()?;
     api(
         sock,
         "PATCH",
@@ -596,6 +709,175 @@ fn load(sock: &Path, vmstate: &Path, mem: &Path, disk: &Path) -> Result<()> {
     )
     .context("resuming")?;
     Ok(())
+}
+
+/// A file as `/proc/<pid>/maps` names it: device as `major:minor` in hex,
+/// and inode.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct MappedFile {
+    dev: String,
+    inode: u64,
+}
+
+impl MappedFile {
+    #[cfg(target_os = "linux")]
+    fn of(path: &Path) -> Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+        let dev = m.dev();
+        Ok(MappedFile {
+            dev: format!("{:02x}:{:02x}", libc::major(dev), libc::minor(dev)),
+            inode: m.ino(),
+        })
+    }
+
+    /// The ranges of `maps` that map this file: start, end, and the
+    /// file offset at start. The offset is also where those pages sit in
+    /// a memory image, which is laid out as the file is.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn ranges(&self, maps: &str) -> Vec<(u64, u64, u64)> {
+        maps.lines()
+            .filter_map(|l| {
+                let mut f = l.split_whitespace();
+                let (range, _perms, off, dev, inode) =
+                    (f.next()?, f.next()?, f.next()?, f.next()?, f.next()?);
+                if dev != self.dev || inode.parse::<u64>().ok()? != self.inode {
+                    return None;
+                }
+                let (a, b) = range.split_once('-')?;
+                Some((
+                    u64::from_str_radix(a, 16).ok()?,
+                    u64::from_str_radix(b, 16).ok()?,
+                    u64::from_str_radix(off, 16).ok()?,
+                ))
+            })
+            .collect()
+    }
+}
+
+/// Track what a restored VM writes from here: record the memory file it
+/// maps, and clear its soft-dirty bits. A page the guest -- or Firecracker
+/// for it, as a virtio device does -- writes after this is marked in
+/// `/proc/<pid>/pagemap`, and `write_dirty` takes exactly those.
+///
+/// CubeSandbox snapshots the same way. KVM's own dirty log, which a diff
+/// otherwise needs, costs every first touch of a page for as long as the VM
+/// runs; this costs one pass over the page table, at the snapshot.
+fn track_writes(pid: u32, mem: &Path, marker: &Path) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let file = MappedFile::of(mem)?;
+        clear_soft_dirty(pid)?;
+        std::fs::write(marker, serde_json::to_vec(&file)?)?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pid, mem, marker);
+        Ok(())
+    }
+}
+
+fn clear_soft_dirty(pid: u32) -> Result<()> {
+    std::fs::write(format!("/proc/{pid}/clear_refs"), "4")
+        .with_context(|| format!("clearing soft-dirty bits of {pid}"))
+}
+
+/// Have Firecracker write the vmstate and none of the memory.
+///
+/// It has no call for that, but it writes the vmstate first, then opens
+/// the memory file and sizes it: `/dev/null` cannot be sized, so it stops
+/// there, with the vmstate whole and nothing else done. Its one later step,
+/// marking virtio queues in its own dirty bitmap, is for KVM-tracked diffs,
+/// which these are not.
+fn save_vmstate(sock: &Path, vmstate: &Path) -> Result<()> {
+    let _ = std::fs::remove_file(vmstate);
+    let r = api(
+        sock,
+        "PUT",
+        "/snapshot/create",
+        &json!({
+            "snapshot_type": "Full",
+            "snapshot_path": vmstate,
+            "mem_file_path": "/dev/null",
+        }),
+        SNAPSHOT_TIMEOUT,
+    );
+    match r {
+        Ok(_) => {}
+        Err(e) if format!("{e:#}").contains("memory backing file") => {}
+        Err(e) => return Err(e).context("saving the vmstate"),
+    }
+    let len = std::fs::metadata(vmstate).map_or(0, |m| m.len());
+    if len == 0 {
+        bail!("firecracker wrote no vmstate to {}", vmstate.display());
+    }
+    Ok(())
+}
+
+/// Bit 55 of a pagemap entry: written since the last clear.
+#[cfg(target_os = "linux")]
+const PM_SOFT_DIRTY: u64 = 1 << 55;
+
+/// Write the pages of `file` that a paused VM has written since its bits
+/// were last cleared into a sparse diff of `len` bytes at `out`, in the
+/// layout `apply_diff` reads. Returns how many pages it wrote.
+#[cfg(target_os = "linux")]
+fn write_dirty(pid: u32, file: &MappedFile, out: &Path, len: u64) -> Result<u64> {
+    use std::os::unix::fs::FileExt;
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+    let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))?;
+    let ranges = file.ranges(&maps);
+    if ranges.is_empty() {
+        bail!("the guest's memory is not mapped in {pid}");
+    }
+    let pagemap = std::fs::File::open(format!("/proc/{pid}/pagemap"))?;
+    let memf = std::fs::File::open(format!("/proc/{pid}/mem"))?;
+    let o = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(out)
+        .with_context(|| format!("creating {}", out.display()))?;
+    o.set_len(len)?;
+    let mut buf = vec![0u8; 1 << 20];
+    let mut written = 0;
+    for (start, end, off) in ranges {
+        let n = ((end - start) / page) as usize;
+        let mut entries = vec![0u8; n * 8];
+        pagemap.read_exact_at(&mut entries, start / page * 8)?;
+        let dirty = |i: usize| {
+            u64::from_le_bytes(entries[i * 8..i * 8 + 8].try_into().unwrap()) & PM_SOFT_DIRTY != 0
+        };
+        let mut i = 0;
+        while i < n {
+            if !dirty(i) {
+                i += 1;
+                continue;
+            }
+            let run = i;
+            while i < n && dirty(i) {
+                i += 1;
+            }
+            let (mut at, stop) = (run as u64 * page, i as u64 * page);
+            if off + stop > len {
+                bail!("the guest's memory runs past its {len}-byte image");
+            }
+            while at < stop {
+                let take = ((stop - at) as usize).min(buf.len());
+                memf.read_exact_at(&mut buf[..take], start + at)?;
+                o.write_all_at(&buf[..take], off + at)?;
+                at += take as u64;
+            }
+            written += (i - run) as u64;
+        }
+    }
+    Ok(written)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn write_dirty(_: u32, _: &MappedFile, _: &Path, _: u64) -> Result<u64> {
+    bail!("soft-dirty tracking is Linux's")
 }
 
 /// The memory files of an image, in chain order: `mem.0`, `mem.1`, ...
@@ -776,7 +1058,21 @@ fn clone_file(src: &std::fs::File, dst: &std::fs::File) -> Result<()> {
 /// Put the tap and the two NAT rules into the sandbox's namespace. Every
 /// step checks first, so this is safe to run again before every boot and
 /// restore -- which it must, since Snapshot releases the network.
+///
+/// The tap is addressed and brought up last, so a tap that is up with its
+/// address means everything before it is in place too: one `ip` to find
+/// that out, rather than the nine this takes from nothing. A namespace from
+/// `net::Pool` arrives that way, which is what the pool is for.
 fn ensure_tap(ns: &str) -> Result<()> {
+    let up = Exec::new("ip")
+        .args(["-n", ns, "-o", "-4", "addr", "show", "dev", TAP, "up"])
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(TAP_CIDR))
+        .unwrap_or(false);
+    if up {
+        return Ok(());
+    }
     let ok = |args: &[&str]| {
         Exec::new(args[0])
             .args(&args[1..])
@@ -802,11 +1098,6 @@ fn ensure_tap(ns: &str) -> Result<()> {
             &["ip", "-n", ns, "tuntap", "add", "dev", TAP, "mode", "tap"],
         )?;
     }
-    run(
-        "addressing the tap",
-        &["ip", "-n", ns, "addr", "replace", TAP_CIDR, "dev", TAP],
-    )?;
-    run("tap up", &["ip", "-n", ns, "link", "set", TAP, "up"])?;
     run(
         "forwarding in the namespace",
         &[
@@ -853,6 +1144,37 @@ fn ensure_tap(ns: &str) -> Result<()> {
             run("adding a NAT rule", &add)?;
         }
     }
+    run(
+        "fixing the tap's MAC",
+        &["ip", "-n", ns, "link", "set", TAP, "address", TAP_MAC],
+    )?;
+    // The guest's MAC is fixed, so its neighbour entry is too. Left to ARP,
+    // the first packet for a guest still booting asks, gets no answer, and
+    // the kernel asks again only a second later: on bare metal every cold
+    // sandbox answered at 1.1 s with its program listening from 0.6 s, the
+    // gateway's SYNs queued behind the second ARP.
+    run(
+        "pinning the guest's address",
+        &[
+            "ip",
+            "-n",
+            ns,
+            "neigh",
+            "replace",
+            GUEST_IP,
+            "lladdr",
+            GUEST_MAC,
+            "dev",
+            TAP,
+            "nud",
+            "permanent",
+        ],
+    )?;
+    run(
+        "addressing the tap",
+        &["ip", "-n", ns, "addr", "replace", TAP_CIDR, "dev", TAP],
+    )?;
+    run("tap up", &["ip", "-n", ns, "link", "set", TAP, "up"])?;
     Ok(())
 }
 
@@ -907,24 +1229,35 @@ fn is_timeout(e: &anyhow::Error) -> bool {
 /// A restored guest's clock is wherever it was when the image was taken.
 /// Best effort and bounded: a sandbox whose clock could not be set is still
 /// better served than one that was not restored.
+///
+/// One `set_time` to the agent, which sets it in-process. An agent from
+/// before that action answers with an error, and gets `date -s` through
+/// `exec` as before, which forks in the guest: 15 ms of a 30 ms warm
+/// restore on bm.
 fn sync_clock(ip: Ipv4Addr) {
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64())
+    };
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
-        if agent(ip, &json!({ "action": "ping" }), Duration::from_millis(500)).is_ok() {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs());
-            let req = json!({
-                "action": "exec",
-                "args": ["date", "-s", format!("@{now}")],
-                "timeout": 2,
-            });
-            if let Err(e) = agent(ip, &req, Duration::from_secs(3)) {
-                tracing::warn!(%ip, error = %e, "could not set a restored guest's clock");
+        let req = json!({ "action": "set_time", "unix": now() });
+        match agent(ip, &req, Duration::from_millis(500)) {
+            Ok(v) if v.get("ok").and_then(Value::as_bool) == Some(true) => return,
+            Ok(_) => {
+                let req = json!({
+                    "action": "exec",
+                    "args": ["date", "-s", format!("@{}", now() as u64)],
+                    "timeout": 2,
+                });
+                if let Err(e) = agent(ip, &req, Duration::from_secs(3)) {
+                    tracing::warn!(%ip, error = %e, "could not set a restored guest's clock");
+                }
+                return;
             }
-            return;
+            Err(_) => std::thread::sleep(Duration::from_millis(2)),
         }
-        std::thread::sleep(Duration::from_millis(20));
     }
     tracing::warn!(%ip, "a restored guest's agent did not answer; its clock is stale");
 }
@@ -1076,12 +1409,14 @@ mod tests {
             Path::new("/i/vmstate"),
             Path::new("/i/mem.0"),
             Path::new("/d/rootfs.ext4"),
+            || Ok(()),
         )
         .unwrap();
         let seen = seen.lock().unwrap();
         assert!(seen[0].starts_with("PUT /snapshot/load"));
         assert!(seen[0].contains(r#""resume_vm":false"#));
         assert!(seen[0].contains(r#""backend_type":"File""#));
+        assert!(seen[0].contains(r#""enable_diff_snapshots":false"#));
         assert!(seen[1].starts_with("PATCH /drives/rootfs"));
         assert!(seen[1].contains("/d/rootfs.ext4"));
         assert_eq!(seen[2], r#"PATCH /vm HTTP/1.1 {"state":"Resumed"}"#);
@@ -1089,10 +1424,38 @@ mod tests {
     }
 
     #[test]
+    fn the_guests_memory_is_found_by_device_and_inode() {
+        let f = MappedFile {
+            dev: "fd:01".into(),
+            inode: 42,
+        };
+        let maps = "\
+7f0000000000-7f0010000000 rw-p 00000000 fd:01 42      /x/.mem.assembled (deleted)
+7f0010000000-7f0020000000 rw-p 10000000 fd:01 42      /x/.mem.assembled (deleted)
+7f0020000000-7f0021000000 rw-p 00000000 fd:02 42      /y/mem.0
+7f0030000000-7f0031000000 rw-p 00000000 00:00 0
+";
+        assert_eq!(
+            f.ranges(maps),
+            [
+                (0x7f00_0000_0000, 0x7f00_1000_0000, 0),
+                (0x7f00_1000_0000, 0x7f00_2000_0000, 0x1000_0000)
+            ]
+        );
+    }
+
+    #[test]
     fn a_failed_repoint_never_resumes() {
         let dir = TempDir::new().unwrap();
         let (sock, seen) = fake_api(dir.path(), vec![204, 400]);
-        assert!(load(&sock, Path::new("/v"), Path::new("/m"), Path::new("/d")).is_err());
+        assert!(load(
+            &sock,
+            Path::new("/v"),
+            Path::new("/m"),
+            Path::new("/d"),
+            || Ok(())
+        )
+        .is_err());
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
         assert!(!seen.iter().any(|l| l.contains("Resumed")));
@@ -1127,6 +1490,11 @@ mod tests {
         .unwrap();
         assert!(a.contains("init=/sandstorm-init.sh"));
         assert!(a.contains("ip=10.42.0.2::10.42.0.1:255.255.255.252::eth0:off"));
+        // Without these the guest kernel waits for a PS/2 controller that
+        // Firecracker does not emulate: half a second of every cold boot.
+        for opt in ["i8042.noaux", "i8042.nomux", "i8042.nopnp", "i8042.dumbkbd"] {
+            assert!(a.split(' ').any(|w| w == opt), "{opt} missing from {a}");
+        }
         let hex = a.rsplit("sandstorm.app=").next().unwrap();
         let app: Value = serde_json::from_slice(&hex::decode(hex).unwrap()).unwrap();
         assert_eq!(app["args"][3], "8000", "{{PORT}} must be substituted");

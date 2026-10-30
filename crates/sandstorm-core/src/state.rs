@@ -13,6 +13,7 @@
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -112,6 +113,9 @@ pub struct SnapshotTag {
     pub from_sandbox: Option<String>,
     pub created_at: i64,
     pub size_bytes: u64,
+    /// The port that sandbox served on, which its forks serve on too: the
+    /// image holds the program already listening there.
+    pub port: Option<u16>,
 }
 
 /// How to reach a node the master drives.
@@ -156,6 +160,15 @@ pub enum CertOwner {
 
 pub struct Store {
     conn: Connection,
+}
+
+/// One node in one pool for a while; `until` is `None` for where it is now.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PoolStretch {
+    pub node: String,
+    pub pool: String,
+    pub since: i64,
+    pub until: Option<i64>,
 }
 
 impl Store {
@@ -229,6 +242,18 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_sandboxes_node ON sandboxes(node_id);
             CREATE INDEX IF NOT EXISTS idx_sandboxes_tier ON sandboxes(tier);
             CREATE INDEX IF NOT EXISTS idx_sandboxes_idle ON sandboxes(last_active_at);
+
+            -- Which pool each node was in, and when. History is kept per
+            -- node (series.rs), so this is what lets the console add it up
+            -- per pool: a node that moved pools counts toward each for the
+            -- time it was there. `until` is NULL for where it is now.
+            CREATE TABLE IF NOT EXISTS node_pools (
+                node_id TEXT NOT NULL,
+                pool    TEXT NOT NULL,
+                since   INTEGER NOT NULL,
+                until   INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_node_pools_node ON node_pools(node_id);
 
             -- Short-lived bearer tokens a new node exchanges for a client
             -- certificate. Single use: consumed_at is set on redemption.
@@ -306,6 +331,10 @@ impl Store {
             "ALTER TABLE sandboxes ADD COLUMN ip TEXT",
             "ALTER TABLE sandboxes ADD COLUMN from_tag TEXT",
             "ALTER TABLE sandboxes ADD COLUMN memory_limit_mib INTEGER",
+            // The branched sandbox's port. Before it, a fork defaulted to
+            // 8080 whatever its parent listened on, and a child of one on
+            // 8000 never answered.
+            "ALTER TABLE snapshots ADD COLUMN port INTEGER",
             // Set only for a node the master connects to (listen mode): where
             // it is, the certificate it must present, and the secret to
             // present back. NULL means the node dials in, and the master
@@ -313,6 +342,10 @@ impl Store {
             "ALTER TABLE nodes ADD COLUMN agent_address TEXT",
             "ALTER TABLE nodes ADD COLUMN agent_cert_sha256 TEXT",
             "ALTER TABLE nodes ADD COLUMN agent_secret TEXT",
+            // What the node's fingerprint is made of, as JSON (`HostInfo`).
+            // Only for showing an operator why two nodes are in different
+            // pools; placement keys on `fingerprint` alone.
+            "ALTER TABLE nodes ADD COLUMN host TEXT",
         ] {
             match self.conn.execute(ddl, []) {
                 Ok(_) => {}
@@ -320,6 +353,14 @@ impl Store {
                 Err(e) => return Err(e.into()),
             }
         }
+        // Nodes from before the history existed have been where they are
+        // for as long as the history goes back.
+        self.conn.execute(
+            "INSERT INTO node_pools (node_id, pool, since)
+             SELECT id, pool, 0 FROM nodes
+             WHERE id NOT IN (SELECT node_id FROM node_pools WHERE until IS NULL)",
+            [],
+        )?;
         Ok(())
     }
 
@@ -372,7 +413,122 @@ impl Store {
                 n.connected as i32
             ],
         )?;
+        self.note_pool(&n.id, &n.pool)
+    }
+
+    /// Record that a node is in `pool` from now, closing where it was. A
+    /// no-op when it is already there.
+    fn note_pool(&self, node: &str, pool: &str) -> Result<()> {
+        let now: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT pool FROM node_pools WHERE node_id=?1 AND until IS NULL",
+                params![node],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if now.as_deref() == Some(pool) {
+            return Ok(());
+        }
+        let t = now_secs();
+        self.conn.execute(
+            "UPDATE node_pools SET until=?2 WHERE node_id=?1 AND until IS NULL",
+            params![node, t],
+        )?;
+        self.conn.execute(
+            "INSERT INTO node_pools (node_id, pool, since) VALUES (?1, ?2, ?3)",
+            params![node, pool, t],
+        )?;
         Ok(())
+    }
+
+    /// Every stretch of every node's pool membership, oldest first.
+    pub fn node_pools(&self) -> Result<Vec<PoolStretch>> {
+        let mut st = self.conn.prepare(
+            "SELECT node_id, pool, since, until FROM node_pools ORDER BY since, node_id",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok(PoolStretch {
+                node: r.get(0)?,
+                pool: r.get(1)?,
+                since: r.get(2)?,
+                until: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// A node reports a fingerprint other than the one it registered with:
+    /// runsc or the kernel was upgraded under it. Move it exactly as
+    /// registration would have placed it -- into the pool it is in, by name,
+    /// if every other node there matches, otherwise into `<pool>#<fp8>` --
+    /// so snapshots it can no longer restore are never scheduled onto it.
+    ///
+    /// A rolling upgrade moves nodes one at a time into `<pool>#<fp8>`. When
+    /// the last one leaves the old fingerprint behind, the pool's name has
+    /// only the new fingerprint left in it, and the group that went ahead
+    /// comes back under the name rather than living on as a second pool of
+    /// the same hosts. Returns `(from, to)` when the node moved.
+    pub fn refingerprint_node(&self, id: &str, fp: &str) -> Result<Option<(String, String)>> {
+        let tx = self.transaction()?;
+        let Some((pool, old)) = tx
+            .query_row(
+                "SELECT pool, fingerprint FROM nodes WHERE id=?1",
+                params![id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        if old == fp {
+            return Ok(None);
+        }
+        let base = pool.split('#').next().unwrap_or(&pool).to_string();
+        let derived = format!("{base}#{}", &fp[..8.min(fp.len())]);
+        let others: Vec<String> = {
+            let mut st = self.conn.prepare(
+                "SELECT DISTINCT fingerprint FROM nodes WHERE pool=?1 AND id!=?2 AND revoked=0",
+            )?;
+            let rows = st.query_map(params![base, id], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let target = if others.iter().all(|f| f == fp) {
+            base.clone()
+        } else {
+            derived.clone()
+        };
+        self.conn.execute(
+            "UPDATE nodes SET fingerprint=?2, pool=?3 WHERE id=?1",
+            params![id, fp, target],
+        )?;
+        self.conn.execute(
+            "UPDATE sandboxes SET pool=?2 WHERE node_id=?1",
+            params![id, target],
+        )?;
+        self.note_pool(id, &target)?;
+        // The pool's name now holds only this fingerprint: bring the group
+        // that went ahead back under it.
+        if target == base && derived != base {
+            let ahead: Vec<String> = {
+                let mut st = self.conn.prepare("SELECT id FROM nodes WHERE pool=?1")?;
+                let rows = st.query_map(params![derived], |r| r.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            for n in &ahead {
+                self.conn
+                    .execute("UPDATE nodes SET pool=?2 WHERE id=?1", params![n, base])?;
+                self.note_pool(n, &base)?;
+            }
+            for table in ["sandboxes", "node_tokens"] {
+                self.conn.execute(
+                    &format!("UPDATE {table} SET pool=?2 WHERE pool=?1"),
+                    params![derived, base],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok((pool != target).then_some((pool, target)))
     }
 
     /// Called once when the master starts. Connectivity is a live fact that
@@ -492,6 +648,27 @@ impl Store {
             params![tag, fp],
         )?;
         Ok(())
+    }
+
+    /// Record what a node's fingerprint is made of.
+    pub fn set_node_host(&self, id: &str, host: &crate::proto::HostInfo) -> Result<()> {
+        self.conn.execute(
+            "UPDATE nodes SET host=?2 WHERE id=?1",
+            params![id, serde_json::to_string(host)?],
+        )?;
+        Ok(())
+    }
+
+    /// What each node's fingerprint is made of, for the nodes that have said.
+    pub fn node_hosts(&self) -> Result<HashMap<String, crate::proto::HostInfo>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT id, host FROM nodes WHERE host IS NOT NULL")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows
+            .filter_map(|r| r.ok())
+            .filter_map(|(id, j)| Some((id, serde_json::from_str(&j).ok()?)))
+            .collect())
     }
 
     /// The host fingerprint a node reported at registration.
@@ -651,6 +828,17 @@ impl Store {
             params![node_id],
             |r| r.get(0),
         )?)
+    }
+
+    /// Snapshot tags baked on each node, by node.
+    pub fn count_snapshots_by_node(&self) -> Result<HashMap<String, u32>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT node_id, COUNT(*) FROM snapshots GROUP BY node_id")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<HashMap<String, u32>>>()?;
+        Ok(rows)
     }
 
     /// Sandbox counts keyed by tier name.
@@ -975,19 +1163,20 @@ impl Store {
 
     pub fn put_snapshot(&self, s: &SnapshotTag) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO snapshots (tag, node_id, template, from_sandbox, created_at, size_bytes)
-             VALUES (?1,?2,?3,?4,?5,?6)
+            "INSERT INTO snapshots (tag, node_id, template, from_sandbox, created_at, size_bytes, port)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(tag) DO UPDATE SET
                 node_id=excluded.node_id, template=excluded.template,
                 from_sandbox=excluded.from_sandbox, created_at=excluded.created_at,
-                size_bytes=excluded.size_bytes",
+                size_bytes=excluded.size_bytes, port=excluded.port",
             params![
                 s.tag,
                 s.node_id,
                 s.template,
                 s.from_sandbox,
                 s.created_at,
-                s.size_bytes as i64
+                s.size_bytes as i64,
+                s.port
             ],
         )?;
         Ok(())
@@ -997,7 +1186,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT tag, node_id, template, from_sandbox, created_at, size_bytes
+                "SELECT tag, node_id, template, from_sandbox, created_at, size_bytes, port
                  FROM snapshots WHERE tag=?1",
                 params![tag],
                 Self::row_to_snapshot,
@@ -1007,7 +1196,7 @@ impl Store {
 
     pub fn list_snapshots(&self) -> Result<Vec<SnapshotTag>> {
         let mut stmt = self.conn.prepare(
-            "SELECT tag, node_id, template, from_sandbox, created_at, size_bytes
+            "SELECT tag, node_id, template, from_sandbox, created_at, size_bytes, port
              FROM snapshots ORDER BY created_at DESC",
         )?;
         let rows = stmt
@@ -1042,6 +1231,7 @@ impl Store {
             from_sandbox: r.get(3)?,
             created_at: r.get(4)?,
             size_bytes: r.get::<_, i64>(5)? as u64,
+            port: r.get(6)?,
         })
     }
 
@@ -1090,6 +1280,109 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tag_keeps_the_port_its_forks_serve_on() {
+        let st = Store::open_in_memory().unwrap();
+        let tag = |name: &str, port| SnapshotTag {
+            tag: name.into(),
+            node_id: "n1".into(),
+            template: "app64".into(),
+            from_sandbox: Some("sb-1".into()),
+            created_at: now_secs(),
+            size_bytes: 1,
+            port,
+        };
+        st.put_snapshot(&tag("on8000", Some(8000))).unwrap();
+        st.put_snapshot(&tag("older", None)).unwrap();
+        assert_eq!(st.get_snapshot("on8000").unwrap().unwrap().port, Some(8000));
+        // A tag from before the column: the fork falls back to the default.
+        assert_eq!(st.get_snapshot("older").unwrap().unwrap().port, None);
+        assert_eq!(st.list_snapshots().unwrap().len(), 2);
+    }
+
+    /// A rolling upgrade: each upgraded node leaves for `<pool>#<fp8>`,
+    /// and when the last one goes, the pool's name has only the new
+    /// fingerprint left and the group comes back under it. The history keeps
+    /// every step.
+    #[test]
+    fn an_upgraded_node_moves_pools_and_the_last_one_brings_them_back() {
+        let s = Store::open_in_memory().unwrap();
+        for id in ["a", "b", "c"] {
+            s.upsert_node(&Node {
+                id: id.into(),
+                pool: "default".into(),
+                fingerprint: "old00000".into(),
+                max_sandboxes: 1,
+                last_seen_at: 0,
+                connected: true,
+                free_mib: 0,
+                psi_some_avg10: 0.0,
+            })
+            .unwrap();
+        }
+        let pool_of = |id: &str| {
+            s.list_nodes()
+                .unwrap()
+                .into_iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .pool
+        };
+        assert_eq!(s.refingerprint_node("a", "old00000").unwrap(), None);
+        assert_eq!(
+            s.refingerprint_node("a", "new11111").unwrap(),
+            Some(("default".into(), "default#new11111".into()))
+        );
+        s.refingerprint_node("b", "new11111").unwrap();
+        assert_eq!(pool_of("b"), "default#new11111");
+        assert_eq!(pool_of("c"), "default");
+        // c is the last on the old fingerprint; once it moves, all are back.
+        assert_eq!(s.refingerprint_node("c", "new11111").unwrap(), None);
+        for id in ["a", "b", "c"] {
+            assert_eq!(pool_of(id), "default", "{id}");
+        }
+        let a: Vec<String> = s
+            .node_pools()
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.node == "a")
+            .map(|p| p.pool)
+            .collect();
+        assert_eq!(a, vec!["default", "default#new11111", "default"]);
+    }
+
+    /// What a node's fingerprint is made of is kept per node and survives a
+    /// reopen; a node that never said has no entry rather than an empty one.
+    #[test]
+    fn a_nodes_host_is_kept() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("s.db");
+        let s = Store::open(&path).unwrap();
+        for id in ["a", "b"] {
+            s.upsert_node(&Node {
+                id: id.into(),
+                pool: "default".into(),
+                fingerprint: "fp".into(),
+                max_sandboxes: 1,
+                last_seen_at: 0,
+                connected: true,
+                free_mib: 0,
+                psi_some_avg10: 0.0,
+            })
+            .unwrap();
+        }
+        let h = crate::proto::HostInfo {
+            kernel: "7.0.0".into(),
+            cpu_flags: "fpu avx512f".into(),
+            ..Default::default()
+        };
+        s.set_node_host("a", &h).unwrap();
+        drop(s);
+        let hosts = Store::open(&path).unwrap().node_hosts().unwrap();
+        assert_eq!(hosts.get("a"), Some(&h));
+        assert!(!hosts.contains_key("b"));
+    }
 
     fn sb(id: &str, node: &str) -> Sandbox {
         let t = now_secs();

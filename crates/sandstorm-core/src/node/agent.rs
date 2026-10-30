@@ -201,7 +201,7 @@ async fn sync(
             for cmd in commands {
                 asked_about.push(command_id(cmd).to_string());
                 match run_one(&agent.cfg, rt, failing, wake, cmd, now) {
-                    Step::Done => {}
+                    Step::Done => super::expose_created(rt, gateway, cmd).await,
                     Step::Later(wait) => soonest = sooner(soonest, wait),
                     Step::Answered(r) => results.push(r),
                 }
@@ -250,6 +250,7 @@ pub async fn serve_listen(cfg: NodeConfig, listen: SocketAddr) -> Result<()> {
         node_id: cfg.node_id.clone(),
         fingerprint: rt.fingerprint(),
         max_sandboxes: cfg.runtime.max_sandboxes,
+        host: Some(rt.host()),
     };
 
     let code_path = cfg.pki_dir.join(CODE);
