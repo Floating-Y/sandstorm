@@ -3075,7 +3075,7 @@ pub(super) async fn create_sandbox(
     let placed: Vec<(String, String)> = match &place {
         // A template's children share one node, as they always have.
         Place::Pool(pool, backend) => {
-            let n = pick_node(&st, &store, pool, *backend, &template).inspect_err(|_| {
+            let n = pick_node(&st, &store, pool, *backend, &template, count).inspect_err(|_| {
                 // Counted here rather than from the status code: a 503
                 // out of the scheduler means the fleet had no room,
                 // which is a different thing from the master being
@@ -3109,6 +3109,7 @@ pub(super) async fn create_sandbox(
                     &format!("the pool tag {tag} restores in"),
                     |n| &n.fingerprint == fingerprint,
                     &extra,
+                    1,
                 )
                 .inspect_err(|_| {
                     st.metrics.creates_refused.fetch_add(1, Relaxed);
@@ -3248,6 +3249,7 @@ fn pick_node(
     pool: &str,
     backend: Option<BackendKind>,
     template: &str,
+    count: u32,
 ) -> Result<Node, ApiErr> {
     let group = format!("{pool}#");
     let hosts = match backend {
@@ -3285,6 +3287,7 @@ fn pick_node(
         &format!("pool {pool}"),
         |n| in_pool(n) && st.can_start(&n.id, template),
         &HashMap::new(),
+        count,
     )
 }
 
@@ -3302,6 +3305,7 @@ fn pick_node_where(
     what: &str,
     fits: impl Fn(&Node) -> bool,
     extra: &HashMap<String, u32>,
+    batch_size: u32,
 ) -> Result<Node, ApiErr> {
     let nodes = store
         .list_nodes()
@@ -3319,6 +3323,15 @@ fn pick_node_where(
             + extra.get(&n.id).copied().unwrap_or(0);
         if let Some(why) = st.admit.refuse(&n, load) {
             refused.push(format!("{}: {why}", n.id));
+            continue;
+        }
+        if n.max_sandboxes > 0
+            && u64::from(load) + u64::from(batch_size) > u64::from(n.max_sandboxes)
+        {
+            refused.push(format!(
+                "{}: {load} sandboxes plus batch of {batch_size} exceeds its cap of {}",
+                n.id, n.max_sandboxes
+            ));
             continue;
         }
         if best.as_ref().is_none_or(|(_, b)| load < *b) {

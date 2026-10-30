@@ -3170,6 +3170,110 @@ async fn a_held_back_create_is_never_given_up_on() {
     );
 }
 
+#[tokio::test]
+async fn pool_batch_respects_whole_node_capacity() {
+    // (capacity, existing count, requested count, expected status)
+    for (capacity, existing, requested, status) in [
+        (1, 0, 2, 503),
+        (2, 1, 2, 503),
+        (3, 1, 2, 201),
+        (0, 1, 3, 201),
+        (1, 0, 1, 201),
+        (1, 1, 1, 503),
+    ] {
+        let h = start().await;
+        register_with_cap(&h, "node", "default", capacity).await;
+        put_template(&h, "python").await;
+        let c = reqwest::Client::new();
+        for _ in 0..existing {
+            let r = c
+                .post(format!("{}/v1/sandboxes", h.base))
+                .json(&serde_json::json!({"template": "python"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 201);
+        }
+        let store = Store::open(h._td.path().join("state.db")).unwrap();
+        let before = format!("{:?}", store.list_sandboxes().unwrap());
+        let port_before = store.allocate_gateway_port("node", 20000, 20010).unwrap();
+        let net_before = store.allocate_net_index("node", 100).unwrap();
+        let r = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({"template": "python", "n": requested}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            status,
+            "capacity={capacity}, existing={existing}, requested={requested}"
+        );
+        if status == 503 {
+            assert_eq!(format!("{:?}", store.list_sandboxes().unwrap()), before);
+            assert_eq!(
+                store.allocate_gateway_port("node", 20000, 20010).unwrap(),
+                port_before
+            );
+            assert_eq!(store.allocate_net_index("node", 100).unwrap(), net_before);
+            let metrics = c
+                .get(format!("{}/metrics", h.base))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            assert!(
+                metrics.contains("sandstorm_sandbox_creates_total{outcome=\"refused\"} 1\n"),
+                "{metrics}"
+            );
+        } else {
+            assert_eq!(
+                store.list_sandboxes().unwrap().len(),
+                (existing + requested) as usize
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn pool_batch_selects_a_node_with_room_without_splitting() {
+    for large_capacity in [2, 3] {
+        let h = start().await;
+        register_with_cap(&h, "small", "default", 1).await;
+        register_with_cap(&h, "large", "default", large_capacity).await;
+        put_template(&h, "python").await;
+        let c = reqwest::Client::new();
+        let r = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({"template": "python", "node_id": "large"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 201);
+        let store = Store::open(h._td.path().join("state.db")).unwrap();
+        assert_eq!(store.count_sandboxes_on_node("large").unwrap(), 1);
+        let before = format!("{:?}", store.list_sandboxes().unwrap());
+        let r = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({"template": "python", "n": 2}))
+            .send()
+            .await
+            .unwrap();
+        if large_capacity == 2 {
+            assert_eq!(r.status(), 503);
+            assert_eq!(format!("{:?}", store.list_sandboxes().unwrap()), before);
+        } else {
+            assert_eq!(r.status(), 201);
+            let children: Vec<serde_json::Value> = r.json().await.unwrap();
+            assert_eq!(children.len(), 2);
+            assert!(children.iter().all(|child| child["node_id"] == "large"));
+        }
+        assert_eq!(store.count_sandboxes_on_node("small").unwrap(), 0);
+    }
+}
+
 /// A node registered before it reported what its fingerprint is made of
 /// (an older node, or any node after a master restart) brings it with its
 /// next poll, and the master keeps it for the console. The poll already holds
