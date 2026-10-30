@@ -2,20 +2,20 @@
 
 sandstorm is alpha software. The threat model and current guarantees are
 documented below so operators can decide what workload they are
-willing to point at it. This document describes the current v0.6 development
-tree; v0.6 has not been released yet.
+willing to point at it. It describes the v0.6 development tree, which is not
+released yet.
 
 ## Which boundary you actually get
 
-`sandstormd` defaults to gVisor (`--backend runsc`) and also implements
-a Firecracker backend (`--backend firecracker`). The isolation boundary
-depends on the backend selected for the node.
+Each node runs gVisor (`--backend runsc`, the default) or Firecracker
+(`--backend firecracker`), and the boundary depends on which.
 
 | | gVisor backend | Firecracker backend |
 |---|---|---|
 | Sandbox | gVisor `runsc` container | Firecracker microVM |
 | Guest kernel | the gVisor Sentry, in user space | its own Linux kernel |
-| Host boundary | Sentry runs as a host process | the VMM uses host KVM |
+| Host kernel | **shared with every sandbox** | reached only through KVM |
+| Escaping needs | a Sentry bug, or a hole in the host seccomp behind it | a KVM or Firecracker bug |
 | Needs `/dev/kvm` | no | yes |
 
 **Why gVisor is the default.** It can run without `/dev/kvm`. The
@@ -23,19 +23,16 @@ Firecracker backend requires a host with KVM and a guest kernel image.
 
 So, concretely:
 
-1. **The host kernel and the selected runtime (`runsc` or Firecracker) are
-   part of the TCB.** A compromised host can do anything to its sandboxes.
-   sandstorm does not try to
-   protect against a hostile administrator.
+1. **The host kernel and the runtime (`runsc` or Firecracker) are part of
+   the TCB.** A compromised host can do anything to its sandboxes. sandstorm
+   does not try to protect against a hostile administrator.
 
 2. **Sandboxes are mutually untrusted, with the boundary above.** Each
-   sandbox gets its own network namespace, its own cgroup and its own
-   writable layer. gVisor uses a user-space Sentry and shares the host
-   kernel. An escape from the Sentry can expose the host and other
-   sandboxes on it. Do not treat gVisor as equivalent to a VM for hostile
-   code. Firecracker runs a separate guest kernel in a microVM. Assess the
-   selected runtime and its host configuration together; a host compromise
-   affects its sandboxes.
+   sandbox gets its own network namespace, cgroup and writable layer. Under
+   gVisor all sandboxes on a node share the host kernel, so a Sentry escape
+   can reach the host and its other sandboxes: do not treat gVisor as
+   equivalent to a VM for hostile code. Firecracker gives each sandbox its
+   own guest kernel, and is the stronger choice on a host with KVM.
 
 3. **The control plane is a root credential.** The API's bearer token grants
    full control over the sandboxes and snapshots of every node attached to
@@ -44,7 +41,7 @@ So, concretely:
 
 ## Default posture
 
-These are `sandstormd`'s defaults in the current development tree.
+These are `sandstormd`'s defaults.
 
 | Concern | Default | Notes |
 |---|---|---|
@@ -56,15 +53,15 @@ These are `sandstormd`'s defaults in the current development tree.
 | Per-sandbox netns | **always** | Not an option any more. `per_child_netns` is accepted and ignored |
 | Sibling and egress traffic | **dropped** (`FORWARD`) | Covers siblings and the internet without relying on `ip_forward` |
 | Host services on the veth | **dropped** (`INPUT`) | sshd listens on `0.0.0.0`, so it answers on the veth too; only established replies are let back |
-| Cold sandbox ports | From the node host, frozen sandboxes reject direct TCP connections (`SANDSTORM-COLD`, TCP reset); snapshotted sandboxes have no reachable namespace | The HTTP gateway can wake a cold sandbox and retry the connection before forwarding the request |
+| Cold sandbox ports | Frozen: direct connections are **refused** (`SANDSTORM-COLD`, TCP reset). Snapshotted: no namespace, so unreachable | The HTTP gateway wakes a cold sandbox and retries before forwarding the request |
 | Per-sandbox memory cap | gVisor: none; Firecracker: 512 MiB guest memory by default | `memory_limit_mib` configures the limit; Firecracker adds 64 MiB for the VMM to its cgroup `memory.max` |
-| API audit log | not wired up | The audit middleware exists but is not attached to the API router |
+| API audit log | **none** | The middleware exists but is not attached to the API router |
 
-Sandbox HTTP gateways listen on `0.0.0.0` at their assigned node ports and
-check `x-sandstorm-sandbox-token`, as do the API's `exec`, `eval` and `ping`
-endpoints. Tokens contain 128 random bits. Automatically generated IDs are
-`sb-` plus 32 hex characters (128 random bits); supplied IDs need not be
-random and do not replace access tokens.
+Sandbox gateways listen on `0.0.0.0` at their node ports and check
+`x-sandstorm-sandbox-token`, as do the API's `exec`, `eval` and `ping`
+endpoints. Tokens have 128 random bits, as do generated IDs (`sb-` plus 32 hex
+characters). A caller-supplied ID need not be random, and no ID replaces a
+token.
 
 ## Known gaps
 
@@ -73,12 +70,10 @@ not:
 
 - **Node gateways serve plain HTTP.** Control-plane TLS does not encrypt
   their sandbox tokens or application traffic.
-- **The E2B front door does not authenticate sandbox port requests.** When
-  enabled, it supplies the sandbox token itself for E2B-created sandboxes.
-  Anyone who can reach the front door and knows such a sandbox's ID can
-  access its ports without an API key or sandbox token, subject to any
-  authentication in the application. The E2B management API still requires
-  an API key.
+- **The E2B front door does not authenticate requests to sandbox ports.** It
+  adds the sandbox token itself, so anyone who can reach it and knows an E2B
+  sandbox's ID reaches that sandbox's ports, stopped only by the application's
+  own authentication. The E2B API still requires a key.
 - **One API token, no scopes or tenants.** The `owner` column exists in the
   schema and nothing reads it.
 
@@ -138,11 +133,9 @@ Operationally:
   Its parked connection is dropped at once.
 - **TLS does not imply API authentication.** The bearer token is separate
   and is on by default; `--api-open` turns it off and says so loudly.
-- Nodes must verify the master's pinned CA. A TLS-terminating proxy with a
-  different CA breaks that pin. With node certificate checks enabled, the
-  master rejects node control requests without a recognized client
-  certificate; it does not automatically fall back to trusting a claimed
-  node ID. `--insecure-transport` explicitly disables those checks.
+- **A TLS-terminating proxy with a different CA breaks the pin.** The master
+  rejects node requests without a recognized client certificate and does not
+  fall back to a claimed node ID. Only `--insecure-transport` turns that off.
 
 ## What sandstorm does not do (yet)
 
